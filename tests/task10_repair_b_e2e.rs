@@ -96,6 +96,7 @@ fn release_workflow_pins_cross_and_verifies_source_and_architectures() -> TestRe
         "git describe --tags --exact-match HEAD",
         "cargo metadata --locked --no-deps",
         "cargo run --locked --quiet -- --version",
+        "gh release upload \"$tag\" dist/* --clobber --repo \"$GITHUB_REPOSITORY\"",
         "aarch64-apple-darwin) printf",
         "x86_64-apple-darwin) printf",
         "aarch64-unknown-linux-musl) printf",
