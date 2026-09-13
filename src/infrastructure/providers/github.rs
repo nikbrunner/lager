@@ -6,7 +6,7 @@ use serde::Deserialize;
 use crate::domain::config::ProviderConfig;
 use crate::domain::repository::{RepositoryRef, RepositorySummary};
 
-const PAGE_QUERY: &str = "query($endCursor:String){viewer{repositories(first:100,after:$endCursor){nodes{name isArchived isPrivate viewerCanAccess sshUrl owner{login}} pageInfo{hasNextPage endCursor}}}}";
+const PAGE_QUERY: &str = "query($endCursor:String){viewer{repositories(first:100,after:$endCursor){nodes{name isArchived isPrivate sshUrl owner{login}} pageInfo{hasNextPage endCursor}}}}";
 
 #[derive(Debug, Clone)]
 pub struct Github {
@@ -59,8 +59,6 @@ struct PageInfo {
 struct Repository {
     #[serde(rename = "isArchived")]
     is_archived: bool,
-    #[serde(rename = "viewerCanAccess")]
-    viewer_can_access: bool,
     #[serde(rename = "sshUrl")]
     ssh_url: String,
     owner: Owner,
@@ -101,7 +99,7 @@ impl Github {
             } = data.viewer.repositories.page_info;
             let _ = (has_next_page, end_cursor);
             for repository in data.viewer.repositories.nodes {
-                if !repository.viewer_can_access || (!include_archived && repository.is_archived) {
+                if !include_archived && repository.is_archived {
                     continue;
                 }
                 result.push(summary(&self.host, &self.config, repository));
@@ -122,7 +120,7 @@ impl Github {
             .filter(|name| !name.is_empty())
             .ok_or_else(|| "GitHub wildcard requires an organization".to_owned())?;
         let query = format!(
-            "query($endCursor:String){{organization(login:{organization:?}){{repositories(first:100,after:$endCursor){{nodes{{name isArchived isPrivate viewerCanAccess sshUrl owner{{login}}}} pageInfo{{hasNextPage endCursor}}}}}}}}"
+            "query($endCursor:String){{organization(login:{organization:?}){{repositories(first:100,after:$endCursor){{nodes{{name isArchived isPrivate sshUrl owner{{login}}}} pageInfo{{hasNextPage endCursor}}}}}}}}"
         );
         let pages: Vec<Page<OrganizationData>> = self.query(&query)?;
         let mut result = Vec::new();
@@ -137,7 +135,7 @@ impl Github {
             } = organization.repositories.page_info;
             let _ = (has_next_page, end_cursor);
             for repository in organization.repositories.nodes {
-                if !repository.viewer_can_access || (!include_archived && repository.is_archived) {
+                if !include_archived && repository.is_archived {
                     continue;
                 }
                 result.push(summary(&self.host, &self.config, repository));
@@ -198,7 +196,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn adapter_runs_gh_pagination_filters_access_and_materializes_ssh() {
+    fn adapter_runs_gh_pagination_filters_archived_and_materializes_ssh() {
         let temp = tempfile::tempdir().unwrap();
         let executable = temp.path().join("gh");
         let log = temp.path().join("args");
@@ -207,7 +205,7 @@ mod tests {
             r##"#!/bin/sh
 printf '%s' "$*" > "$GH_DIRECT_ARGS"
 cat <<'JSON'
-[{"data":{"viewer":{"repositories":{"nodes":[{"name":"active","isArchived":false,"viewerCanAccess":true,"sshUrl":"ssh://returned@ghe.example:2222/org/active.git","owner":{"login":"org"}},{"name":"old","isArchived":true,"viewerCanAccess":true,"sshUrl":"ssh://returned@ghe.example:2222/org/old.git","owner":{"login":"org"}},{"name":"private","isArchived":false,"viewerCanAccess":false,"sshUrl":"ssh://returned@ghe.example:2222/org/private.git","owner":{"login":"org"}}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}},{"data":{"viewer":{"repositories":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]
+[{"data":{"viewer":{"repositories":{"nodes":[{"name":"active","isArchived":false,"sshUrl":"ssh://returned@ghe.example:2222/org/active.git","owner":{"login":"org"}},{"name":"old","isArchived":true,"sshUrl":"ssh://returned@ghe.example:2222/org/old.git","owner":{"login":"org"}}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}},{"data":{"viewer":{"repositories":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]
 JSON
 "##,
         )
