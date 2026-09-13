@@ -160,8 +160,14 @@ fn github_catalog_drives_register_add_multi_selection_and_cancellation()
         &bin.join("gh"),
         r##"#!/bin/sh
 printf '%s' "$*" > "$GH_ARGS_LOG"
+case "$*" in
+  *viewerCanAccess*)
+    printf '%s\n' "gh: Field 'viewerCanAccess' doesn't exist on type 'Repository'" >&2
+    exit 1
+    ;;
+esac
 cat <<'JSON'
-[{"data":{"viewer":{"repositories":{"nodes":[{"name":"one","isArchived":false,"viewerCanAccess":true,"sshUrl":"git@github.com:org/one.git","owner":{"login":"org"}}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}},{"data":{"viewer":{"repositories":{"nodes":[{"name":"two","isArchived":false,"viewerCanAccess":true,"sshUrl":"git@github.com:org/two.git","owner":{"login":"org"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]
+[{"data":{"viewer":{"repositories":{"nodes":[{"name":"one","isArchived":false,"sshUrl":"git@github.com:org/one.git","owner":{"login":"org"}}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}},{"data":{"viewer":{"repositories":{"nodes":[{"name":"two","isArchived":false,"sshUrl":"git@github.com:org/two.git","owner":{"login":"org"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]
 JSON
 "##,
     )?;
@@ -307,7 +313,7 @@ fn remote_list_uses_configured_github_cli_and_filters_archived_repositories()
         &gh,
         r##"#!/bin/sh
 cat <<'JSON'
-[{"data":{"organization":{"repositories":{"nodes":[{"name":"active","isArchived":false,"viewerCanAccess":true,"sshUrl":"git@github.com:org/active.git","owner":{"login":"org"}},{"name":"old","isArchived":true,"viewerCanAccess":true,"sshUrl":"git@github.com:org/old.git","owner":{"login":"org"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]
+[{"data":{"organization":{"repositories":{"nodes":[{"name":"active","isArchived":false,"sshUrl":"git@github.com:org/active.git","owner":{"login":"org"}},{"name":"old","isArchived":true,"sshUrl":"git@github.com:org/old.git","owner":{"login":"org"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]
 JSON
 "##,
     )?;
@@ -592,10 +598,10 @@ fn add_keeps_selected_repository_when_another_provider_fails()
         r##"#!/bin/sh
 case "$*" in
   *organization*)
-    printf '%s' '[{"data":{"organization":{"repositories":{"nodes":[{"name":"active","isArchived":false,"viewerCanAccess":true,"sshUrl":"git@github.com:org/active.git","owner":{"login":"org"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]'
+    printf '%s' '[{"data":{"organization":{"repositories":{"nodes":[{"name":"active","isArchived":false,"sshUrl":"git@github.com:org/active.git","owner":{"login":"org"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]'
     ;;
   *)
-    printf '%s' '[{"data":{"viewer":{"repositories":{"nodes":[{"name":"active","isArchived":false,"viewerCanAccess":true,"sshUrl":"git@github.com:org/active.git","owner":{"login":"org"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]'
+    printf '%s' '[{"data":{"viewer":{"repositories":{"nodes":[{"name":"active","isArchived":false,"sshUrl":"git@github.com:org/active.git","owner":{"login":"org"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]'
     ;;
 esac
 "##,
