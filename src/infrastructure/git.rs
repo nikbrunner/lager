@@ -499,6 +499,8 @@ mod tests {
             remote.to_str().unwrap(),
             clone.to_str().unwrap(),
         ]);
+        run_git(&clone, &["config", "user.email", "lager@example.invalid"]);
+        run_git(&clone, &["config", "user.name", "lager"]);
         let origin = super::git_output(&clone, &["remote", "get-url", "origin"]).unwrap();
 
         fs::write(clone.join("stash.txt"), "stashed\n").unwrap();
@@ -581,7 +583,13 @@ mod tests {
 
     fn run_git(directory: &std::path::Path, args: &[&str]) {
         let mut command = std::process::Command::new("git");
-        command.current_dir(directory).args(args);
+        command
+            .current_dir(directory)
+            .args(args)
+            .env_remove("GIT_AUTHOR_NAME")
+            .env_remove("GIT_AUTHOR_EMAIL")
+            .env_remove("GIT_COMMITTER_NAME")
+            .env_remove("GIT_COMMITTER_EMAIL");
         let output = command.output().unwrap();
         assert!(
             output.status.success(),
