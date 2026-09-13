@@ -483,6 +483,29 @@ fn no_argument_remove_deletes_the_exact_custom_clone_selected_by_path() -> TestR
     Ok(())
 }
 
+fn is_changelog_release_heading(line: &str, version: &str) -> bool {
+    line.starts_with(&format!("## {version} ("))
+        || line
+            .strip_prefix(&format!("## [{version}]("))
+            .is_some_and(|link_and_date| link_and_date.contains(") ("))
+}
+
+#[test]
+fn changelog_release_heading_accepts_release_please_linked_version() {
+    assert!(is_changelog_release_heading(
+        "## [0.1.1](https://example.com/releases/0.1.1) (2026-09-13)",
+        "0.1.1"
+    ));
+    assert!(is_changelog_release_heading(
+        "## 0.1.1 (2026-09-13)",
+        "0.1.1"
+    ));
+    assert!(!is_changelog_release_heading(
+        "## [0.1.2](https://example.com/releases/0.1.2) (2026-09-13)",
+        "0.1.1"
+    ));
+}
+
 #[test]
 fn release_please_manifest_matches_bootstrap_or_released_package() -> TestResult {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -515,11 +538,10 @@ fn release_please_manifest_matches_bootstrap_or_released_package() -> TestResult
             .expect("release-please package version must be a string");
         assert_eq!(manifest_version, cargo_version);
         let changelog = fs::read_to_string(root.join("CHANGELOG.md"))?;
-        let release_heading = format!("## {manifest_version} (");
         assert!(
             changelog
                 .lines()
-                .any(|line| line.starts_with(&release_heading)),
+                .any(|line| is_changelog_release_heading(line, manifest_version)),
             "CHANGELOG.md has no release heading for {manifest_version}"
         );
     }
