@@ -51,13 +51,18 @@ impl Fzf {
                     FzfError::Start(error.to_string())
                 }
             })?;
+        let mut write_error = None;
         {
             let stdin = child.stdin.as_mut().expect("fzf stdin configured");
             for candidate in candidates {
-                writeln!(stdin, "{}", candidate.display)
-                    .map_err(|error| FzfError::Start(error.to_string()))?;
+                if let Err(error) = writeln!(stdin, "{}", candidate.display) {
+                    write_error = Some(error);
+                    break;
+                }
             }
         }
+        drop(child.stdin.take());
+
         let output = child
             .wait_with_output()
             .map_err(|error| FzfError::Start(error.to_string()))?;
@@ -68,6 +73,9 @@ impl Fzf {
             } else {
                 Err(FzfError::Failed(code))
             };
+        }
+        if let Some(error) = write_error {
+            return Err(FzfError::Start(error.to_string()));
         }
 
         // Display strings are only picker labels. Keep a queue per label so duplicate
@@ -186,5 +194,17 @@ mod tests {
             selector.select(&[candidate("org/repo", "repo")]),
             Err(SelectionError::Cancelled)
         );
+    }
+
+    #[test]
+    fn maps_exit_130_to_cancellation_when_fzf_closes_a_full_input_pipe() {
+        let (_directory, path) = script("exec 0<&-; exit 130");
+        let selector = Fzf::new(path);
+        let display = "x".repeat(16 * 1024);
+        let candidates = (0..256)
+            .map(|index| candidate(&format!("org/repo-{index}"), &display))
+            .collect::<Vec<_>>();
+
+        assert_eq!(selector.select(&candidates), Err(SelectionError::Cancelled));
     }
 }
