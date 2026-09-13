@@ -11,5 +11,3 @@
 ### Bug Fixes
 
 * preserve early fzf cancellation ([1807aa2](https://github.com/nikbrunner/lager/commit/1807aa2633ecce4abff674812e89a62cca794b48))
-
-## Changelog
