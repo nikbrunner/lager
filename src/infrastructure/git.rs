@@ -583,7 +583,13 @@ mod tests {
 
     fn run_git(directory: &std::path::Path, args: &[&str]) {
         let mut command = std::process::Command::new("git");
-        command.current_dir(directory).args(args);
+        command
+            .current_dir(directory)
+            .args(args)
+            .env_remove("GIT_AUTHOR_NAME")
+            .env_remove("GIT_AUTHOR_EMAIL")
+            .env_remove("GIT_COMMITTER_NAME")
+            .env_remove("GIT_COMMITTER_EMAIL");
         let output = command.output().unwrap();
         assert!(
             output.status.success(),
