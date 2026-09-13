@@ -499,6 +499,8 @@ mod tests {
             remote.to_str().unwrap(),
             clone.to_str().unwrap(),
         ]);
+        run_git(&clone, &["config", "user.email", "lager@example.invalid"]);
+        run_git(&clone, &["config", "user.name", "lager"]);
         let origin = super::git_output(&clone, &["remote", "get-url", "origin"]).unwrap();
 
         fs::write(clone.join("stash.txt"), "stashed\n").unwrap();
