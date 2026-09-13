@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/nikbrunner/lager/compare/v0.1.0...v0.1.1) (2026-09-13)
+
+
+### Bug Fixes
+
+* remove invalid GitHub repository field ([9292c1c](https://github.com/nikbrunner/lager/commit/9292c1c704782b132ded30f1742a4eaee2a800e7))
+
 ## 0.1.0 (2026-09-13)
 
 
