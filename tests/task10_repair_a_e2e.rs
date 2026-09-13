@@ -484,21 +484,44 @@ fn no_argument_remove_deletes_the_exact_custom_clone_selected_by_path() -> TestR
 }
 
 #[test]
-fn release_please_bootstrap_contract_is_exactly_v_0_1_0() -> TestResult {
+fn release_please_manifest_matches_bootstrap_or_released_package() -> TestResult {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read(root.join(".github/release-please-config.json"))?)?;
     let manifest: serde_json::Value = serde_json::from_slice(&fs::read(
         root.join(".github/.release-please-manifest.json"),
     )?)?;
+    let cargo: toml_edit::DocumentMut = fs::read_to_string(root.join("Cargo.toml"))?.parse()?;
+    let cargo_version = cargo["package"]["version"]
+        .as_str()
+        .expect("Cargo package version must be a string");
     let package = &config["packages"]["."];
     assert_eq!(package["release-type"], "rust");
     assert_eq!(package["initial-version"], "0.1.0");
     assert!(package.get("bootstrap-sha").is_none());
     assert!(package.get("bump-minor-pre-major").is_none());
     assert!(package.get("bump-patch-for-minor-pre-major").is_none());
-    assert_eq!(manifest, serde_json::json!({}));
-    assert!(fs::read_to_string(root.join("Cargo.toml"))?.contains("version = \"0.1.0\""));
+
+    let manifest = manifest
+        .as_object()
+        .expect("release-please manifest must be an object");
+    if manifest.is_empty() {
+        assert_eq!(cargo_version, package["initial-version"]);
+    } else {
+        assert_eq!(manifest.len(), 1);
+        let manifest_version = manifest["."]
+            .as_str()
+            .expect("release-please package version must be a string");
+        assert_eq!(manifest_version, cargo_version);
+        let changelog = fs::read_to_string(root.join("CHANGELOG.md"))?;
+        let release_heading = format!("## {manifest_version} (");
+        assert!(
+            changelog
+                .lines()
+                .any(|line| line.starts_with(&release_heading)),
+            "CHANGELOG.md has no release heading for {manifest_version}"
+        );
+    }
     Ok(())
 }
 
