@@ -169,7 +169,12 @@ JSON
         &bin.join("fzf"),
         r##"#!/bin/sh
 if [ "$FZF_MODE" = cancel ]; then exit 130; fi
-if [ "$FZF_MODE" = one ]; then printf '%s\n' github.com/org/one; else cat; fi
+if [ "$FZF_MODE" = one ]; then
+  cat > /dev/null
+  printf '%s\n' github.com/org/one
+else
+  cat
+fi
 "##,
     )?;
     let config = temp.path().join("register.toml");
@@ -597,7 +602,7 @@ esac
     )?;
     executable(
         &bin.join("fzf"),
-        "#!/bin/sh\nprintf '%s\\n' github.com/org/active\n",
+        "#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' github.com/org/active\n",
     )?;
     std::fs::write(
         &config,
