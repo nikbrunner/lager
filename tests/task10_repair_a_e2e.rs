@@ -498,6 +498,7 @@ fn release_please_manifest_matches_bootstrap_or_released_package() -> TestResult
     let package = &config["packages"]["."];
     assert_eq!(package["release-type"], "rust");
     assert_eq!(package["initial-version"], "0.1.0");
+    assert_eq!(package["include-component-in-tag"], false);
     assert!(package.get("bootstrap-sha").is_none());
     assert!(package.get("bump-minor-pre-major").is_none());
     assert!(package.get("bump-patch-for-minor-pre-major").is_none());
