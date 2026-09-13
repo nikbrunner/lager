@@ -1,0 +1,149 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish or replace assets for
+        required: true
+        type: string
+  push:
+    branches: [main]
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
+        with:
+          config-file: .github/release-please-config.json
+          manifest-file: .github/.release-please-manifest.json
+
+  build:
+    needs: release
+    if: always() && (needs.release.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.release.outputs.tag_name || github.event.inputs.tag || github.ref_name }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Verify release source
+        env:
+          TAG: ${{ needs.release.outputs.tag_name || github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          version="${TAG#v}"
+          test "$TAG" = "v${version}"
+          test "$(git describe --tags --exact-match HEAD)" = "$TAG"
+          source_version="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          test "$source_version" = "$version"
+          test "$(cargo run --locked --quiet -- --version)" = "lager ${version}"
+      - name: Install musl cross compiler
+        if: runner.os == 'Linux'
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross --rev 88f49ff79e777bef6d3564531636ee4d3cc2f8d2 --locked
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if [ "${RUNNER_OS}" = Linux ]; then
+            cross build --locked --release --target "$TARGET"
+          else
+            cargo build --locked --release --target "$TARGET"
+          fi
+      - name: Verify target architecture and static linkage
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          binary="target/${TARGET}/release/lager"
+          description="$(file "$binary")"
+          case "$TARGET" in
+            aarch64-apple-darwin) printf '%s\n' "$description" | grep -F 'arm64' ;;
+            x86_64-apple-darwin) printf '%s\n' "$description" | grep -F 'x86_64' ;;
+            aarch64-unknown-linux-musl) printf '%s\n' "$description" | grep -F 'ARM aarch64'; printf '%s\n' "$description" | grep -E 'statically linked|static-pie linked' ;;
+            x86_64-unknown-linux-musl) printf '%s\n' "$description" | grep -F 'x86-64'; printf '%s\n' "$description" | grep -E 'statically linked|static-pie linked' ;;
+            *) exit 1 ;;
+          esac
+      - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          tag="${{ needs.release.outputs.tag_name || github.event.inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          archive="lager-v${version}-${TARGET}.tar.gz"
+          staging="package-${TARGET}"
+          mkdir "$staging"
+          cp "target/${TARGET}/release/lager" "$staging/"
+          cp LICENSE README.md "$staging/"
+          tar -C "$staging" -czf "$archive" lager LICENSE README.md
+          test "$(tar -tzf "$archive" | grep -cE '(^|/)lager$')" -eq 1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: lager-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: [release, build]
+    if: always() && needs.build.result == 'success' && (needs.release.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify assets and generate checksums
+        working-directory: dist
+        run: |
+          set -eu
+          test "$(find . -maxdepth 1 -name 'lager-*.tar.gz' | wc -l)" -eq 4
+          for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
+            test "$(find . -maxdepth 1 -name "lager-*-${target}.tar.gz" | wc -l)" -eq 1
+          done
+          sha256sum lager-*.tar.gz | sort -k2 > SHA256SUMS
+          test "$(wc -l < SHA256SUMS)" -eq 4
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: 'dist/*'
+      - name: Upload release assets (safe to retry)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ needs.release.outputs.tag_name || github.event.inputs.tag || github.ref_name }}"
+          gh release upload "$tag" dist/* --clobber
