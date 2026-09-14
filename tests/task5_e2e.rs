@@ -1,12 +1,19 @@
 mod support;
 
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Command, ExitStatus, Output, Stdio};
+use std::thread;
 
 use tempfile::TempDir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+struct PtyOutput {
+    status: ExitStatus,
+    terminal: Vec<u8>,
+}
 
 struct Fixture {
     temp: TempDir,
@@ -31,6 +38,12 @@ impl Fixture {
             .expect("lager process")
     }
 
+    fn run_in_pty(&self, args: &[&str]) -> io::Result<PtyOutput> {
+        let mut command = support::lager(&self.home, &self.config);
+        command.env("TERM", "xterm-256color").args(args);
+        run_with_pty(command)
+    }
+
     fn reference(&self, name: &str) -> String {
         format!(
             "file://{}",
@@ -41,6 +54,41 @@ impl Fixture {
     fn destination(&self, name: &str) -> PathBuf {
         self.home.join("repos").join(name)
     }
+}
+
+fn run_with_pty(mut command: Command) -> io::Result<PtyOutput> {
+    let pty = rustix_openpty::openpty(None, None)?;
+    let mut controller = fs::File::from(pty.controller);
+    let user = fs::File::from(pty.user);
+    let stdout = user.try_clone()?;
+    command
+        .stderr(Stdio::from(user))
+        .stdout(Stdio::from(stdout));
+    let mut child = command.spawn()?;
+    drop(command);
+    let reader = thread::spawn(move || {
+        let mut terminal = Vec::new();
+        loop {
+            let mut buffer = [0_u8; 4096];
+            match controller.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(length) => terminal.extend_from_slice(&buffer[..length]),
+                Err(error)
+                    if error.raw_os_error()
+                        == Some(rustix_openpty::rustix::io::Errno::IO.raw_os_error()) =>
+                {
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(terminal)
+    });
+    let status = child.wait()?;
+    let terminal = reader
+        .join()
+        .map_err(|_| io::Error::other("PTY reader thread panicked"))??;
+    Ok(PtyOutput { status, terminal })
 }
 
 fn create_remote(fixture: &Fixture, name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -228,6 +276,75 @@ fn ensure_reports_each_failure_and_continues_to_successful_declarations() -> Tes
     assert!(stderr.contains("1 cloned, 1 failed"), "{stderr}");
     assert!(stderr.contains("fatal:"), "{stderr}");
     assert!(!stderr.contains("\u{1b}["), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn ensure_terminal_colors_progress_and_summaries() -> TestResult {
+    let success_fixture = Fixture::new()?;
+    create_remote(&success_fixture, "color-success")?;
+    let success_reference = success_fixture.reference("color-success");
+    fs::write(
+        &success_fixture.config,
+        format!("root = \"repos\"\n\n[[repositories]]\nurl = \"{success_reference}\"\n"),
+    )?;
+
+    let success = success_fixture.run_in_pty(&["ensure"])?;
+    assert!(
+        success.status.success(),
+        "{}",
+        String::from_utf8_lossy(&success.terminal)
+    );
+    let success_terminal = String::from_utf8_lossy(&success.terminal);
+    assert!(
+        success_terminal.contains(&format!(
+            "\u{1b}[34m●\u{1b}[0m  Cloning {success_reference} into "
+        )),
+        "{success_terminal:?}"
+    );
+    assert!(
+        success_terminal.contains(&format!("\u{1b}[32m◆\u{1b}[0m  Cloned {success_reference}")),
+        "{success_terminal:?}"
+    );
+    assert!(
+        success_terminal.contains("\u{1b}[32m◆\u{1b}[0m  1 cloned"),
+        "{success_terminal:?}"
+    );
+    assert!(success_terminal.contains("Cloning into '.'"));
+
+    let failure_fixture = Fixture::new()?;
+    let missing = format!(
+        "file://{}",
+        failure_fixture
+            .temp
+            .path()
+            .join("color-missing.git")
+            .display()
+    );
+    fs::write(
+        &failure_fixture.config,
+        format!("root = \"repos\"\n\n[[repositories]]\nurl = \"{missing}\"\n"),
+    )?;
+
+    let failure = failure_fixture.run_in_pty(&["ensure"])?;
+    assert_eq!(failure.status.code(), Some(1));
+    let failure_terminal = String::from_utf8_lossy(&failure.terminal);
+    assert!(
+        failure_terminal.contains(&format!("\u{1b}[34m●\u{1b}[0m  Cloning {missing} into ")),
+        "{failure_terminal:?}"
+    );
+    assert!(
+        failure_terminal.contains(&format!(
+            "\u{1b}[31m■\u{1b}[0m  Failed {missing}: git exited"
+        )),
+        "{failure_terminal:?}"
+    );
+    assert!(
+        failure_terminal.contains("\u{1b}[31m■\u{1b}[0m  1 failed"),
+        "{failure_terminal:?}"
+    );
+    assert!(failure_terminal.contains("Cloning into '.'"));
+    assert!(failure_terminal.contains("fatal:"));
     Ok(())
 }
 

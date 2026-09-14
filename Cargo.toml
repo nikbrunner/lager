@@ -21,6 +21,7 @@ url = "2"
 walkdir = "2"
 
 [dev-dependencies]
+rustix-openpty = "0.2"
 tempfile = "3"
 
 [[bin]]
