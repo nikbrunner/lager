@@ -91,6 +91,17 @@ fn run_with_pty(mut command: Command) -> io::Result<PtyOutput> {
     Ok(PtyOutput { status, terminal })
 }
 
+fn assert_colored_line(terminal: &str, color: u8, message: &str) {
+    let line = terminal
+        .lines()
+        .find(|line| line.contains(message))
+        .unwrap_or_else(|| panic!("missing terminal line containing {message:?}: {terminal:?}"));
+    assert!(
+        line.starts_with(&format!("\u{1b}[{color}m")),
+        "terminal line has the wrong color: {line:?}"
+    );
+}
+
 fn create_remote(fixture: &Fixture, name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let source = fixture.temp.path().join(format!("{name}-source"));
     let remote = fixture.temp.path().join(format!("{name}.git"));
@@ -296,20 +307,17 @@ fn ensure_terminal_colors_progress_and_summaries() -> TestResult {
         String::from_utf8_lossy(&success.terminal)
     );
     let success_terminal = String::from_utf8_lossy(&success.terminal);
-    assert!(
-        success_terminal.contains(&format!(
-            "\u{1b}[34m●\u{1b}[0m  Cloning {success_reference} into "
-        )),
-        "{success_terminal:?}"
+    assert_colored_line(
+        &success_terminal,
+        34,
+        &format!("Cloning {success_reference} into "),
     );
-    assert!(
-        success_terminal.contains(&format!("\u{1b}[32m◆\u{1b}[0m  Cloned {success_reference}")),
-        "{success_terminal:?}"
+    assert_colored_line(
+        &success_terminal,
+        32,
+        &format!("Cloned {success_reference}"),
     );
-    assert!(
-        success_terminal.contains("\u{1b}[32m◆\u{1b}[0m  1 cloned"),
-        "{success_terminal:?}"
-    );
+    assert_colored_line(&success_terminal, 32, "1 cloned");
     assert!(success_terminal.contains("Cloning into '.'"));
 
     let failure_fixture = Fixture::new()?;
@@ -329,20 +337,13 @@ fn ensure_terminal_colors_progress_and_summaries() -> TestResult {
     let failure = failure_fixture.run_in_pty(&["ensure"])?;
     assert_eq!(failure.status.code(), Some(1));
     let failure_terminal = String::from_utf8_lossy(&failure.terminal);
-    assert!(
-        failure_terminal.contains(&format!("\u{1b}[34m●\u{1b}[0m  Cloning {missing} into ")),
-        "{failure_terminal:?}"
+    assert_colored_line(&failure_terminal, 34, &format!("Cloning {missing} into "));
+    assert_colored_line(
+        &failure_terminal,
+        31,
+        &format!("Failed {missing}: git exited"),
     );
-    assert!(
-        failure_terminal.contains(&format!(
-            "\u{1b}[31m■\u{1b}[0m  Failed {missing}: git exited"
-        )),
-        "{failure_terminal:?}"
-    );
-    assert!(
-        failure_terminal.contains("\u{1b}[31m■\u{1b}[0m  1 failed"),
-        "{failure_terminal:?}"
-    );
+    assert_colored_line(&failure_terminal, 31, "1 failed");
     assert!(failure_terminal.contains("Cloning into '.'"));
     assert!(failure_terminal.contains("fatal:"));
     Ok(())
