@@ -17,7 +17,21 @@
 
 ## Install
 
-From a [release archive](https://github.com/nikbrunner/lager/releases), unpack `lager` somewhere on `PATH`. The archive also contains `LICENSE` and this README. To install from source:
+### Release archive
+
+Download the archive for your platform from [GitHub Releases](https://github.com/nikbrunner/lager/releases), unpack it somewhere on `PATH`, and run `lager --version`.
+
+### Mise
+
+Install the latest GitHub release globally:
+
+```sh
+mise use --global github:nikbrunner/lager
+```
+
+### Source
+
+Build and install the current source with Cargo:
 
 ```sh
 cargo install --git https://github.com/nikbrunner/lager --locked
