@@ -37,6 +37,16 @@ Build and install the current source with Cargo:
 cargo install --git https://github.com/nikbrunner/lager --locked
 ```
 
+### Local development
+
+Install the current checkout as a release build:
+
+```sh
+cargo install --path . --force
+```
+
+Cargo places `lager` in `~/.cargo/bin`. Run the command again after local changes. If Mise manages Lager, remove its `github:nikbrunner/lager` tool entry first so the Cargo binary is used.
+
 Git is required for `add`, `remove`, `ensure`, and `hook`. Interactive repository selection uses [`fzf`](https://github.com/junegunn/fzf). GitHub discovery uses an authenticated `gh` CLI; Bitbucket discovery uses the credentials named in the configuration.
 
 ## Quick start
