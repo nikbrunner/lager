@@ -52,6 +52,7 @@ pub enum PickerContext {
     Register,
     Add,
     Unregister,
+    Hook,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1223,7 +1224,7 @@ where
     let mut effective = explicit.clone();
     let mut summaries = Vec::new();
 
-    if !matches!(context, PickerContext::Unregister) {
+    if !matches!(context, PickerContext::Unregister | PickerContext::Hook) {
         let (catalog, failures) = providers.catalog_with_failures(include_archived);
         summaries.extend(catalog);
         report
@@ -1238,12 +1239,15 @@ where
             continue;
         };
         if !pattern.is_wildcard() {
-            if matches!(context, PickerContext::Unregister) {
+            if matches!(context, PickerContext::Unregister | PickerContext::Hook) {
                 summaries.push(RepositorySummary {
                     reference: pattern,
                     archived: false,
                 });
             }
+            continue;
+        }
+        if matches!(context, PickerContext::Hook) {
             continue;
         }
         match providers.expand(&pattern, include_archived) {
@@ -1288,7 +1292,7 @@ where
                     LocalState::Cloned
                 )
             }
-            PickerContext::Unregister => true,
+            PickerContext::Unregister | PickerContext::Hook => true,
         };
         if include && seen.insert(identity.clone()) {
             report.candidates.push(SelectionCandidate {

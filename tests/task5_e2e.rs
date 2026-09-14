@@ -2,6 +2,7 @@ mod support;
 
 use std::fs;
 use std::io::{self, Read};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
 use std::thread;
@@ -388,9 +389,70 @@ fn post_clone_persists_before_hook_and_persistence_failure_skips_hook() -> TestR
 }
 
 #[test]
-fn hook_without_repositories_returns_usage_exit_two() -> TestResult {
+fn hook_without_repositories_reports_a_selected_repository_without_a_hook() -> TestResult {
     let fixture = Fixture::new()?;
-    let output = fixture.run(&["hook"]);
-    assert_eq!(output.status.code(), Some(2));
+    create_remote(&fixture, "no-hook")?;
+    let reference = fixture.reference("no-hook");
+    fs::write(
+        &fixture.config,
+        format!("root = \"repos\"\n\n[[repositories]]\nurl = \"{reference}\"\n"),
+    )?;
+    assert!(fixture.run(&["ensure"]).status.success());
+
+    let bin = fixture.temp.path().join("bin");
+    fs::create_dir_all(&bin)?;
+    let fzf = bin.join("fzf");
+    fs::write(
+        &fzf,
+        "#!/bin/sh\nIFS= read -r line\nprintf '%s\\n' \"$line\"\n",
+    )?;
+    fs::set_permissions(&fzf, fs::Permissions::from_mode(0o755))?;
+
+    let hook = support::lager_with_path(&fixture.home, &fixture.config, Some(&bin))
+        .args(["hook"])
+        .output()?;
+    assert!(
+        hook.status.success(),
+        "{}",
+        String::from_utf8_lossy(&hook.stderr)
+    );
+    assert!(String::from_utf8_lossy(&hook.stderr).contains(&format!(
+        "lager: {reference}: no post-clone hook configured"
+    )));
+    Ok(())
+}
+
+#[test]
+fn hook_without_repositories_runs_the_selected_hook() -> TestResult {
+    let fixture = Fixture::new()?;
+    create_remote(&fixture, "picked")?;
+    let reference = fixture.reference("picked");
+    let marker = fixture.home.join("picked-hook");
+    fs::write(
+        &fixture.config,
+        format!(
+            "root = \"repos\"\n\n[[repositories]]\nurl = \"{reference}\"\npost_clone = \"printf x >> $HOME/picked-hook\"\n"
+        ),
+    )?;
+    assert!(fixture.run(&["ensure"]).status.success());
+
+    let bin = fixture.temp.path().join("bin");
+    fs::create_dir_all(&bin)?;
+    let fzf = bin.join("fzf");
+    fs::write(
+        &fzf,
+        "#!/bin/sh\nIFS= read -r line\nprintf '%s\\n' \"$line\"\n",
+    )?;
+    fs::set_permissions(&fzf, fs::Permissions::from_mode(0o755))?;
+
+    let hook = support::lager_with_path(&fixture.home, &fixture.config, Some(&bin))
+        .args(["hook"])
+        .output()?;
+    assert!(
+        hook.status.success(),
+        "{}",
+        String::from_utf8_lossy(&hook.stderr)
+    );
+    assert_eq!(fs::read_to_string(marker)?.len(), 2);
     Ok(())
 }

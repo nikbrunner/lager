@@ -22,7 +22,7 @@ Lager reads one configuration for each command. It selects the path in this orde
 | `add` | `add [REPOSITORY]... [--register\|--no-register] [--post-clone CMD] [--include-archived]` | Creates local checkouts. `--post-clone` implies `--register`. |
 | `remove` | `remove [REPOSITORY]... [--unregister\|--keep-registered] [--yes] [--force]` | Permanently deletes validated local checkouts. `--force` accepts local-state warnings only. |
 | `ensure` | `ensure [--include-archived]` | Creates missing effective declarations sequentially. |
-| `hook` | `hook REPOSITORY...` | Runs hooks for explicit declarations. At least one repository is required. |
+| `hook` | `hook [REPOSITORY]...` | Runs hooks for explicit declarations. Without repositories, it selects explicit declarations. |
 | `list` | `list [--remote] [--include-archived] [--json]` | Reports declarations and local state. `--remote` expands wildcards through providers. |
 
 Repository arguments accept canonical IDs such as `github.com/org/project`, GitHub shorthand such as `org/project`, and full SCP, SSH, HTTP(S), or file clone URLs. GitHub shorthand becomes an SSH clone URL.
@@ -34,7 +34,7 @@ Repository arguments accept canonical IDs such as `github.com/org/project`, GitH
 | `init` in a terminal without `--root` | Prompts with `repos`. |
 | `init` without a root-creation choice | Prompts to create the root, default yes. |
 | `init` without a GitHub choice | Prompts to configure GitHub, default yes. |
-| `register`, `unregister`, or `add` without repositories | Uses `fzf --multi` to select candidates. |
+| `register`, `unregister`, `add`, or `hook` without repositories | Uses `fzf --multi` to select candidates. |
 | `remove` without repositories | Uses `fzf` to select standalone local checkouts. |
 | Interactive `register` without `--post-clone` | Asks whether to add a hook for each repository, default no. |
 | Interactive `add` without a registration choice | Asks whether to register each successful checkout, default yes, then offers its hook. |
@@ -57,7 +57,7 @@ Outside a terminal, Lager never prompts:
 
 ## Output and exit status
 
-Flag-driven and JSON output contain no interactive styling. `list --json` writes one stable JSON document to stdout; warnings and provider failures use stderr. Git and hook processes retain their native streams.
+Flag-driven and JSON output contain no interactive styling. `list --json` writes one stable JSON document to stdout; warnings and provider failures use stderr. Git and hook processes retain their native streams. A selected repository without a post-clone hook reports that on stderr.
 
 A picker or interaction cancellation exits 130. Invalid usage exits 2. Configuration, provider, Git, hook, filesystem, and aggregate failures exit 1. Success, no-op, empty selections, and explicitly skipped removals exit 0.
 

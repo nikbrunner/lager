@@ -33,7 +33,7 @@ pub fn run(
             remove(&config_path, command, selector, interaction, interactive)
         }
         Command::Ensure(command) => ensure(&config_path, command),
-        Command::Hook(command) => hook(&config_path, command),
+        Command::Hook(command) => hook(&config_path, command, selector),
         Command::List(command) => list(&config_path, command),
     }
 }
@@ -430,29 +430,42 @@ fn print_ensure_summary(outcome: &warehouse::BatchOutcome) {
     };
 }
 
-fn hook(path: &Path, args: HookArgs) -> i32 {
-    if args.repositories.is_empty() {
-        eprintln!("lager: hook requires a repository reference");
-        return 2;
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+fn hook(path: &Path, args: HookArgs, selector: &dyn RepositorySelector) -> i32 {
+    let home = home_dir();
+    let (repositories, picker_failed) = if args.repositories.is_empty() {
+        match pick(path, warehouse::PickerContext::Hook, false, &home, selector) {
+            Ok((references, failed)) => (
+                references
+                    .into_iter()
+                    .map(|reference| reference.clone_url)
+                    .collect(),
+                failed,
+            ),
+            Err(code) => return code,
+        }
+    } else {
+        (args.repositories, false)
+    };
     let store = FileConfigStore;
     let git = NativeGit;
     let shell = Shell;
-    match warehouse::hook(&store, &git, &shell, path, &args.repositories, &home) {
+    match warehouse::hook(&store, &git, &shell, path, &repositories, &home) {
         Ok(outcome) => {
-            for repository in outcome
-                .outcomes
-                .iter()
-                .filter(|item| matches!(item.status, warehouse::OperationStatus::Failed(_)))
-            {
-                if let warehouse::OperationStatus::Failed(error) = &repository.status {
-                    eprintln!("lager: {}: {error}", repository.reference);
+            for repository in &outcome.outcomes {
+                match &repository.status {
+                    warehouse::OperationStatus::Failed(error) => {
+                        eprintln!("lager: {}: {error}", repository.reference);
+                    }
+                    warehouse::OperationStatus::Noop => {
+                        eprintln!(
+                            "lager: {}: no post-clone hook configured",
+                            repository.reference
+                        );
+                    }
+                    _ => {}
                 }
             }
-            i32::from(outcome.failed())
+            i32::from(outcome.failed() || picker_failed)
         }
         Err(error) => {
             eprintln!("lager: {error}");
