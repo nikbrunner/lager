@@ -154,11 +154,29 @@ fn ensure_success_is_fresh_hook_only_and_hook_reruns_explicitly() -> TestResult 
         "{}",
         String::from_utf8_lossy(&ensure.stderr)
     );
+    let stderr = String::from_utf8_lossy(&ensure.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "Cloning {reference} into {}",
+            fixture.destination("ensured").display()
+        )),
+        "{stderr}"
+    );
+    assert!(stderr.contains(&format!("Cloned {reference}")), "{stderr}");
+    assert!(stderr.contains("1 cloned"), "{stderr}");
+    assert!(!stderr.contains("\u{1b}["), "{stderr}");
+
     let ensure_again = fixture.run(&["ensure"]);
     assert!(
         ensure_again.status.success(),
         "{}",
         String::from_utf8_lossy(&ensure_again.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&ensure_again.stderr);
+    assert!(stderr.contains("1 already present"), "{stderr}");
+    assert!(
+        !stderr.contains(&format!("Cloning {reference}")),
+        "{stderr}"
     );
     assert_eq!(fs::read_to_string(&marker)?.len(), 1);
 
@@ -192,8 +210,24 @@ fn ensure_reports_each_failure_and_continues_to_successful_declarations() -> Tes
     assert_eq!(output.status.code(), Some(1));
     assert!(fixture.destination("ensure-good").is_dir());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains(&missing), "{stderr}");
-    assert!(stderr.contains("exited"), "{stderr}");
+    let context = format!(
+        "Cloning {missing} into {}",
+        fixture.destination("ensure-missing").display()
+    );
+    assert!(stderr.contains(&context), "{stderr}");
+    assert!(stderr.contains("Cloning into '.'"), "{stderr}");
+    assert!(
+        stderr.find(&context) < stderr.find("Cloning into '.'"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("Failed {missing}: git exited")),
+        "{stderr}"
+    );
+    assert!(stderr.contains(&format!("Cloned {good}")), "{stderr}");
+    assert!(stderr.contains("1 cloned, 1 failed"), "{stderr}");
+    assert!(stderr.contains("fatal:"), "{stderr}");
+    assert!(!stderr.contains("\u{1b}["), "{stderr}");
     Ok(())
 }
 

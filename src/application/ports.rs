@@ -53,6 +53,25 @@ pub trait ConfigStore {
     fn remove(&self, path: &Path, references: &[String]) -> Result<Vec<Mutation>, Self::Error>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnsureEvent<'a> {
+    CloneStarted {
+        reference: &'a str,
+        destination: &'a Path,
+    },
+    CloneSucceeded {
+        reference: &'a str,
+    },
+    CloneFailed {
+        reference: &'a str,
+        error: &'a str,
+    },
+}
+
+pub trait EnsureReporter {
+    fn report(&mut self, event: EnsureEvent<'_>);
+}
+
 pub trait GitClient {
     type Error: Display;
 

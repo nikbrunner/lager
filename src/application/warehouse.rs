@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::application::ports::{
-    ConfigStore, GitClient, GitRemoval, GitState, HookRunner, Interaction, InteractionError,
-    ProviderCatalog, RemovalFilesystem,
+    ConfigStore, EnsureEvent, EnsureReporter, GitClient, GitRemoval, GitState, HookRunner,
+    Interaction, InteractionError, ProviderCatalog, RemovalFilesystem,
 };
 use crate::domain::config::Config;
 use crate::domain::repository::{RepositoryRef, RepositorySummary};
@@ -595,6 +595,7 @@ where
             false,
             None,
             home,
+            None,
         );
         let succeeded = !matches!(outcome.status, OperationStatus::Failed(_));
         let fresh = matches!(outcome.status, OperationStatus::Cloned);
@@ -723,11 +724,13 @@ where
             add || post_clone.is_some(),
             post_clone,
             home,
+            None,
         ));
     }
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn ensure<S, G, H, P>(
     store: &S,
     git: &G,
@@ -736,6 +739,7 @@ pub fn ensure<S, G, H, P>(
     config_path: &Path,
     include_archived: bool,
     home: &Path,
+    reporter: &mut dyn EnsureReporter,
 ) -> Result<BatchOutcome, String>
 where
     S: ConfigStore,
@@ -763,6 +767,7 @@ where
             false,
             hook.as_deref(),
             home,
+            Some(reporter),
         ));
     }
     Ok(result)
@@ -866,6 +871,7 @@ where
         add,
         requested_hook,
         home,
+        None,
     )
 }
 
@@ -881,6 +887,7 @@ fn clone_reference<S, G, H>(
     add: bool,
     requested_hook: Option<&str>,
     home: &Path,
+    mut reporter: Option<&mut dyn EnsureReporter>,
 ) -> RepositoryOutcome
 where
     S: ConfigStore,
@@ -888,33 +895,55 @@ where
     H: HookRunner,
 {
     if parsed.is_wildcard() {
-        return failed(input, "wildcard references cannot be cloned directly");
+        return reported_failure(
+            &mut reporter,
+            input,
+            "wildcard references cannot be cloned directly",
+        );
     }
     let root = match config.resolve_root(home) {
         Ok(root) => root,
-        Err(error) => return failed(input, &error.to_string()),
+        Err(error) => return reported_failure(&mut reporter, input, &error.to_string()),
     };
     let destination = match destination(config, parsed, home) {
         Ok(destination) => destination,
-        Err(error) => return failed(input, &error),
+        Err(error) => return reported_failure(&mut reporter, input, &error),
     };
     let state = git.classify_destination(&destination, &parsed.clone_url);
     let fresh = match state {
         LocalState::Missing => {
+            if let Some(reporter) = reporter.as_deref_mut() {
+                reporter.report(EnsureEvent::CloneStarted {
+                    reference: input,
+                    destination: &destination,
+                });
+            }
             if let Err(error) = git.clone_repository(&parsed.clone_url, home, &root, &destination) {
-                return failed(input, &error.to_string());
+                return reported_failure(&mut reporter, input, &error.to_string());
             }
             true
         }
         LocalState::Cloned => false,
-        LocalState::Conflict => return failed(input, "destination conflicts with repository"),
-        LocalState::Unreadable => return failed(input, "destination is unreadable"),
+        LocalState::Conflict => {
+            return reported_failure(
+                &mut reporter,
+                input,
+                "destination conflicts with repository",
+            );
+        }
+        LocalState::Unreadable => {
+            return reported_failure(&mut reporter, input, "destination is unreadable");
+        }
     };
 
     if add {
         let command = requested_hook;
         if let Err(error) = store.register(config_path, &[input.to_owned()], command) {
-            return failed(input, &format!("could not persist declaration: {error}"));
+            return reported_failure(
+                &mut reporter,
+                input,
+                &format!("could not persist declaration: {error}"),
+            );
         }
     }
 
@@ -930,7 +959,10 @@ where
         if let Some(command) = requested_hook.or(configured_hook)
             && let Err(error) = hooks.run_hook(command, &destination)
         {
-            return failed(input, &error.to_string());
+            return reported_failure(&mut reporter, input, &error.to_string());
+        }
+        if let Some(reporter) = reporter {
+            reporter.report(EnsureEvent::CloneSucceeded { reference: input });
         }
         RepositoryOutcome {
             reference: input.to_owned(),
@@ -942,6 +974,17 @@ where
             status: OperationStatus::Noop,
         }
     }
+}
+
+fn reported_failure(
+    reporter: &mut Option<&mut dyn EnsureReporter>,
+    reference: &str,
+    error: &str,
+) -> RepositoryOutcome {
+    if let Some(reporter) = reporter.as_deref_mut() {
+        reporter.report(EnsureEvent::CloneFailed { reference, error });
+    }
+    failed(reference, error)
 }
 
 fn effective_declarations<P: ProviderCatalog>(
@@ -1307,7 +1350,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
-    use crate::application::ports::{Interaction, InteractionError, Mutation, ProviderCatalog};
+    use crate::application::ports::{
+        EnsureEvent, EnsureReporter, Interaction, InteractionError, Mutation, ProviderCatalog,
+    };
     use crate::domain::config::Config;
     use crate::domain::repository::RepositorySummary;
 
@@ -1368,6 +1413,51 @@ mod tests {
     impl GitState for FakeGit {
         fn classify_destination(&self, _destination: &Path, _expected_url: &str) -> LocalState {
             LocalState::Missing
+        }
+    }
+
+    struct EventGit<'a> {
+        events: &'a RefCell<Vec<String>>,
+    }
+
+    impl GitClient for EventGit<'_> {
+        type Error = String;
+
+        fn clone_repository(
+            &self,
+            url: &str,
+            _home: &Path,
+            _root: &Path,
+            _destination: &Path,
+        ) -> Result<(), Self::Error> {
+            self.events.borrow_mut().push(format!("git:{url}"));
+            Ok(())
+        }
+    }
+
+    impl GitState for EventGit<'_> {
+        fn classify_destination(&self, _destination: &Path, _expected_url: &str) -> LocalState {
+            LocalState::Missing
+        }
+    }
+
+    struct RecordingEnsureReporter<'a> {
+        events: &'a RefCell<Vec<String>>,
+    }
+
+    impl EnsureReporter for RecordingEnsureReporter<'_> {
+        fn report(&mut self, event: EnsureEvent<'_>) {
+            let event = match event {
+                EnsureEvent::CloneStarted {
+                    reference,
+                    destination,
+                } => format!("start:{reference}:{}", destination.display()),
+                EnsureEvent::CloneSucceeded { reference } => format!("success:{reference}"),
+                EnsureEvent::CloneFailed { reference, error } => {
+                    format!("failure:{reference}:{error}")
+                }
+            };
+            self.events.borrow_mut().push(event);
         }
     }
 
@@ -2032,6 +2122,44 @@ mod tests {
     }
 
     #[test]
+    fn ensure_reports_clone_start_before_git_and_success_afterward() {
+        let mut config = config();
+        config
+            .repositories
+            .push(crate::domain::config::RepositoryDeclaration {
+                url: "github.com/org/good".to_owned(),
+                post_clone: None,
+                exclude: vec![],
+            });
+        let store = FakeStore { config };
+        let events = RefCell::new(Vec::new());
+        let git = EventGit { events: &events };
+        let mut reporter = RecordingEnsureReporter { events: &events };
+
+        let outcome = ensure(
+            &store,
+            &git,
+            &FakeHooks::default(),
+            &NoProviders,
+            Path::new("config"),
+            false,
+            Path::new("/tmp/lager-test-home"),
+            &mut reporter,
+        )
+        .unwrap();
+
+        assert!(!outcome.failed());
+        assert_eq!(
+            events.into_inner(),
+            [
+                "start:git@github.com:org/good.git:/tmp/lager-test-home/repos/org/good",
+                "git:git@github.com:org/good.git",
+                "success:git@github.com:org/good.git",
+            ]
+        );
+    }
+
+    #[test]
     fn ensure_keeps_declaration_order_and_runs_explicit_hook_after_clone() {
         let mut config = config();
         config
@@ -2046,6 +2174,8 @@ mod tests {
             cloned: RefCell::new(vec![]),
         };
         let hooks = FakeHooks::default();
+        let events = RefCell::new(Vec::new());
+        let mut reporter = RecordingEnsureReporter { events: &events };
         let outcome = ensure(
             &store,
             &git,
@@ -2054,6 +2184,7 @@ mod tests {
             Path::new("config"),
             false,
             Path::new("/tmp/lager-test-home"),
+            &mut reporter,
         )
         .unwrap();
         assert!(!outcome.failed());
