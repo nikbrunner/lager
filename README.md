@@ -13,17 +13,31 @@
   <img src="assets/lager-banner.png" alt="A sunlit warehouse with the lager name on a storage pillar">
 </p>
 
-`lager` keeps a declared set of Git repositories available in one local root. It is a stable-Rust CLI for Linux and macOS, on x86_64 and ARM64.
+`lager` keeps a declared set of Git repositories available in one local root. It runs on Linux and macOS, on x86_64 and ARM64.
 
 ## Install
 
-From a [release archive](https://github.com/nikbrunner/lager/releases), unpack `lager` somewhere on `PATH`. The archive also contains `LICENSE` and this README. To install from source:
+### Release archive
+
+Download the archive for your platform from [GitHub Releases](https://github.com/nikbrunner/lager/releases), unpack it somewhere on `PATH`, and run `lager --version`.
+
+### Mise
+
+Install the latest GitHub release globally:
+
+```sh
+mise use --global github:nikbrunner/lager
+```
+
+### Source
+
+Build and install the current source with Cargo:
 
 ```sh
 cargo install --git https://github.com/nikbrunner/lager --locked
 ```
 
-Interactive repository selection requires [`fzf`](https://github.com/junegunn/fzf). Git is required for `add`, `remove`, `ensure`, and `hook`. GitHub discovery uses the authenticated `gh` CLI (`gh auth login`); Bitbucket discovery uses its configured API credentials.
+Git is required for `add`, `remove`, `ensure`, and `hook`. Interactive repository selection uses [`fzf`](https://github.com/junegunn/fzf). GitHub discovery uses an authenticated `gh` CLI; Bitbucket discovery uses the credentials named in the configuration.
 
 ## Quick start
 
@@ -35,31 +49,51 @@ lager list
 lager ensure
 ```
 
-Use `--config PATH` or `LAGER_CONFIG` to select a config file. The default is `$HOME/.config/lager/config.toml`. `list --json` is the stable machine-readable interface.
+`register` declares the repository. `add` creates its checkout. `ensure` creates every declared checkout that is missing.
+
+## Configuration
+
+`init` writes `$HOME/.config/lager/config.toml` by default. A configuration declares the local root, optional discovery providers, and repositories to keep available:
+
+```toml
+root = "~/repos"
+
+[providers."github.com"]
+preset = "github"
+
+[[repositories]]
+url = "github.com/my-org/project"
+```
+
+This example places the repository at `~/repos/my-org/project`. Lager chooses the config path in this order: `--config PATH`, `LAGER_CONFIG`, then `$HOME/.config/lager/config.toml`.
+
+When `init` runs in a terminal without choices, its defaults are `repos` for the root, create the root, and configure GitHub. Outside a terminal, pass `--root`, one of `--create-root` or `--no-create-root`, and one of `--github` or `--no-github` explicitly.
+
+See the [configuration reference](docs/reference/config.md) for every field, default, and validation rule.
 
 ## Commands
 
 | Command | What it does | Common options |
 | --- | --- | --- |
-| `init` | Creates the configuration and chooses a repository root. | `--root`, `--create-root`, `--github` |
-| `register` | Declares repositories that lager should manage. | `--post-clone`, `--include-archived` |
+| `init` | Creates a configuration and selects a repository root. | `--root`, `--create-root`, `--github` |
+| `register` | Declares repositories for management. | `--post-clone`, `--include-archived` |
 | `unregister` | Removes repository declarations or wildcard members. | `--include-archived` |
-| `add` | Clones repositories into the configured root. | `--register`, `--post-clone`, `--include-archived` |
-| `remove` | Removes local repositories safely. | `--unregister`, `--keep-registered`, `--yes`, `--force` |
-| `ensure` | Reconciles every declared repository with the local root. | `--include-archived` |
+| `add` | Creates local checkouts. | `--register`, `--post-clone`, `--include-archived` |
+| `remove` | Permanently deletes guarded local checkouts. | `--unregister`, `--keep-registered`, `--yes`, `--force` |
+| `ensure` | Creates missing declared checkouts. | `--include-archived` |
 | `hook` | Runs a declared repository's post-clone hook again. | — |
-| `list` | Shows local repositories or discovers remote repository state. | `--remote`, `--include-archived`, `--json` |
+| `list` | Shows declarations and their local state. | `--remote`, `--include-archived`, `--json` |
 
-Without repository arguments, `register`, `unregister`, and `add` use `fzf --multi`; `remove` selects standalone local repositories. In a terminal, omitted `init` values are prompted. Outside a terminal, `init`, `add`, and `remove` require their explicit choice flags. See the [CLI reference](docs/reference/cli.md) for every option and interactive behavior.
+`list` is offline by default. Use `list --json` for stable machine-readable output. The [CLI reference](docs/reference/cli.md) documents every option, default, and interactive behavior.
 
 ## Documentation
 
 - [First repository tutorial](docs/tutorials/first-repository.md)
-- [CLI reference](docs/reference/cli.md) · [config reference](docs/reference/config.md)
+- [CLI reference](docs/reference/cli.md) · [configuration reference](docs/reference/config.md)
 - [Provider setup](docs/how-to/providers.md) · [automation](docs/how-to/automation.md)
 - [Safe removal](docs/how-to/remove-safely.md) · [wildcards](docs/how-to/wildcards.md)
 - [JSON output](docs/reference/list-json.md) · [exit codes](docs/reference/exit-codes.md)
-- [Managed repositories](docs/explanation/managed-repositories.md) · [v1 limits](docs/explanation/v1-scope.md)
+- [Declarations and local state](docs/explanation/declarations-and-local-state.md)
 
 ## Development
 
@@ -68,10 +102,6 @@ cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets
 ```
-
-## Release bootstrap
-
-The first live release-please pull request must propose exactly `v0.1.0`; do not merge a bootstrap PR for any other version.
 
 ## License
 
