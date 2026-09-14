@@ -1,27 +1,30 @@
 # Configure providers
 
-Provider entries are an allowlist for discovery and wildcard expansion. Explicit repository arguments work without a provider or `gh`.
+Providers let Lager discover repositories for no-argument selection and expand wildcard declarations. Explicit repository arguments work without a provider.
+
+Start with the [configuration reference](../reference/config.md) for every field and validation rule.
 
 ## GitHub
 
-`init --github` creates the default entry:
+Create the default provider with `init --github`, or add it to TOML:
 
 ```toml
 [providers."github.com"]
 preset = "github"
-prefix = ""
 ```
 
-Authenticate the GitHub CLI before using remote discovery:
+Authenticate `gh` before remote discovery:
 
 ```sh
 gh auth login
 lager list --remote --json
 ```
 
-GitHub catalog requests use `gh`; Git transport remains native Git/SSH.
+GitHub catalog requests use `gh`; cloning continues to use native Git and your SSH credentials.
 
 ## Bitbucket Cloud
+
+Use a bearer token from the environment:
 
 ```toml
 [providers."bitbucket.org"]
@@ -30,9 +33,11 @@ auth = "bearer"
 token_env = "BITBUCKET_TOKEN"
 ```
 
-`auth` may be `anonymous`, `bearer`, or `basic`. For basic auth use `username_env` and `password_env`. `api_url` may point to an approved API endpoint, which is useful for tests or a compatible service.
+For basic authentication, replace `token_env` with `username_env` and `password_env`. `auth` defaults to `anonymous` when omitted. `api_url` is optional for Cloud.
 
 ## Bitbucket Data Center
+
+Data Center requires an HTTP(S) API URL:
 
 ```toml
 [providers."git.example.com"]
@@ -45,6 +50,17 @@ ssh_user = "git"
 ssh_port = 7999
 ```
 
-Data Center requires `api_url`; credentials are read only from the named environment variables. Never put tokens or passwords in TOML.
+Lager reads credentials from the named environment variables. Keep tokens and passwords out of TOML.
 
-Use `--include-archived` with `list --remote`, `register`, `add`, or `ensure` when archived repositories should be candidates. Provider errors are reported on stderr. For a no-argument `add`, successful picker selections still run, while any provider catalog failure is retained and forces exit 1.
+## Discover archived repositories
+
+Archived repositories are excluded unless you ask for them:
+
+```sh
+lager list --remote --include-archived
+lager register --include-archived
+lager add --include-archived
+lager ensure --include-archived
+```
+
+`list --include-archived` requires `--remote`. For a no-argument `add`, successful picker selections still run when another provider fails, but the command exits 1 to report that failure.
