@@ -1,4 +1,6 @@
 use std::collections::{HashMap, VecDeque};
+#[cfg(test)]
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -20,6 +22,8 @@ pub enum FzfError {
 #[derive(Debug, Clone)]
 pub struct Fzf {
     executable: PathBuf,
+    #[cfg(test)]
+    arguments: Vec<OsString>,
 }
 
 impl Default for Fzf {
@@ -32,6 +36,16 @@ impl Fzf {
     pub fn new(executable: impl Into<PathBuf>) -> Self {
         Self {
             executable: executable.into(),
+            #[cfg(test)]
+            arguments: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_arguments(executable: impl Into<PathBuf>, arguments: &[&str]) -> Self {
+        Self {
+            executable: executable.into(),
+            arguments: arguments.iter().map(OsString::from).collect(),
         }
     }
 
@@ -39,7 +53,10 @@ impl Fzf {
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
-        let mut child = Command::new(&self.executable)
+        let mut command = Command::new(&self.executable);
+        #[cfg(test)]
+        command.args(&self.arguments);
+        let mut child = command
             .args(["--multi"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -156,8 +173,10 @@ mod tests {
 
     #[test]
     fn preserves_multiple_selection_order_and_duplicate_safe_mapping() {
-        let (_directory, path) = script("test \"$1\" = \"--multi\" && cat");
-        let selector = Fzf::new(path);
+        let selector = Fzf::with_arguments(
+            "/bin/sh",
+            &["-c", "test \"$1\" = \"--multi\" && cat", "fzf-shim"],
+        );
         let selected = selector
             .select(&[
                 candidate("org/first", "duplicate"),
