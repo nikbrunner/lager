@@ -5,7 +5,9 @@ use super::args::{
     UnregisterArgs,
 };
 use super::interaction::{Interaction, InteractionError};
-use crate::application::ports::{ConfigStore, RepositorySelector, SelectionError, ToolInspector};
+use crate::application::ports::{
+    ConfigStore, EnsureEvent, EnsureReporter, RepositorySelector, SelectionError, ToolInspector,
+};
 use crate::application::{configuration, ports, warehouse};
 use crate::domain::repository::RepositoryRef;
 use crate::infrastructure::{
@@ -316,6 +318,29 @@ fn add(
     }
 }
 
+struct TerminalEnsureReporter;
+
+impl EnsureReporter for TerminalEnsureReporter {
+    fn report(&mut self, event: EnsureEvent<'_>) {
+        let result = match event {
+            EnsureEvent::CloneStarted {
+                reference,
+                destination,
+            } => cliclack::log::info(format!(
+                "Cloning {reference} into {}",
+                destination.display()
+            )),
+            EnsureEvent::CloneSucceeded { reference } => {
+                cliclack::log::success(format!("Cloned {reference}"))
+            }
+            EnsureEvent::CloneFailed { reference, error } => {
+                cliclack::log::error(format!("Failed {reference}: {error}"))
+            }
+        };
+        let _ = result;
+    }
+}
+
 fn ensure(path: &Path, args: EnsureArgs) -> i32 {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -323,6 +348,7 @@ fn ensure(path: &Path, args: EnsureArgs) -> i32 {
     let store = FileConfigStore;
     let git = NativeGit;
     let shell = Shell;
+    let mut reporter = TerminalEnsureReporter;
     let config = match store.load(path) {
         Ok(config) => config,
         Err(error) => {
@@ -345,9 +371,11 @@ fn ensure(path: &Path, args: EnsureArgs) -> i32 {
         path,
         args.include_archived,
         &home,
+        &mut reporter,
     ) {
         Ok(outcome) => {
-            print_failures(&outcome);
+            print_provider_failures(&outcome);
+            print_ensure_summary(&outcome);
             i32::from(outcome.failed())
         }
         Err(error) => {
@@ -357,19 +385,49 @@ fn ensure(path: &Path, args: EnsureArgs) -> i32 {
     }
 }
 
-fn print_failures(outcome: &warehouse::BatchOutcome) {
+fn print_provider_failures(outcome: &warehouse::BatchOutcome) {
     for error in &outcome.provider_errors {
         eprintln!("lager: {}: {}", error.provider, error.error);
     }
-    for repository in outcome
+}
+
+fn print_ensure_summary(outcome: &warehouse::BatchOutcome) {
+    let cloned = outcome
+        .outcomes
+        .iter()
+        .filter(|item| matches!(item.status, warehouse::OperationStatus::Cloned))
+        .count();
+    let present = outcome
+        .outcomes
+        .iter()
+        .filter(|item| matches!(item.status, warehouse::OperationStatus::Noop))
+        .count();
+    let failed = outcome
         .outcomes
         .iter()
         .filter(|item| matches!(item.status, warehouse::OperationStatus::Failed(_)))
-    {
-        if let warehouse::OperationStatus::Failed(error) = &repository.status {
-            eprintln!("lager: {}: {error}", repository.reference);
-        }
+        .count()
+        + outcome.provider_errors.len();
+    let mut parts = Vec::new();
+    if cloned > 0 {
+        parts.push(format!("{cloned} cloned"));
     }
+    if present > 0 {
+        parts.push(format!("{present} already present"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
+    }
+    let message = if parts.is_empty() {
+        "Nothing to ensure".to_owned()
+    } else {
+        parts.join(", ")
+    };
+    let _ = if outcome.failed() {
+        cliclack::log::error(message)
+    } else {
+        cliclack::log::success(message)
+    };
 }
 
 fn hook(path: &Path, args: HookArgs) -> i32 {
