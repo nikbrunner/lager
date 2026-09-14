@@ -1,10 +1,23 @@
-# lager
+<h1 align="center">lager</h1>
 
-`lager` keeps a declared set of Git repositories available in one local root. It is a stable-Rust CLI for Linux and macOS (x86_64 and ARM64).
+<p align="center">A declarative local Git repository manager.</p>
+
+<p align="center">
+  <a href="https://github.com/nikbrunner/lager/actions/workflows/ci.yml"><img src="https://github.com/nikbrunner/lager/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/nikbrunner/lager/releases/latest"><img src="https://img.shields.io/github/v/release/nikbrunner/lager?display_name=tag&amp;sort=semver" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/nikbrunner/lager" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/Rust-2024-dea584?logo=rust" alt="Rust 2024">
+</p>
+
+<p align="center">
+  <img src="assets/lager-banner.png" alt="A sunlit warehouse with the lager name on a storage pillar">
+</p>
+
+`lager` keeps a declared set of Git repositories available in one local root. It is a stable-Rust CLI for Linux and macOS, on x86_64 and ARM64.
 
 ## Install
 
-From a released archive, unpack `lager` somewhere on `PATH`. The archive also contains `LICENSE` and this README. To install from source:
+From a [release archive](https://github.com/nikbrunner/lager/releases), unpack `lager` somewhere on `PATH`. The archive also contains `LICENSE` and this README. To install from source:
 
 ```sh
 cargo install --git https://github.com/nikbrunner/lager --locked
@@ -23,6 +36,21 @@ lager ensure
 ```
 
 Use `--config PATH` or `LAGER_CONFIG` to select a config file. The default is `$HOME/.config/lager/config.toml`. `list --json` is the stable machine-readable interface.
+
+## Commands
+
+| Command | What it does | Common options |
+| --- | --- | --- |
+| `init` | Creates the configuration and chooses a repository root. | `--root`, `--create-root`, `--github` |
+| `register` | Declares repositories that lager should manage. | `--post-clone`, `--include-archived` |
+| `unregister` | Removes repository declarations or wildcard members. | `--include-archived` |
+| `add` | Clones repositories into the configured root. | `--register`, `--post-clone`, `--include-archived` |
+| `remove` | Removes local repositories safely. | `--unregister`, `--keep-registered`, `--yes`, `--force` |
+| `ensure` | Reconciles every declared repository with the local root. | `--include-archived` |
+| `hook` | Runs a declared repository's post-clone hook again. | — |
+| `list` | Shows local repositories or discovers remote repository state. | `--remote`, `--include-archived`, `--json` |
+
+Without repository arguments, `register`, `unregister`, and `add` use `fzf --multi`; `remove` selects standalone local repositories. In a terminal, omitted `init` values are prompted. Outside a terminal, `init`, `add`, and `remove` require their explicit choice flags. See the [CLI reference](docs/reference/cli.md) for every option and interactive behavior.
 
 ## Documentation
 
