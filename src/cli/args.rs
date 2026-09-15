@@ -5,7 +5,7 @@ use clap::{Args as ClapArgs, Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(
     name = "lager",
-    version,
+    version = env!("LAGER_VERSION"),
     about = "Declarative local Git repository manager",
     after_help = "Examples:\n  lager register github.com/org/project\n  lager add github.com/org/project --register\n  lager remove github.com/org/project --unregister --yes --force"
 )]

@@ -45,7 +45,15 @@ Install the current checkout as a release build:
 cargo install --path . --force
 ```
 
-Cargo places `lager` in `~/.cargo/bin`. Run the command again after local changes. If Mise manages Lager, remove its `github:nikbrunner/lager` tool entry first so the Cargo binary is used.
+Cargo places `lager` in `~/.cargo/bin`. An untagged Git checkout reports its commit in `lager --version`, for example `lager 0.1.1-dev.55d7d5b`. Run the command again after local changes.
+
+If Mise manages Lager, its shim takes precedence over `~/.cargo/bin` and runs the downloaded release instead. Remove the Mise tool and regenerate its shims to use the Cargo binary:
+
+```sh
+mise use --global --remove github:nikbrunner/lager
+mise uninstall --all github:nikbrunner/lager
+mise reshim --force
+```
 
 Git is required for `add`, `remove`, `ensure`, and `hook`. Interactive repository selection uses [`fzf`](https://github.com/junegunn/fzf). GitHub discovery uses an authenticated `gh` CLI; Bitbucket discovery uses the credentials named in the configuration.
 
