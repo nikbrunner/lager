@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Lager 1.0 · Inventory and standalone worktree concepts</title>
+<style>
+:root {
+  --background: oklch(0.97 0.005 260);
+  --foreground: oklch(0.18 0.02 260);
+  --card: oklch(1 0 0);
+  --primary: oklch(0.5 0.25 280);
+  --muted: oklch(0.92 0.01 260);
+  --muted-foreground: oklch(0.4 0.02 260);
+  --accent: oklch(0.6 0.22 50);
+  --border: oklch(0.88 0.01 260);
+  --ring: oklch(0.5 0.25 280);
+  --font-sans: system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-display: ui-serif, Georgia, "Times New Roman", serif;
+  --radius: 0.625rem;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--background); color: var(--foreground); font: 15px/1.65 var(--font-sans); }
+main { max-width: 1100px; padding: 56px 28px 80px; margin: auto; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 500; line-height: 1.2; }
+h1 { font-size: 2.4rem; margin: 12px 0 20px; }
+h2 { font-size: 1.6rem; margin: 0; }
+p { max-width: 68ch; margin: 12px 0; }
+a { color: inherit; text-underline-offset: 4px; }
+.eyebrow, .number { font: 500 0.73rem/1.5 var(--font-mono); text-transform: uppercase; letter-spacing: .06em; color: var(--muted-foreground); }
+.brief { border-left: 3px solid var(--accent); padding: 4px 20px; }
+.brief p { margin: 4px 0; }
+nav { display: flex; flex-wrap: wrap; gap: 10px 24px; margin-top: 28px; font-size: .88rem; }
+section { margin-top: 68px; scroll-margin-top: 24px; }
+.section-heading { display: flex; gap: 16px; align-items: baseline; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+.number { color: var(--accent); }
+.description { margin: 18px 0 24px; }
+.notes { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 20px; }
+.notes p { color: var(--muted-foreground); font-size: .9rem; margin: 0; }
+.notes strong { color: var(--foreground); font-weight: 600; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 16px 0; }
+.toolbar label { font-size: .85rem; }
+button, select, input { font: inherit; }
+button, select { border: 1px solid var(--border); border-radius: 5px; background: var(--card); color: var(--foreground); padding: 7px 12px; }
+button { cursor: pointer; }
+button:hover { background: var(--muted); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+:focus-visible { outline: 3px solid var(--ring); outline-offset: 3px; }
+button, a, input, select { touch-action: manipulation; }
+.preview { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.small { font-size: .83rem; color: var(--muted-foreground); }
+.terminal {
+  --term-bg: #181b1c; --term-fg: #e6e8e4; --term-muted: #a5ada9;
+  --term-line: #454c49; --term-surface: #232a27; --term-accent: #edbe87;
+  --term-good: #a3cfab; --term-bad: #f4aaa0;
+  color-scheme: dark; background: var(--term-bg); color: var(--term-fg);
+  border: 1px solid var(--term-line); border-radius: var(--radius);
+  font: 13px/1.7 var(--font-mono); overflow: hidden; min-width: 0;
+}
+body[data-preview="light"] .terminal {
+  --term-bg: #f6f6f0; --term-fg: #222925; --term-muted: #56605a;
+  --term-line: #aeb7b0; --term-surface: #e5e9e1; --term-accent: #81501b;
+  --term-good: #2b6739; --term-bad: #a12f25; color-scheme: light;
+}
+.terminal :focus-visible { outline-color: var(--term-accent); }
+.terminal button, .terminal input, .terminal select { color: var(--term-fg); background: var(--term-bg); border-color: var(--term-line); }
+.terminal button:hover { background: var(--term-surface); }
+.terminal button.action { border-color: var(--term-accent); color: var(--term-accent); }
+.term-head { display: flex; flex-wrap: wrap; gap: 8px 20px; justify-content: space-between; color: var(--term-muted); padding: 12px 20px; border-bottom: 1px solid var(--term-line); }
+.term-head strong { color: var(--term-fg); font-weight: 500; }
+.term-scroll { overflow-x: auto; padding: 10px 16px; }
+.muted { color: var(--term-muted); }
+.host { border-top: 1px solid var(--term-line); padding: 14px 20px; background: var(--term-surface); }
+.term-controls { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 20px; }
+.hint { color: var(--term-muted); padding: 0 20px 14px; margin: 0; font-size: 12px; }
+.status { min-height: 1.65em; font-size: .85rem; margin: 12px 0 0; color: var(--muted-foreground); }
+kbd { font: inherit; border-bottom: 1px solid currentColor; }
+.search-bar { padding: 16px 20px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.search-bar input { min-width: 120px; flex: 1; border: 1px solid var(--term-line); padding: 8px 10px; border-radius: 4px; }
+.checkout-detail { padding: 16px 20px; border-top: 1px solid var(--term-line); }
+.exact-path { overflow-wrap: anywhere; color: var(--term-accent); }
+.empty { padding: 22px 20px; color: var(--term-muted); }
+.fact-body { padding: 20px; }
+dl { display: grid; grid-template-columns: 155px minmax(0, 1fr); margin: 16px 0; gap: 7px 18px; }
+dt { color: var(--term-muted); }
+dd { margin: 0; overflow-wrap: anywhere; }
+.good { color: var(--term-good); }
+.bad { color: var(--term-bad); }
+.confirm { border: 1px solid var(--term-accent); padding: 16px; margin-top: 18px; }
+.confirm p { margin-top: 0; }
+.confirm label { display: flex; gap: 10px; align-items: start; }
+.confirm input { margin-top: 5px; }
+.confirm .toolbar { margin-bottom: 0; }
+[hidden] { display: none !important; }
+.inv-table { width: 100%; min-width: 560px; border-collapse: collapse; text-align: left; }
+.inv-table th, .inv-table td { padding: 9px 12px; border-bottom: 1px solid var(--term-line); }
+.inv-table th { color: var(--term-muted); font-weight: 500; }
+.inv-table tr[data-selected="true"] { background: var(--term-surface); }
+.inv-table tr[data-selected="true"] td:first-child { box-shadow: inset 2px 0 var(--term-accent); }
+.inv-table button { border: 0; padding: 0; background: transparent; text-align: left; }
+.inv-table button[aria-pressed="true"] { color: var(--term-accent); }
+#inventory .search-bar > *, #inventory .toolbar > * { max-width: 100%; }
+#inv-search { width: 160px; }
+#inv-status { overflow-wrap: anywhere; }
+.inv-actions { display: flex; flex-wrap: wrap; gap: 16px; margin: 16px 0; }
+.inv-actions > div { flex: 1 1 190px; min-width: 0; }
+.inv-actions p { font-size: 12px; color: var(--term-muted); margin: 6px 0; }
+#inv-confirm-path { width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--term-line); }
+#inv-confirmation label { display: block; }
+footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border); font-size: .8rem; color: var(--muted-foreground); }
+@media (max-width: 600px) {
+  main { padding: 32px 18px 48px; }
+  h1 { font-size: 2rem; }
+  h2 { font-size: 1.35rem; }
+  section { margin-top: 48px; }
+  .notes { grid-template-columns: 1fr; gap: 12px; }
+  .preview { margin-left: 0; }
+  dl { grid-template-columns: 1fr; gap: 2px; }
+  dd { margin-bottom: 10px; }
+  .term-head, .host, .fact-body, .checkout-detail { padding: 14px; }
+}
+</style>
+</head>
+<body data-preview="dark">
+<main>
+<header>
+  <span class="eyebrow">Lager 1.0 / proposal mockups</span>
+  <p class="small"><a href="1.0.0.md">1.0 product requirements</a> · <a href="2.0.0-concepts.html">2.0 forklift and Herdr concepts</a> · Release scope approved; detailed interaction review pending. These mockups are proposals, not implementation approval.</p>
+  <h1>Know your repositories.<br>Manage worktrees independently.</h1>
+  <div class="brief"><p>1.0 keeps all existing Lager functionality and adds inventory and standalone worktrees. These two experiments focus on the new surfaces, not the complete release scope. Inventory uses <code>lager inventory</code> / <code>lager inv</code>, with <code>lager list</code> retained as an alias.</p><p class="small">All data is simulated. Buttons change only this page’s memory. No Git, filesystem, configuration, or external application operations. Standalone worktrees require no terminal-host integration.</p></div>
+  <nav aria-label="Concept sections"><a href="#inventory">01 Inventory</a><a href="#cleanup">02 Standalone worktree cleanup</a></nav>
+</header>
+<section id="inventory" aria-labelledby="inv-title">
+  <div class="section-heading"><span class="number">01 / inventory</span><h2 id="inv-title">Repositories, declarations, and checkouts</h2></div>
+  <p class="description">A proposed persistent inventory table for <code>lager inventory</code> / <code>lager inv</code> / <code>lager list</code>. Browse local repository roots and declarations; include remote candidates when you want to add one. Linked worktrees are not inventory entries; their management belongs to the separate standalone commands.</p>
+  <div class="toolbar"><span class="small">Sources and actions agreed · table interaction proposed</span><label class="preview" for="inv-palette">Terminal preview <select id="inv-palette" data-testid="inv-palette"><option value="dark">Dark</option><option value="light">Light</option></select></label></div>
+  <div class="terminal" data-testid="inv-demo">
+    <div class="term-head"><strong id="inv-command">lager inventory</strong><span>fixture data · simulated</span></div>
+    <div class="search-bar"><label for="inv-search">Search</label><input id="inv-search" data-testid="inv-search" type="search" placeholder="Repository, exact path, state…" autocomplete="off"><button id="inv-clear" data-testid="inv-clear">Clear search</button></div>
+    <div class="search-bar">
+      <label for="inv-registration">Registration</label><select id="inv-registration" data-testid="inv-registration"><option value="all">All</option><option>explicit</option><option>wildcard</option><option>unregistered</option></select>
+      <label for="inv-checkout">Checkout</label><select id="inv-checkout" data-testid="inv-checkout"><option value="all">All</option><option>cloned</option><option>missing</option><option>conflict</option></select>
+      <label><input id="inv-remote" data-testid="inv-remote" type="checkbox"> Include remote (--remote)</label>
+    </div>
+    <div class="term-controls"><button id="inv-add-repository" data-testid="inv-add-repository" class="action">Find remote repositories to add</button><button id="inv-refresh" data-testid="inv-refresh">Refresh (simulated)</button><button id="inv-reset" data-testid="inv-reset">Reset example</button></div>
+    <div class="host" id="inv-providers" data-testid="inv-providers" aria-live="polite"></div>
+    <div class="term-controls" id="inv-requests" hidden><button id="inv-resolve" data-testid="inv-resolve">Resolve sample requests</button><button id="inv-fail" data-testid="inv-fail">Simulate partial failure</button></div>
+    <div class="term-scroll"><table id="inv-table" data-testid="inv-table" class="inv-table" tabindex="0" aria-label="Inventory repositories" aria-describedby="inv-help"><thead><tr><th scope="col">Repository</th><th scope="col">Registration</th><th scope="col">Checkout</th></tr></thead><tbody id="inv-rows"></tbody></table></div>
+    <div id="inv-empty" data-testid="inv-empty" class="empty" hidden>No matching repositories. Adjust the search or filters; remote requests do not clear them.</div>
+    <div id="inv-detail" data-testid="inv-detail" class="checkout-detail">
+      <span class="muted">Selected exact path / simulated</span><div id="inv-path" data-testid="inv-path" class="exact-path"></div><div id="inv-facts"></div>
+      <div class="inv-actions">
+        <div><button id="inv-register" data-testid="inv-register" aria-describedby="inv-register-reason">Register</button><p id="inv-register-reason"></p></div>
+        <div><button id="inv-unregister" data-testid="inv-unregister" aria-describedby="inv-unregister-reason">Unregister</button><p id="inv-unregister-reason"></p></div>
+        <div><button id="inv-add" data-testid="inv-add" class="action" aria-describedby="inv-add-reason">Add + register</button><p id="inv-add-reason"></p></div>
+        <div><button id="inv-remove" data-testid="inv-remove" aria-describedby="inv-remove-reason">Remove + unregister…</button><p id="inv-remove-reason"></p></div>
+      </div>
+      <div id="inv-confirmation" data-testid="inv-confirmation" class="confirm" hidden>
+        <p>Remove this exact directory and unregister it in the mock:</p><p id="inv-confirm-target" class="exact-path"></p>
+        <label for="inv-confirm-path">Type the exact path to confirm</label><input id="inv-confirm-path" data-testid="inv-confirm-path" type="text" autocomplete="off" spellcheck="false" aria-describedby="inv-confirm-help">
+        <p id="inv-confirm-help" class="muted">Confirmation is disabled until the path matches exactly.</p>
+        <div class="toolbar"><button id="inv-confirm" data-testid="inv-confirm" disabled>Confirm removal (simulated)</button><button id="inv-cancel" data-testid="inv-cancel">Cancel</button></div>
+      </div>
+    </div>
+    <p class="hint" id="inv-help">Proposed keys: focus the table and use <kbd>↑ ↓</kbd> to select, or click a row. Actions stay in this view. Dirty/conflict fixtures illustrate blocks; production removal has full guards, not just these examples.</p>
+  </div>
+  <p id="inv-status" data-testid="inv-status" class="status" role="status" aria-live="polite"></p>
+  <div class="notes"><p><strong>Agreed:</strong> local + declared sources; optional <code>inventory --remote</code>. Register declares without cloning; unregister preserves files. Wildcard unregister creates an exclusion, not removal of the wildcard.</p><p><strong>Proposal:</strong> exact columns, state mappings, layout, and keyboard behavior. Remote provider requests and all actions are simulated in memory; no loading from real sources.</p></div>
+</section>
+<section id="cleanup" aria-labelledby="cleanup-title">
+  <div class="section-heading"><span class="number">02 / standalone worktree</span><h2 id="cleanup-title">Inspect facts before removing a worktree</h2></div>
+  <p class="description">Standalone worktrees belong to 1.0. This cleanup proposal inspects a clean or dirty fixture, confirms the exact directory, and preserves the branch. It does not depend on an external application or manage terminal sessions.</p>
+  <div class="terminal" data-testid="cleanup-demo">
+    <div class="term-head"><strong>lager worktree / inspect</strong><span>proposed interaction · simulated</span></div>
+    <div class="fact-body">
+      <div class="toolbar"><label for="cleanup-scenario">Sample worktree</label><select id="cleanup-scenario"><option value="dirty">Dirty · inventory</option><option value="clean">Clean · docs</option></select><button id="reset-cleanup">Reset example</button></div>
+      <div id="cleanup-path" class="exact-path"></div>
+      <dl id="cleanup-facts">
+        <dt>Files</dt><dd id="cleanup-files"></dd>
+        <dt>Commits</dt><dd id="cleanup-commits"></dd>
+        <dt>Locks</dt><dd id="cleanup-locks"></dd>
+        <dt>Branch</dt><dd id="cleanup-branch"></dd>
+        <dt>Worktree</dt><dd id="cleanup-presence"></dd>
+      </dl>
+      <div id="cleanup-verdict" data-testid="cleanup-verdict"></div>
+      <div class="toolbar"><button id="request-removal" class="action">Remove worktree…</button></div>
+      <div id="removal-confirmation" class="confirm" data-testid="removal-confirmation" hidden>
+        <p>Confirm simulated worktree removal</p><p id="confirmation-path" class="exact-path"></p>
+        <label><input id="confirm-removal-check" type="checkbox">Remove this worktree’s directory and Git worktree entry in the mock. Keep its branch.</label>
+        <div class="toolbar"><button id="confirm-removal" disabled>Confirm removal (simulated)</button><button id="cancel-removal">Cancel</button></div>
+      </div>
+    </div>
+    <p class="hint">Fixture-only inspection, not a complete safety policy. No merged-status shortcut, force action, or automatic branch deletion. Display and confirmation details remain proposals.</p>
+  </div>
+  <p class="status" id="cleanup-status" role="status" aria-live="polite">Dirty fixture selected. Removal is blocked; the branch is retained.</p>
+  <div class="notes"><p><strong>Try the proposal:</strong> inventory’s modified files and local-only commits block removal. Switch to docs, request removal, then cancel or explicitly confirm. Both examples preserve their branches.</p><p><strong>Still open:</strong> full safety rules, including commit reachability, locks, active processes, and revalidation. These fixtures illustrate the interaction, not production eligibility rules.</p></div>
+</section>
+<footer>Interactive 1.0 PRD reference · all observations are fixtures · reload the page to restore every example.</footer>
+<noscript><p>These examples need JavaScript for local simulated interactions. No external resources are loaded.</p></noscript>
+</main>
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+$('inv-palette').addEventListener('change', (event) => { document.body.dataset.preview = event.target.value; });
+
+// Inventory is an independent, in-memory example; identities never replace exact-path rows.
+const invSeeds = [
+  ['lager', 'explicit', 'cloned', 'clean'], ['helm', 'explicit', 'missing', 'no checkout'],
+  ['themes', 'unregistered', 'cloned', 'clean'], ['sdk', 'wildcard', 'cloned', 'clean'],
+  ['broken', 'explicit', 'conflict', 'destination exists but is not a Git checkout'],
+  ['draft', 'explicit', 'cloned', 'dirty: 2 modified files']
+];
+const invRemoteSeeds = [
+  { id: 'lager', provider: 'GitHub', identity: 'github.com/nikbrunner/lager' },
+  { id: 'beacon', provider: 'GitHub', identity: 'github.com/nikbrunner/beacon' },
+  { id: 'forge', provider: 'GitLab', identity: 'gitlab.com/nikbrunner/forge' }
+];
+let invRows, invSelected, invVisible = [], invProviders, invAvailable, invConfirmTarget = null;
+function invCurrent() { return invRows.find((row) => row.id === invSelected); }
+function invRemoteVisible(row) { return $('inv-remote').checked && invAvailable.has(row.provider); }
+function invMatches() {
+  const query = $('inv-search').value.trim().toLowerCase();
+  return invRows.filter((row) => (row.local || row.registration !== 'unregistered' || invRemoteVisible(row)) &&
+    ($('inv-registration').value === 'all' || row.registration === $('inv-registration').value) &&
+    ($('inv-checkout').value === 'all' || row.checkout === $('inv-checkout').value) &&
+    [row.id, row.path, row.identity, row.registration, row.checkout, row.state, row.excluded ? 'wildcard exclusion' : ''].join(' ').toLowerCase().includes(query));
+}
+function invDismissConfirmation() {
+  invConfirmTarget = null;
+  $('inv-confirmation').hidden = true;
+  $('inv-confirm-path').value = '';
+  $('inv-confirm').disabled = true;
+  $('inv-confirm-help').textContent = 'Confirmation is disabled until the path matches exactly.';
+}
+function invCanRemove(row) { return row && row.checkout === 'cloned' && row.state === 'clean'; }
+function invRender(message) {
+  const previousIndex = Math.max(0, invVisible.findIndex((row) => row.id === invSelected));
+  invVisible = invMatches();
+  if (!invVisible.some((row) => row.id === invSelected)) {
+    invSelected = invVisible[Math.min(previousIndex, invVisible.length - 1)]?.id || null;
+    invDismissConfirmation();
+  }
+  invRows.forEach((row) => {
+    let tr = $(`inv-row-${row.id}`);
+    if (!tr) {
+      tr = document.createElement('tr');
+      tr.id = `inv-row-${row.id}`;
+      tr.dataset.testid = tr.id;
+      tr.innerHTML = '<td><button></button></td><td></td><td></td>';
+      const button = tr.querySelector('button');
+      button.id = `inv-select-${row.id}`;
+      button.dataset.testid = button.id;
+      tr.addEventListener('click', (event) => {
+        if (invSelected !== row.id) invDismissConfirmation();
+        invSelected = row.id;
+        if (!event.target.closest('button')) $('inv-table').focus({ preventScroll: true });
+        invRender(`Selected ${row.id}. No operation performed.`);
+      });
+      $('inv-rows').append(tr);
+    }
+    tr.hidden = !invVisible.includes(row);
+    tr.dataset.selected = String(row.id === invSelected);
+    const button = tr.querySelector('button');
+    button.textContent = `${row.id === invSelected ? '› ' : ''}${row.id}`;
+    button.setAttribute('aria-pressed', String(row.id === invSelected));
+    button.setAttribute('aria-label', `${row.id}: ${row.registration}, ${row.checkout}, ${row.path}`);
+    tr.cells[1].textContent = row.registration;
+    tr.cells[2].textContent = row.checkout;
+  });
+  $('inv-empty').hidden = invVisible.length > 0;
+  $('inv-detail').hidden = !invSelected;
+  $('inv-table').setAttribute('aria-label', `Inventory repositories; ${invVisible.length} visible; selected ${invSelected || 'none'}`);
+  $('inv-command').textContent = `lager inventory${$('inv-remote').checked ? ' --remote' : ''}`;
+  $('inv-providers').textContent = $('inv-remote').checked
+    ? Object.entries(invProviders).map(([provider, state]) => `${provider}: ${state}`).join(' · ')
+    : 'Local + declared fixtures. Enable --remote to discover missing repositories to Add + register.';
+  $('inv-requests').hidden = !Object.values(invProviders).includes('loading (simulated)') || !$('inv-remote').checked;
+  const row = invCurrent();
+  if (row) {
+    $('inv-path').textContent = row.path;
+    $('inv-facts').textContent = `${row.registration} · ${row.checkout} · ${row.state}${row.excluded ? ' · wildcard exclusion; wildcard rule retained' : ''}${invRemoteVisible(row) ? ` · ${row.provider} remote identity matched` : ''}`;
+    const rules = {
+      register: [row.registration !== 'unregistered', row.registration === 'unregistered' ? 'Declare this path explicitly; do not clone or alter files.' : 'Already declared; no registration change needed.'],
+      unregister: [row.registration === 'unregistered', row.registration === 'unregistered' ? 'Not declared; nothing to unregister.' : row.registration === 'wildcard' ? 'Create an exclusion for this repository; keep the wildcard and all files.' : 'Remove the declaration only; keep all files.'],
+      add: [row.checkout !== 'missing', row.checkout === 'missing' ? 'Clone this fixture at the exact path and register explicitly.' : row.checkout === 'conflict' ? 'Unavailable: destination conflict; do not overwrite it.' : 'Not offered: checkout already exists; use Register if undeclared.'],
+      remove: [!invCanRemove(row), row.checkout === 'conflict' ? 'Blocked: destination conflict.' : row.checkout === 'missing' ? 'Unavailable: no checkout to remove; use Unregister for a declaration.' : row.state !== 'clean' ? 'Blocked: dirty fixture (2 modified files).' : 'Clean fixture only: exact-path confirmation required; unregister too.' ]
+    };
+    Object.entries(rules).forEach(([action, [disabled, reason]]) => {
+      $(`inv-${action}`).disabled = disabled;
+      $(`inv-${action}-reason`).textContent = reason;
+    });
+    $('inv-add').hidden = row.checkout !== 'missing';
+  }
+  if (message) $('inv-status').textContent = message;
+}
+function invStartRequests() {
+  invProviders = { GitHub: 'loading (simulated)', GitLab: 'loading (simulated)' };
+  invRender('Sample requests pending. Local rows remain interactive; query and selection are retained. Previously resolved candidates stay visible during refresh.');
+}
+function invResolveRequests(partial) {
+  if (!$('inv-remote').checked) return;
+  invAvailable = new Set(partial ? ['GitHub'] : ['GitHub', 'GitLab']);
+  invProviders = { GitHub: 'resolved · lager deduplicated; beacon available', GitLab: partial ? 'FAILED · sample provider unavailable; GitHub results retained' : 'resolved · forge available' };
+  invRemoteSeeds.filter((seed) => invAvailable.has(seed.provider)).forEach((seed) => {
+    const matches = invRows.filter((row) => row.identity === seed.identity);
+    // Enrich every existing exact path; do not collapse local paths sharing an origin.
+    if (matches.length) matches.forEach((row) => { row.provider = seed.provider; });
+    else invRows.push({ ...seed, path: `/Users/nik/repos/nikbrunner/${seed.id}`, registration: 'unregistered', checkout: 'missing', state: 'remote candidate; no checkout', local: false, excluded: false });
+  });
+  invRender(partial ? 'Partial results: GitHub succeeded; GitLab failed. Search and remaining selection preserved.' : 'Sample requests resolved. Select beacon or forge, then Add + register. Existing lager identity was not duplicated; exact paths remain distinct.');
+}
+$('inv-remote').addEventListener('change', () => {
+  if ($('inv-remote').checked) invStartRequests();
+  else {
+    invAvailable.clear();
+    invProviders = {};
+    invRender('Remote disabled. Remote-only candidates hidden; cloned or registered repositories retained.');
+  }
+});
+$('inv-add-repository').addEventListener('click', () => {
+  if (!$('inv-remote').checked) { $('inv-remote').checked = true; invStartRequests(); }
+  else invRender($('inv-requests').hidden ? 'Remote already enabled. Select a missing candidate and use Add + register; adjust search/filters if hidden.' : 'Remote already enabled. Use Resolve sample requests or Simulate partial failure to reveal candidates.');
+});
+$('inv-resolve').addEventListener('click', () => invResolveRequests(false));
+$('inv-fail').addEventListener('click', () => invResolveRequests(true));
+$('inv-refresh').addEventListener('click', () => {
+  if ($('inv-remote').checked) invStartRequests();
+  else invRender('Simulated refresh: no fixture changes. Query and selection preserved; no source was loaded.');
+});
+['inv-search', 'inv-registration', 'inv-checkout'].forEach((id) => {
+  $(id).addEventListener(id === 'inv-search' ? 'input' : 'change', () => invRender('View filtered. No repository changed; pending sample requests are unaffected.'));
+});
+$('inv-clear').addEventListener('click', () => {
+  const hadQuery = Boolean($('inv-search').value);
+  $('inv-search').value = '';
+  invRender(hadQuery ? 'Search cleared; registration and checkout filters retained.' : 'Search is already empty; filters are unchanged.');
+  $('inv-search').focus();
+});
+$('inv-table').addEventListener('keydown', (event) => {
+  if (event.altKey || event.ctrlKey || event.metaKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+  event.preventDefault();
+  if (!invVisible.length) return;
+  const index = invVisible.findIndex((row) => row.id === invSelected);
+  const next = invVisible[Math.max(0, Math.min(invVisible.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)))];
+  if (next.id !== invSelected) invDismissConfirmation();
+  invSelected = next.id;
+  invRender(`Selected ${next.id}: ${next.registration}, ${next.checkout}. No operation performed.`);
+  $(`inv-select-${next.id}`).focus({ preventScroll: true });
+});
+function invUnregister(row) {
+  if (row.registration === 'wildcard') row.excluded = true;
+  row.registration = 'unregistered';
+}
+['register', 'unregister', 'add'].forEach((action) => {
+  $(`inv-${action}`).addEventListener('click', () => {
+    const row = invCurrent();
+    if (!row || $(`inv-${action}`).disabled) return;
+    invDismissConfirmation();
+    let outcome;
+    if (action === 'unregister') {
+      invUnregister(row);
+      outcome = row.excluded ? 'Wildcard exclusion created; rule and files retained.' : 'Declaration removed; files retained.';
+    } else {
+      row.registration = 'explicit';
+      row.excluded = false;
+      if (action === 'add') { row.local = true; row.checkout = 'cloned'; row.state = 'clean'; }
+      outcome = action === 'add' ? 'Cloned and explicitly registered in the mock.' : 'Explicitly registered; no clone or file changes.';
+    }
+    invRender(`${row.path}: ${outcome}`);
+  });
+});
+$('inv-remove').addEventListener('click', () => {
+  const row = invCurrent();
+  if (!invCanRemove(row)) return;
+  invConfirmTarget = row.id;
+  $('inv-confirm-target').textContent = row.path;
+  $('inv-confirmation').hidden = false;
+  $('inv-confirm-path').focus();
+  $('inv-status').textContent = 'Awaiting exact-path confirmation. Nothing changed; Cancel preserves all state.';
+});
+$('inv-confirm-path').addEventListener('input', () => {
+  const exact = invCurrent()?.path === $('inv-confirm-path').value;
+  $('inv-confirm').disabled = !exact;
+  $('inv-confirm-help').textContent = exact ? 'Exact path matches. Confirmation removes and unregisters only this fixture.' : 'Confirmation is disabled until the path matches exactly.';
+});
+$('inv-cancel').addEventListener('click', () => {
+  invDismissConfirmation();
+  $('inv-remove').focus();
+  invRender('Removal cancelled. Declaration, checkout, files, search, and selection unchanged.');
+});
+$('inv-confirm').addEventListener('click', () => {
+  const row = invCurrent();
+  if (!invCanRemove(row) || row.id !== invConfirmTarget || $('inv-confirm-path').value !== row.path) return;
+  invUnregister(row);
+  row.local = false;
+  row.checkout = 'missing';
+  row.state = 'no checkout; removed in mock';
+  invDismissConfirmation();
+  invRender(`${row.path}: removed + unregistered in the mock.${row.excluded ? ' Wildcard exclusion retained; rule unchanged.' : ''}${invRemoteVisible(row) ? ' Still visible as a remote candidate.' : ' No local, declared, or visible remote source remains; row removed from view.'}`);
+  $('inv-table').focus({ preventScroll: true });
+});
+function invReset() {
+  invRows = invSeeds.map(([id, registration, checkout, state]) => ({ id, registration, checkout, state, identity: `github.com/nikbrunner/${id}`, path: `/Users/nik/repos/nikbrunner/${id}`, local: checkout !== 'missing', excluded: false }));
+  invSelected = 'lager';
+  invVisible = [];
+  invProviders = {};
+  invAvailable = new Set();
+  $('inv-rows').replaceChildren();
+  $('inv-search').value = '';
+  $('inv-registration').value = 'all';
+  $('inv-checkout').value = 'all';
+  $('inv-remote').checked = false;
+  invDismissConfirmation();
+  invRender('Six local + declared fixtures restored. Select a repository, or find remote repositories to add.');
+}
+$('inv-reset').addEventListener('click', invReset);
+invReset();
+
+const cleanupFixtures = {
+  dirty: { path: '/Users/nik/repos/nikbrunner/lager.worktrees/inventory', branch: 'feature/inventory', files: '2 modified: src/inventory.rs, tests/inventory.rs; 1 untracked: notes.txt', commits: '2 local-only commits, not on origin/feature/inventory', locked: false },
+  clean: { path: '/Users/nik/repos/nikbrunner/lager.worktrees/docs', branch: 'docs/guide', files: '0 modified · 0 staged · 0 untracked', commits: '0 local-only commits relative to origin/docs/guide', locked: false }
+};
+let cleanupState;
+function cleanupKey() { return $('cleanup-scenario').value; }
+function clearConfirmation() {
+  $('removal-confirmation').hidden = true;
+  $('confirm-removal-check').checked = false;
+  $('confirm-removal').disabled = true;
+}
+function renderCleanup() {
+  const key = cleanupKey();
+  const fixture = cleanupFixtures[key];
+  const state = cleanupState[key];
+  $('cleanup-path').textContent = fixture.path;
+  $('cleanup-files').textContent = state.removed ? 'Directory removed in mock; last inspected: ' + fixture.files : fixture.files;
+  $('cleanup-commits').textContent = fixture.commits;
+  $('cleanup-locks').textContent = fixture.locked ? 'Worktree locked' : 'No Git worktree lock (fixture)';
+  $('cleanup-branch').textContent = `${fixture.branch} · retained${state.removed ? ' after removal' : ''}`;
+  $('cleanup-presence').textContent = state.removed ? 'Removed in mock state' : 'Present';
+  $('cleanup-presence').dataset.removed = String(state.removed);
+  $('request-removal').disabled = state.removed;
+  const verdict = $('cleanup-verdict');
+  verdict.className = key === 'dirty' ? 'bad' : 'good';
+  verdict.dataset.blocked = String(key === 'dirty');
+  verdict.textContent = state.removed ? 'Mock worktree removed. Branch retained.' : key === 'dirty' ? 'BLOCKED · uncommitted files and local-only commits. Nothing removed.' : 'CLEAN FIXTURE · confirmation available. Not a general safety guarantee.';
+}
+function resetCleanup() {
+  cleanupState = { dirty: { removed: false }, clean: { removed: false } };
+  $('cleanup-scenario').value = 'dirty';
+  clearConfirmation();
+  renderCleanup();
+  $('cleanup-status').textContent = 'Original fixtures restored. Dirty removal blocked; both branches retained.';
+}
+$('cleanup-scenario').addEventListener('change', () => {
+  clearConfirmation();
+  renderCleanup();
+  $('cleanup-status').textContent = `${cleanupKey() === 'dirty' ? 'Dirty' : 'Clean'} fixture selected. No operation performed.`;
+});
+$('request-removal').addEventListener('click', () => {
+  clearConfirmation();
+  if (cleanupKey() === 'dirty') {
+    $('cleanup-status').textContent = 'Removal blocked: modified and untracked files plus 2 local-only commits. Nothing removed.';
+    return;
+  }
+  if (cleanupState.clean.removed) return;
+  $('confirmation-path').textContent = cleanupFixtures.clean.path;
+  $('removal-confirmation').hidden = false;
+  $('confirm-removal-check').focus();
+  $('cleanup-status').textContent = 'Review the exact path and acknowledge removal. Branch docs/guide will be retained.';
+});
+$('confirm-removal-check').addEventListener('change', () => { $('confirm-removal').disabled = !$('confirm-removal-check').checked; });
+$('cancel-removal').addEventListener('click', () => {
+  clearConfirmation();
+  $('request-removal').focus();
+  $('cleanup-status').textContent = 'Removal cancelled. Worktree and branch unchanged.';
+});
+$('confirm-removal').addEventListener('click', () => {
+  if (cleanupKey() !== 'clean' || !$('confirm-removal-check').checked || $('removal-confirmation').hidden || cleanupState.clean.removed) return;
+  cleanupState.clean.removed = true;
+  clearConfirmation();
+  renderCleanup();
+  $('reset-cleanup').focus();
+  $('cleanup-status').textContent = 'Removed docs worktree in mock state only. Branch docs/guide retained.';
+});
+$('reset-cleanup').addEventListener('click', resetCleanup);
+resetCleanup();
+</script>
+</body>
+</html>
