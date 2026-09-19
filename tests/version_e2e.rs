@@ -1,19 +1,28 @@
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    path::Path,
+    process::{Command, Output},
+};
 
 use tempfile::tempdir;
 
-fn command(directory: &Path, program: &str, args: &[&str]) -> String {
-    let output = Command::new(program)
-        .args(args)
-        .current_dir(directory)
+fn checked_output(command: &mut Command) -> Output {
+    command.env("GIT_EDITOR", "true");
+    let output = command
         .output()
-        .expect("run command");
-
+        .unwrap_or_else(|error| panic!("run {command:?}: {error}"));
     assert!(
         output.status.success(),
-        "{program} failed: {}",
+        "{command:?} failed ({}):\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    output
+}
+
+fn command(directory: &Path, program: &str, args: &[&str]) -> String {
+    let output = checked_output(Command::new(program).args(args).current_dir(directory));
 
     String::from_utf8(output.stdout)
         .expect("command output is UTF-8")
@@ -23,17 +32,11 @@ fn command(directory: &Path, program: &str, args: &[&str]) -> String {
 
 #[test]
 fn version_identifies_an_untagged_git_checkout() {
-    let output = Command::new(env!("CARGO_BIN_EXE_lager"))
-        .arg("--version")
-        .output()
-        .expect("run lager --version");
+    let output = checked_output(Command::new(env!("CARGO_BIN_EXE_lager")).arg("--version"));
 
     assert!(output.status.success());
 
-    let git = Command::new("git")
-        .args(["rev-parse", "--short=7", "HEAD"])
-        .output()
-        .expect("read current Git commit");
+    let git = checked_output(Command::new("git").args(["rev-parse", "--short=7", "HEAD"]));
     assert!(git.status.success());
     let commit = String::from_utf8(git.stdout)
         .expect("Git commit is UTF-8")
@@ -86,6 +89,7 @@ fn version_changes_after_an_empty_commit() {
             "-c",
             "commit.gpgsign=false",
             "commit",
+            "--allow-empty",
             "--quiet",
             "-m",
             "version test",
@@ -93,12 +97,12 @@ fn version_changes_after_an_empty_commit() {
     );
 
     let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/version-e2e");
-    let first_version = Command::new("cargo")
-        .args(["run", "--offline", "--quiet", "--", "--version"])
-        .current_dir(&checkout)
-        .env("CARGO_TARGET_DIR", &target)
-        .output()
-        .expect("build first version");
+    let first_version = checked_output(
+        Command::new("cargo")
+            .args(["run", "--offline", "--quiet", "--", "--version"])
+            .current_dir(&checkout)
+            .env("CARGO_TARGET_DIR", &target),
+    );
     assert!(first_version.status.success());
 
     command(
@@ -114,12 +118,12 @@ fn version_changes_after_an_empty_commit() {
             "next",
         ],
     );
-    let second_version = Command::new("cargo")
-        .args(["run", "--offline", "--quiet", "--", "--version"])
-        .current_dir(&checkout)
-        .env("CARGO_TARGET_DIR", &target)
-        .output()
-        .expect("build second version");
+    let second_version = checked_output(
+        Command::new("cargo")
+            .args(["run", "--offline", "--quiet", "--", "--version"])
+            .current_dir(&checkout)
+            .env("CARGO_TARGET_DIR", &target),
+    );
     assert!(second_version.status.success());
 
     let commit = command(&checkout, "git", &["rev-parse", "--short=7", "HEAD"]);
@@ -129,12 +133,12 @@ fn version_changes_after_an_empty_commit() {
     );
 
     command(&checkout, "git", &["tag", &tag]);
-    let tagged_version = Command::new("cargo")
-        .args(["run", "--offline", "--quiet", "--", "--version"])
-        .current_dir(&checkout)
-        .env("CARGO_TARGET_DIR", &target)
-        .output()
-        .expect("build tagged version");
+    let tagged_version = checked_output(
+        Command::new("cargo")
+            .args(["run", "--offline", "--quiet", "--", "--version"])
+            .current_dir(&checkout)
+            .env("CARGO_TARGET_DIR", &target),
+    );
     assert!(tagged_version.status.success());
     assert_eq!(
         String::from_utf8(tagged_version.stdout).expect("version output is UTF-8"),
@@ -167,12 +171,12 @@ fn version_falls_back_to_package_version_without_git_metadata() {
     fs::remove_dir_all(archive.join(".git")).expect("remove Git metadata");
 
     let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/version-e2e-no-git");
-    let version = Command::new("cargo")
-        .args(["run", "--offline", "--quiet", "--", "--version"])
-        .current_dir(&archive)
-        .env("CARGO_TARGET_DIR", target)
-        .output()
-        .expect("build Git-less version");
+    let version = checked_output(
+        Command::new("cargo")
+            .args(["run", "--offline", "--quiet", "--", "--version"])
+            .current_dir(&archive)
+            .env("CARGO_TARGET_DIR", target),
+    );
     assert!(version.status.success());
     assert_eq!(
         String::from_utf8(version.stdout).expect("version output is UTF-8"),

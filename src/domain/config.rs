@@ -55,6 +55,11 @@ impl Config {
 
     /// Validates all recognized semantic values before an application operation may run.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        // Validate the whole reference set before any diagnostic can quote a declaration.
+        for declaration in &self.repositories {
+            RepositoryRef::parse(&declaration.url)
+                .map_err(|error| ConfigError::Semantic(error.to_string()))?;
+        }
         resolve_portable_path(&self.root, Path::new("/"))?;
         for (host, provider) in &self.providers {
             validate_provider(host, provider)?;
@@ -134,7 +139,7 @@ fn validate_provider(host: &str, provider: &ProviderConfig) -> Result<(), Config
         || host.contains("://")
         || host.chars().any(char::is_whitespace)
     {
-        return semantic(format!("provider host is invalid: {host}"));
+        return semantic("provider host is invalid".to_owned());
     }
     validate_portable_component_path(&provider.prefix, true, "provider prefix")?;
     match provider.preset.as_str() {

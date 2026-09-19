@@ -11,6 +11,172 @@ fn run(home: &Path, _cache: &Path, config: &Path, args: &[&str]) -> Output {
         .expect("lager process")
 }
 
+#[cfg(unix)]
+#[test]
+fn init_refuses_dangling_config_symlink_without_creating_target_or_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config.toml");
+    std::os::unix::fs::symlink("missing.toml", &config).unwrap();
+    let output = support::lager(temp.path(), &config)
+        .args(["init", "--root", "repos", "--create-root", "--no-github"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("already exists"));
+    assert_eq!(fs::read_link(config).unwrap(), Path::new("missing.toml"));
+    assert!(!temp.path().join("missing.toml").exists());
+    assert!(!temp.path().join("repos").exists());
+}
+
+#[test]
+fn non_tty_init_requires_each_omitted_choice_without_prompting() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config.toml");
+    for args in [
+        vec!["init"],
+        vec!["init", "--root", "repos", "--no-create-root"],
+        vec!["init", "--root", "repos", "--no-github"],
+        vec!["init", "--no-create-root", "--no-github"],
+    ] {
+        let output = support::lager(temp.path(), &config)
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(output.stdout.is_empty());
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(diagnostic.contains("outside a TTY"), "{diagnostic}");
+        assert!(!diagnostic.contains('?'));
+        assert!(!config.exists());
+    }
+}
+
+#[test]
+fn config_precedence_is_explicit_then_environment_then_home_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let home_default = temp.path().join(".config/lager/config.toml");
+    fs::create_dir_all(home_default.parent().unwrap()).unwrap();
+    let environment = temp.path().join("environment.toml");
+    let explicit = temp.path().join("explicit.toml");
+    for (path, name) in [
+        (&home_default, "home"),
+        (&environment, "environment"),
+        (&explicit, "explicit"),
+    ] {
+        fs::write(
+            path,
+            format!("root = 'repos'\n[[repositories]]\nurl = 'org/{name}'\n"),
+        )
+        .unwrap();
+    }
+    for expected in ["explicit", "environment", "home"] {
+        let mut command = support::external(temp.path(), env!("CARGO_BIN_EXE_lager"));
+        command
+            .env("HOME", temp.path())
+            .env("LAGER_CONFIG", &environment);
+        if expected == "explicit" {
+            command.arg("--config").arg(&explicit);
+        }
+        if expected == "home" {
+            command.env_remove("LAGER_CONFIG");
+        }
+        let output = command.args(["list", "--json"]).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            value["repositories"][0]["identity"],
+            format!("github.com/org/{expected}")
+        );
+    }
+}
+
+#[test]
+fn semantic_usage_errors_precede_config_io() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("missing.toml");
+    for args in [
+        vec!["add", "org/repo"],
+        vec!["remove", "org/repo"],
+        vec!["list", "--include-archived"],
+        vec!["ls", "--include-archived"],
+    ] {
+        let output = support::lager(temp.path(), &config)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("config"),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
+fn invalid_toml_reports_a_location_without_exposing_values() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config.toml");
+    for content in [
+        "# config\nroot = ] # SENTINEL\n",
+        "# config\nroot = 42 # SENTINEL\n",
+        "root = 'repos'\nrepositories = 'SENTINEL'\n",
+    ] {
+        fs::write(&config, content).unwrap();
+        let output = support::lager(temp.path(), &config)
+            .args(["list", "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("line 2, column"), "{error}");
+        assert!(!error.contains("SENTINEL"), "{error}");
+        assert_eq!(fs::read_to_string(&config).unwrap(), content);
+    }
+}
+
+#[test]
+fn each_command_warns_once_per_unknown_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config.toml");
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    let output = support::external(temp.path(), "git")
+        .current_dir(&source)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let reference = format!("file://{}", source.display());
+    let original = format!(
+        "root = 'repos'\nfuture = true\n[providers.'github.com']\npreset = 'github'\nfuture = true\n[[repositories]]\nurl = '{reference}'\nfuture = true\n"
+    );
+    for args in [
+        vec!["list", "--json"],
+        vec!["ls", "--json"],
+        vec!["register", "org/one", "org/two"],
+        vec!["unregister", "org/one", "org/two"],
+        vec!["add", &reference, "--register"],
+        vec!["ensure"],
+        vec!["hook", &reference],
+        vec!["remove", &reference, "--yes", "--unregister"],
+    ] {
+        fs::write(&config, &original).unwrap();
+        let output = support::lager(temp.path(), &config)
+            .args(&args)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for warning in [
+            "unknown config key `future`",
+            "unknown provider key `github.com.future`",
+            "unknown repository key `repositories[0].future`",
+        ] {
+            assert_eq!(stderr.matches(warning).count(), 1, "{args:?}: {output:?}");
+        }
+    }
+}
+
 #[test]
 fn unknown_keys_warn_and_survive_binary_mutation() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;

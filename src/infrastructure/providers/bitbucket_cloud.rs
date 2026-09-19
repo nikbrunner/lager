@@ -33,7 +33,6 @@ struct Workspace {
 #[derive(Debug, Deserialize)]
 struct Repository {
     is_archived: Option<bool>,
-    full_name: String,
     links: Links,
 }
 
@@ -214,10 +213,10 @@ fn summary(
         .iter()
         .find(|link| link.name.eq_ignore_ascii_case("ssh"))
         .or_else(|| repository.links.clone.first())
-        .ok_or_else(|| format!("repository {} omitted clone links", repository.full_name))?;
+        .ok_or_else(|| "repository omitted clone links".to_owned())?;
     let path = RepositoryRef::parse(&link.href)
         .map(|reference| reference.path)
-        .unwrap_or_else(|_| repository.full_name.clone());
+        .map_err(|error| error.to_string())?;
     let reference =
         RepositoryRef::parse(&ssh_url(host, config, &path)).map_err(|error| error.to_string())?;
     Ok(RepositorySummary {

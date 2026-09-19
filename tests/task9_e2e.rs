@@ -49,6 +49,7 @@ mod unix {
             "Create missing declared checkouts sequentially",
             "Run configured hooks for explicit repositories",
             "Show declarations and local repository state",
+            "[alias: ls]",
             "Use PATH instead of the default configuration file",
             "lager add github.com/org/project --register",
             "lager remove github.com/org/project --unregister --yes --force",
@@ -129,6 +130,18 @@ mod unix {
                 );
             }
         }
+        let list = support::lager(&home, &config)
+            .args(["list", "--help"])
+            .output()?;
+        let alias = support::lager(&home, &config)
+            .args(["ls", "--help"])
+            .output()?;
+        assert_eq!(alias.status.code(), list.status.code());
+        assert_eq!(alias.stderr, list.stderr);
+        assert_eq!(
+            String::from_utf8_lossy(&alias.stdout).replace("lager ls", "lager list"),
+            String::from_utf8_lossy(&list.stdout)
+        );
         Ok(())
     }
 

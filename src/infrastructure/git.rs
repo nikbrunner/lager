@@ -31,6 +31,15 @@ pub enum GitError {
     Cleanup(#[source] std::io::Error),
 }
 
+// Preserve the native status even when cleanup replaces the public error variant.
+#[derive(Debug, thiserror::Error)]
+#[error("{source}")]
+struct CloneCleanupError {
+    status: ExitStatus,
+    #[source]
+    source: std::io::Error,
+}
+
 pub fn clone_repository(
     url: &str,
     home: &Path,
@@ -96,8 +105,12 @@ pub fn clone_repository(
     if status.success() {
         Ok(())
     } else {
-        cleanup_destination(&parent_fd, destination_name, &destination_fd)
-            .map_err(GitError::Cleanup)?;
+        cleanup_destination(&parent_fd, destination_name, &destination_fd).map_err(|source| {
+            GitError::Cleanup(std::io::Error::new(
+                source.kind(),
+                CloneCleanupError { status, source },
+            ))
+        })?;
         Err(GitError::Failed(status))
     }
 }
@@ -239,6 +252,17 @@ fn unsafe_path(path: &Path, message: &str) -> GitError {
 impl GitClient for NativeGit {
     type Error = GitError;
 
+    fn is_cancelled(&self, error: &Self::Error) -> bool {
+        match error {
+            GitError::Failed(status) => super::exit_status::is_cancelled(*status),
+            GitError::Cleanup(error) => error
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<CloneCleanupError>())
+                .is_some_and(|error| super::exit_status::is_cancelled(error.status)),
+            _ => false,
+        }
+    }
+
     fn clone_repository(
         &self,
         url: &str,
@@ -306,6 +330,32 @@ pub fn inspect_removal(destination: &Path, expected_url: &str) -> Result<Vec<Str
     let expected = normalize_remote(expected_url).map_err(|error| error.to_string())?;
     if actual != expected {
         return Err("origin does not match the requested repository".to_owned());
+    }
+
+    let worktrees = common_dir.join("worktrees");
+    match std::fs::symlink_metadata(&worktrees) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect dependent worktree metadata: {error}"
+            ));
+        }
+        Ok(metadata) => {
+            if !metadata.is_dir() {
+                return Err("dependent worktree metadata is not a real directory".to_owned());
+            }
+            let mut entries = std::fs::read_dir(&worktrees)
+                .map_err(|error| format!("cannot read dependent worktree metadata: {error}"))?;
+            if let Some(entry) = entries.next() {
+                entry.map_err(|error| {
+                    format!("cannot read dependent worktree metadata entry: {error}")
+                })?;
+                // Even stale or malformed entries may own linked-checkout state.
+                return Err(
+                    "dependent worktree metadata prevents primary checkout removal".to_owned(),
+                );
+            }
+        }
     }
 
     let mut warnings = Vec::new();

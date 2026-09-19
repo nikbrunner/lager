@@ -1,6 +1,7 @@
 use std::io::{self, IsTerminal};
 
 pub use crate::application::ports::{Interaction, InteractionError};
+use crate::presentation::escape;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TerminalInteraction;
@@ -8,7 +9,7 @@ pub struct TerminalInteraction;
 impl Interaction for TerminalInteraction {
     fn confirm(&mut self, message: &str, default: bool) -> Result<bool, InteractionError> {
         require_terminal(io::stdin().is_terminal(), io::stderr().is_terminal())?;
-        cliclack::confirm(message)
+        cliclack::confirm(escape(message))
             .initial_value(default)
             .interact()
             .map_err(map_interaction_error)
@@ -21,11 +22,24 @@ impl Interaction for TerminalInteraction {
         default: Option<&str>,
     ) -> Result<String, InteractionError> {
         require_terminal(io::stdin().is_terminal(), io::stderr().is_terminal())?;
-        let mut prompt = cliclack::input(message).placeholder(placeholder);
-        if let Some(default) = default {
-            prompt = prompt.default_input(default);
-        }
-        prompt.interact().map_err(map_interaction_error)
+        // Cliclack renders default_input again on submission. Keep the actual
+        // default outside the renderer, so Enter returns it without ever drawing
+        // its raw controls (or decoding a user's literal escape notation).
+        let hint = if placeholder.is_empty() {
+            default.unwrap_or("")
+        } else {
+            placeholder
+        };
+        let answer: String = cliclack::input(escape(message))
+            .placeholder(&escape(hint))
+            .required(default.is_none())
+            .interact()
+            .map_err(map_interaction_error)?;
+        Ok(if answer.is_empty() {
+            default.unwrap_or("").to_owned()
+        } else {
+            answer
+        })
     }
 }
 

@@ -81,6 +81,34 @@ pub struct RepositoryOutcome {
     pub status: OperationStatus,
 }
 
+// Keep typed cancellation separate from the public, display-only outcome.
+struct CloneOutcome {
+    outcome: RepositoryOutcome,
+    cancelled: bool,
+}
+
+impl From<RepositoryOutcome> for CloneOutcome {
+    fn from(outcome: RepositoryOutcome) -> Self {
+        Self {
+            outcome,
+            cancelled: false,
+        }
+    }
+}
+
+impl CloneOutcome {
+    fn with_cancelled(mut self, cancelled: bool) -> Self {
+        self.cancelled = cancelled;
+        self
+    }
+}
+
+fn record_clone(result: &mut BatchOutcome, outcome: CloneOutcome) -> bool {
+    result.cancelled |= outcome.cancelled;
+    result.outcomes.push(outcome.outcome);
+    result.cancelled
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemovalStatus {
     Removed,
@@ -218,6 +246,7 @@ where
     G: GitRemoval,
     F: RemovalFilesystem,
 {
+    validate_references(references.iter().map(String::as_str))?;
     let config = store.load(config_path).map_err(|error| error.to_string())?;
     let root = config
         .resolve_root(home)
@@ -271,6 +300,11 @@ where
     G: GitRemoval,
     F: RemovalFilesystem,
 {
+    validate_references(
+        selections
+            .iter()
+            .map(|selection| selection.reference.clone_url.as_str()),
+    )?;
     let config = store.load(config_path).map_err(|error| error.to_string())?;
     let configured_root = config
         .resolve_root(home)
@@ -528,12 +562,13 @@ where
     G: GitClient + GitState,
     H: HookRunner,
 {
+    validate_references(references.iter().map(String::as_str))?;
     let parsed = references
         .iter()
         .map(|input| {
             RepositoryRef::parse(input)
                 .map(|reference| (reference, input.clone()))
-                .map_err(|error| (input.clone(), error.to_string()))
+                .map_err(|error| ("invalid repository reference".to_owned(), error.to_string()))
         })
         .collect::<Vec<_>>();
     clone_parsed_with_interaction(store, git, hooks, interaction, config_path, &parsed, home)
@@ -553,6 +588,11 @@ where
     G: GitClient + GitState,
     H: HookRunner,
 {
+    validate_references(
+        references
+            .iter()
+            .map(|reference| reference.clone_url.as_str()),
+    )?;
     let parsed = references
         .iter()
         .cloned()
@@ -598,9 +638,11 @@ where
             home,
             None,
         );
-        let succeeded = !matches!(outcome.status, OperationStatus::Failed(_));
-        let fresh = matches!(outcome.status, OperationStatus::Cloned);
-        result.outcomes.push(outcome);
+        let succeeded = !matches!(outcome.outcome.status, OperationStatus::Failed(_));
+        let fresh = matches!(outcome.outcome.status, OperationStatus::Cloned);
+        if record_clone(&mut result, outcome) {
+            break;
+        }
         if !succeeded {
             continue;
         }
@@ -652,8 +694,12 @@ where
                 }
             };
             if let Err(error) = hooks.run_hook(&command, &path) {
+                result.cancelled = hooks.is_cancelled(&error);
                 result.outcomes.last_mut().expect("outcome").status =
                     OperationStatus::Failed(error.to_string());
+                if result.cancelled {
+                    break;
+                }
             }
         }
     }
@@ -676,6 +722,7 @@ where
     G: GitClient + GitState,
     H: HookRunner,
 {
+    validate_references(references.iter().map(String::as_str))?;
     let config = store.load(config_path).map_err(|error| error.to_string())?;
     let mut result = BatchOutcome::default();
     for reference in references {
@@ -690,7 +737,9 @@ where
             post_clone,
             home,
         );
-        result.outcomes.push(outcome);
+        if record_clone(&mut result, outcome) {
+            break;
+        }
     }
     Ok(result)
 }
@@ -711,10 +760,15 @@ where
     G: GitClient + GitState,
     H: HookRunner,
 {
+    validate_references(
+        references
+            .iter()
+            .map(|reference| reference.clone_url.as_str()),
+    )?;
     let config = store.load(config_path).map_err(|error| error.to_string())?;
     let mut result = BatchOutcome::default();
     for reference in references {
-        result.outcomes.push(clone_reference(
+        let outcome = clone_reference(
             store,
             git,
             hooks,
@@ -726,7 +780,10 @@ where
             post_clone,
             home,
             None,
-        ));
+        );
+        if record_clone(&mut result, outcome) {
+            break;
+        }
     }
     Ok(result)
 }
@@ -757,7 +814,7 @@ where
         cancelled: false,
     };
     for (reference, hook) in candidates {
-        result.outcomes.push(clone_reference(
+        let outcome = clone_reference(
             store,
             git,
             hooks,
@@ -769,7 +826,10 @@ where
             hook.as_deref(),
             home,
             Some(reporter),
-        ));
+        );
+        if record_clone(&mut result, outcome) {
+            break;
+        }
     }
     Ok(result)
 }
@@ -787,6 +847,7 @@ where
     G: GitState,
     H: HookRunner,
 {
+    validate_references(references.iter().map(String::as_str))?;
     let config = store.load(config_path).map_err(|error| error.to_string())?;
     let mut result = BatchOutcome::default();
     for input in references {
@@ -814,6 +875,7 @@ where
                                     .run_hook(command, &path)
                                     .map(|()| OperationStatus::Hooked)
                                     .unwrap_or_else(|error| {
+                                        result.cancelled = hooks.is_cancelled(&error);
                                         OperationStatus::Failed(error.to_string())
                                     }),
                                 None => OperationStatus::Noop,
@@ -835,6 +897,9 @@ where
             reference: input.clone(),
             status: outcome,
         });
+        if result.cancelled {
+            break;
+        }
     }
     Ok(result)
 }
@@ -850,7 +915,7 @@ fn clone_candidate<S, G, H>(
     add: bool,
     requested_hook: Option<&str>,
     home: &Path,
-) -> RepositoryOutcome
+) -> CloneOutcome
 where
     S: ConfigStore,
     G: GitClient + GitState,
@@ -858,8 +923,8 @@ where
 {
     let parsed = match RepositoryRef::parse(input) {
         Ok(reference) if !reference.is_wildcard() => reference,
-        Ok(_) => return failed(input, "wildcard references cannot be cloned directly"),
-        Err(error) => return failed(input, &error.to_string()),
+        Ok(_) => return failed(input, "wildcard references cannot be cloned directly").into(),
+        Err(error) => return failed(input, &error.to_string()).into(),
     };
     clone_reference(
         store,
@@ -889,7 +954,7 @@ fn clone_reference<S, G, H>(
     requested_hook: Option<&str>,
     home: &Path,
     mut reporter: Option<&mut dyn EnsureReporter>,
-) -> RepositoryOutcome
+) -> CloneOutcome
 where
     S: ConfigStore,
     G: GitClient + GitState,
@@ -920,7 +985,9 @@ where
                 });
             }
             if let Err(error) = git.clone_repository(&parsed.clone_url, home, &root, &destination) {
-                return reported_failure(&mut reporter, input, &error.to_string());
+                let cancelled = git.is_cancelled(&error);
+                return reported_failure(&mut reporter, input, &error.to_string())
+                    .with_cancelled(cancelled);
             }
             true
         }
@@ -960,7 +1027,9 @@ where
         if let Some(command) = requested_hook.or(configured_hook)
             && let Err(error) = hooks.run_hook(command, &destination)
         {
-            return reported_failure(&mut reporter, input, &error.to_string());
+            let cancelled = hooks.is_cancelled(&error);
+            return reported_failure(&mut reporter, input, &error.to_string())
+                .with_cancelled(cancelled);
         }
         if let Some(reporter) = reporter {
             reporter.report(EnsureEvent::CloneSucceeded { reference: input });
@@ -969,11 +1038,13 @@ where
             reference: input.to_owned(),
             status: OperationStatus::Cloned,
         }
+        .into()
     } else {
         RepositoryOutcome {
             reference: input.to_owned(),
             status: OperationStatus::Noop,
         }
+        .into()
     }
 }
 
@@ -981,11 +1052,19 @@ fn reported_failure(
     reporter: &mut Option<&mut dyn EnsureReporter>,
     reference: &str,
     error: &str,
-) -> RepositoryOutcome {
+) -> CloneOutcome {
     if let Some(reporter) = reporter.as_deref_mut() {
         reporter.report(EnsureEvent::CloneFailed { reference, error });
     }
-    failed(reference, error)
+    failed(reference, error).into()
+}
+
+fn validate_references<'a>(references: impl Iterator<Item = &'a str>) -> Result<(), String> {
+    for reference in references {
+        crate::domain::repository::validate_reference_safety(reference)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn effective_declarations<P: ProviderCatalog>(
@@ -1024,6 +1103,11 @@ fn effective_declarations<P: ProviderCatalog>(
                 continue;
             }
         };
+        validate_references(
+            expanded
+                .iter()
+                .map(|summary| summary.reference.clone_url.as_str()),
+        )?;
         expanded.sort_by_key(|summary| summary.reference.identity());
         for summary in expanded {
             let identity = summary.reference.identity();
@@ -1083,7 +1167,7 @@ where
             Err(error) => {
                 provider_errors.push(ProviderError {
                     provider: "config".to_owned(),
-                    error: format!("{}: {error}", declaration.url),
+                    error: error.to_string(),
                 });
                 continue;
             }
@@ -1133,6 +1217,11 @@ where
                 continue;
             }
         };
+        validate_references(
+            expanded
+                .iter()
+                .map(|summary| summary.reference.clone_url.as_str()),
+        )?;
         expanded.sort_by_key(|summary| summary.reference.identity());
         for summary in expanded {
             if summary.archived && !include_archived {
@@ -1277,6 +1366,11 @@ where
         }
     }
 
+    validate_references(
+        summaries
+            .iter()
+            .map(|summary| summary.reference.clone_url.as_str()),
+    )?;
     let mut seen = HashSet::new();
     for summary in summaries {
         if summary.archived && !include_archived {
@@ -2065,6 +2159,52 @@ mod tests {
     }
 
     #[test]
+    fn interactive_add_stops_after_a_new_hook_reports_cancellation() {
+        struct CancelledHook;
+        impl HookRunner for CancelledHook {
+            type Error = std::io::Error;
+
+            fn is_cancelled(&self, error: &Self::Error) -> bool {
+                error.kind() == std::io::ErrorKind::Interrupted
+            }
+
+            fn run_hook(&self, _: &str, _: &Path) -> Result<(), Self::Error> {
+                Err(std::io::ErrorKind::Interrupted.into())
+            }
+        }
+        let store = RecordingStore {
+            config: config(),
+            registered: RefCell::new(Vec::new()),
+            removed: RefCell::new(Vec::new()),
+        };
+        let git = FakeGit {
+            cloned: RefCell::new(vec![]),
+        };
+        let mut interaction = QueueInteraction {
+            answers: [Ok(true), Ok(true)].into(),
+            inputs: [Ok("exit 130".to_owned())].into(),
+            prompts: Vec::new(),
+        };
+        let outcome = clone_many_with_interaction(
+            &store,
+            &git,
+            &CancelledHook,
+            &mut interaction,
+            Path::new("config"),
+            &[
+                "github.com/org/one".to_owned(),
+                "github.com/org/two".to_owned(),
+            ],
+            Path::new("/tmp/lager-test-home"),
+        )
+        .unwrap();
+        assert!(outcome.cancelled);
+        assert_eq!(outcome.outcomes.len(), 1);
+        assert_eq!(git.cloned.borrow().len(), 1);
+        assert_eq!(store.registered.borrow().len(), 1);
+    }
+
+    #[test]
     fn interactive_add_cancellation_stops_before_cloning_later_repositories() {
         let store = RecordingStore {
             config: config(),
@@ -2193,5 +2333,116 @@ mod tests {
         .unwrap();
         assert!(!outcome.failed());
         assert_eq!(hooks.commands.borrow().as_slice(), ["printf hook"]);
+    }
+
+    #[test]
+    fn ordinary_error_text_cancelled_does_not_stop_clone_entry_points() {
+        struct OrdinaryFailure;
+        impl GitClient for OrdinaryFailure {
+            type Error = String;
+            fn clone_repository(
+                &self,
+                _: &str,
+                _: &Path,
+                _: &Path,
+                _: &Path,
+            ) -> Result<(), String> {
+                Err("cancelled".to_owned())
+            }
+        }
+        impl GitState for OrdinaryFailure {
+            fn classify_destination(&self, _: &Path, _: &str) -> LocalState {
+                LocalState::Missing
+            }
+        }
+        impl HookRunner for OrdinaryFailure {
+            type Error = String;
+            fn run_hook(&self, _: &str, _: &Path) -> Result<(), String> {
+                Err("operation cancelled by ordinary error text".to_owned())
+            }
+        }
+        let store = FakeStore { config: config() };
+        let references = ["github.com/org/one", "github.com/org/two"].map(str::to_owned);
+        let parsed = references
+            .iter()
+            .map(|value| RepositoryRef::parse(value).unwrap())
+            .collect::<Vec<_>>();
+        let path = Path::new("config");
+        let home = Path::new("/tmp/lager-test-home");
+        let mut interaction = QueueInteraction {
+            answers: VecDeque::new(),
+            inputs: VecDeque::new(),
+            prompts: vec![],
+        };
+        let outcomes = [
+            clone_many(
+                &store,
+                &OrdinaryFailure,
+                &OrdinaryFailure,
+                path,
+                &references,
+                false,
+                None,
+                home,
+            )
+            .unwrap(),
+            clone_references(
+                &store,
+                &OrdinaryFailure,
+                &OrdinaryFailure,
+                path,
+                &parsed,
+                false,
+                None,
+                home,
+            )
+            .unwrap(),
+            clone_many_with_interaction(
+                &store,
+                &OrdinaryFailure,
+                &OrdinaryFailure,
+                &mut interaction,
+                path,
+                &references,
+                home,
+            )
+            .unwrap(),
+            clone_references_with_interaction(
+                &store,
+                &OrdinaryFailure,
+                &OrdinaryFailure,
+                &mut interaction,
+                path,
+                &parsed,
+                home,
+            )
+            .unwrap(),
+            clone_many(
+                &store,
+                &FakeGit {
+                    cloned: RefCell::new(vec![]),
+                },
+                &OrdinaryFailure,
+                path,
+                &references,
+                true,
+                Some("hook"),
+                home,
+            )
+            .unwrap(),
+        ];
+        for outcome in outcomes {
+            assert!(!outcome.cancelled, "{outcome:?}");
+            assert!(outcome.failed());
+            assert_eq!(outcome.outcomes.len(), 2);
+            assert!(
+                outcome
+                    .outcomes
+                    .iter()
+                    .all(|outcome| matches!(&outcome.status,
+                OperationStatus::Failed(error) if error.contains("cancelled")))
+            );
+        }
+        assert!(interaction.prompts.is_empty());
     }
 }

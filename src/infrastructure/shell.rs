@@ -31,6 +31,10 @@ pub fn run(command: &str, directory: &Path) -> Result<(), ShellError> {
 impl HookRunner for Shell {
     type Error = ShellError;
 
+    fn is_cancelled(&self, error: &Self::Error) -> bool {
+        matches!(error, ShellError::Failed(status) if super::exit_status::is_cancelled(*status))
+    }
+
     fn run_hook(&self, command: &str, directory: &Path) -> Result<(), Self::Error> {
         run(command, directory)
     }

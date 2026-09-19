@@ -23,9 +23,25 @@ Lager reads one configuration for each command. It selects the path in this orde
 | `remove` | `remove [REPOSITORY]... [--unregister\|--keep-registered] [--yes] [--force]` | Permanently deletes validated local checkouts. `--force` accepts local-state warnings only. |
 | `ensure` | `ensure [--include-archived]` | Creates missing effective declarations sequentially. |
 | `hook` | `hook [REPOSITORY]...` | Runs hooks for explicit declarations. Without repositories, it selects explicit declarations. |
-| `list` | `list [--remote] [--include-archived] [--json]` | Reports declarations and local state. `--remote` expands wildcards through providers. |
+| `list`, `ls` | `list [--remote] [--include-archived] [--json]` | Reports declarations and local state. `--remote` expands wildcards through providers. |
+
+`ls` is a visible alias for `list`. Both names accept the same arguments, options, and configuration selection, and produce identical data output and exit statuses. Help and usage text reflect the invoked name.
 
 Repository arguments accept canonical IDs such as `github.com/org/project`, GitHub shorthand such as `org/project`, and full SCP, SSH, HTTP(S), or file clone URLs. GitHub shorthand becomes an SSH clone URL.
+
+Explicit clone references retain their transport and text, with or without a
+`.git` suffix. SCP accepts ordinary `USER@HOST:PATH` usernames (not only `git`);
+SSH URLs retain custom usernames and ports. Canonical IDs retain default SSH.
+Only HTTP(S) `/projects/PROJECT/repos/REPO/browse` URLs, optionally with one
+trailing slash, are browser conveniences: these become
+`ssh://git@HOST:7999/PROJECT/REPO.git`. Neighboring `/archive` and `/browse/src`
+paths remain literal clone URLs.
+
+HTTP(S) userinfo (including username-only tokens), passwords in any scheme,
+all file-URL userinfo, and all queries/fragments are rejected. A rejected
+reference aborts argument preflight before prompts, writes, or subprocesses,
+without echoing its value. Use credential helpers or SSH authentication instead
+of embedding credentials. See [configuration](config.md) for loaded-config behavior.
 
 ## Defaults and interactive behavior
 
@@ -45,6 +61,18 @@ Repository arguments accept canonical IDs such as `github.com/org/project`, GitH
 
 `init` still writes the configuration when Git, `fzf`, or authenticated `gh` is missing. It reports those missing tools on stderr.
 
+### Registration batches
+
+`register` collects all per-repository hook choices before committing one atomic
+configuration update, whether references come from arguments or the picker.
+Invalid references, conflicting hooks, or cancelled prompts leave the original
+configuration unchanged. Cancellation exits 130.
+
+Successful batches report `added` or `already managed` for each input in order.
+Equivalent repeated references are no-ops after the first change. Retrying the
+same batch is safe. `add` and `ensure` retain per-target behavior; they are not
+all-or-nothing clone batches.
+
 ## Non-interactive use
 
 Outside a terminal, Lager never prompts:
@@ -58,6 +86,21 @@ Outside a terminal, Lager never prompts:
 ## Output and exit status
 
 Flag-driven and JSON output contain no interactive styling. `list --json` writes one stable JSON document to stdout; warnings and provider failures use stderr. Git and hook processes retain their native streams. A selected repository without a post-clone hook reports that on stderr.
+
+Lager-owned human fields escape C0, DEL, and C1 controls: newline, carriage
+return, and tab appear as `\n`, `\r`, and `\t`; other controls appear as
+`\x00` through `\x9f`. Literal backslashes appear as `\\`, so a literal
+`\x1b` cannot impersonate an escaped ESC. Human list columns and picker columns
+retain renderer-owned tabs; field values cannot inject extra rows or columns.
+This applies to diagnostics, progress messages, prompt labels/default hints, and
+picker labels. It does not change references, paths, hook commands, prompt
+answers, JSON field values, or native Git/hook streams.
+
+Removal picker labels are rendered from identity and exact path, not parsed from
+display text. The Rust `Fzf` adapter treats `SelectionCandidate.display` as an
+opaque escaped field when `exact_path` is absent; when present, it renders the
+identity and path instead. Duplicate labels map back to distinct untouched
+candidates by hidden row ID, in the order returned by the picker.
 
 A picker or interaction cancellation exits 130. Invalid usage exits 2. Configuration, provider, Git, hook, filesystem, and aggregate failures exit 1. Success, no-op, empty selections, and explicitly skipped removals exit 0.
 

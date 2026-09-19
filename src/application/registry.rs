@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use crate::application::ports::{ConfigStore, Interaction, InteractionError, Mutation};
+use crate::application::ports::{
+    AtomicRegistrationStore, ConfigStore, Interaction, InteractionError, Mutation,
+    RegistrationRequest,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistrationError {
@@ -9,6 +12,51 @@ pub enum RegistrationError {
     Store(String),
 }
 
+/// Collect every choice before entering the store's atomic commit boundary.
+pub fn register_batch<S: AtomicRegistrationStore>(
+    store: &S,
+    path: &Path,
+    references: &[String],
+    supplied_hook: Option<&str>,
+    interactive: bool,
+    interaction: &mut dyn Interaction,
+) -> Result<Vec<Mutation>, RegistrationError> {
+    // Validate before prompts can display any input. Keep diagnostics independent
+    // of raw references; transport/credential policy belongs in the parser.
+    for reference in references {
+        crate::domain::repository::RepositoryRef::parse(reference)
+            .map_err(|_| RegistrationError::Store("repository reference is invalid".to_owned()))?;
+    }
+    store
+        .load(path)
+        .map_err(|error| RegistrationError::Store(error.to_string()))?
+        .validate()
+        .map_err(|error| RegistrationError::Store(error.to_string()))?;
+    let requests = references
+        .iter()
+        .map(|reference| {
+            let post_clone =
+                registration_choice(reference, supplied_hook, interactive, interaction).map_err(
+                    |error| match error {
+                        InteractionError::Cancelled => RegistrationError::Cancelled,
+                        InteractionError::Failed(message) => {
+                            RegistrationError::Interaction(message)
+                        }
+                    },
+                )?;
+            Ok(RegistrationRequest {
+                reference: reference.clone(),
+                post_clone,
+            })
+        })
+        .collect::<Result<Vec<_>, RegistrationError>>()?;
+    store
+        .register_batch(path, &requests)
+        .map_err(|error| RegistrationError::Store(error.to_string()))
+}
+
+/// Legacy incremental registration: earlier writes remain if a later choice or
+/// write fails. Use `register_batch` for an all-or-nothing CLI-style operation.
 pub fn register_many<S: ConfigStore>(
     store: &S,
     path: &Path,
@@ -18,6 +66,10 @@ pub fn register_many<S: ConfigStore>(
     interaction: &mut dyn Interaction,
 ) -> Result<Vec<Mutation>, RegistrationError> {
     let mut mutations = Vec::new();
+    for reference in references {
+        crate::domain::repository::validate_reference_safety(reference)
+            .map_err(|error| RegistrationError::Store(error.to_string()))?;
+    }
     for reference in references {
         let post_clone = registration_choice(reference, supplied_hook, interactive, interaction)
             .map_err(|error| match error {
@@ -39,6 +91,8 @@ pub fn registration_choice(
     interactive: bool,
     interaction: &mut dyn Interaction,
 ) -> Result<Option<String>, InteractionError> {
+    crate::domain::repository::RepositoryRef::parse(reference)
+        .map_err(|error| InteractionError::Failed(error.to_string()))?;
     if let Some(command) = supplied_hook {
         return Ok(Some(command.to_owned()));
     }
@@ -171,6 +225,81 @@ mod tests {
         ) -> Result<Vec<Mutation>, Self::Error> {
             unreachable!()
         }
+    }
+
+    struct UnsafeAtomicStore;
+
+    impl ConfigStore for UnsafeAtomicStore {
+        type Error = String;
+        fn exists(&self, _: &Path) -> bool {
+            true
+        }
+        fn load(&self, _: &Path) -> Result<Config, String> {
+            Ok(Config {
+                root: "repos".into(),
+                providers: Default::default(),
+                repositories: vec![crate::domain::config::RepositoryDeclaration {
+                    url: "ftp://SENTINEL@example.invalid/org/repo".into(),
+                    post_clone: None,
+                    exclude: vec![],
+                }],
+            })
+        }
+        fn init(&self, _: &Path, _: &str, _: bool) -> Result<(), String> {
+            unreachable!()
+        }
+        fn register(
+            &self,
+            _: &Path,
+            _: &[String],
+            _: Option<&str>,
+        ) -> Result<Vec<Mutation>, String> {
+            unreachable!()
+        }
+        fn remove(&self, _: &Path, _: &[String]) -> Result<Vec<Mutation>, String> {
+            unreachable!()
+        }
+    }
+
+    impl crate::application::ports::AtomicRegistrationStore for UnsafeAtomicStore {
+        fn register_batch(
+            &self,
+            _: &Path,
+            _: &[crate::application::ports::RegistrationRequest],
+        ) -> Result<Vec<Mutation>, String> {
+            panic!("unsafe config reached commit")
+        }
+    }
+
+    #[test]
+    fn atomic_registration_validates_loaded_config_before_interaction() {
+        let mut interaction = FakeInteraction::default();
+        let result = super::register_batch(
+            &UnsafeAtomicStore,
+            Path::new("config"),
+            &["org/repo".into()],
+            None,
+            true,
+            &mut interaction,
+        );
+        assert!(matches!(result, Err(RegistrationError::Store(_))));
+        assert!(interaction.calls.is_empty());
+        assert!(!format!("{result:?}").contains("SENTINEL"));
+    }
+
+    #[test]
+    fn legacy_registration_keeps_writes_before_ordinary_malformed_input() {
+        let store = RecordingStore(RefCell::new(Vec::new()));
+        let result = register_many(
+            &store,
+            Path::new("config"),
+            &["org/first".to_owned(), "malformed".to_owned()],
+            None,
+            false,
+            &mut FakeInteraction::default(),
+        );
+        assert!(result.is_err());
+        assert_eq!(store.0.borrow().as_slice(), ["org/first"]);
     }
 
     #[test]

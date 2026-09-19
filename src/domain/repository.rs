@@ -33,13 +33,21 @@ impl RepositoryRef {
             return Err(RepositoryRefError::Empty);
         }
 
+        validate_reference_safety(input)?;
+        if input.contains("://") {
+            let url = Url::parse(input).map_err(|_| malformed())?;
+            if !matches!(url.scheme(), "http" | "https" | "ssh" | "file") {
+                return Err(malformed());
+            }
+        }
+
         if let Some(path) = input.strip_prefix("file://") {
             let path = Path::new(path);
             let name = path
                 .file_stem()
                 .and_then(|name| name.to_str())
                 .filter(|name| !name.is_empty())
-                .ok_or_else(|| RepositoryRefError::Malformed(input.to_owned()))?;
+                .ok_or_else(malformed)?;
             return Ok(Self {
                 clone_url: input.to_owned(),
                 host: "local".to_owned(),
@@ -49,7 +57,7 @@ impl RepositoryRef {
             });
         }
 
-        if input.starts_with("git@") {
+        if !input.contains("://") && input.contains('@') {
             return Self::parse_scp(input);
         }
 
@@ -73,19 +81,14 @@ impl RepositoryRef {
             }
         }
 
-        let url =
-            Url::parse(input).map_err(|error| RepositoryRefError::Malformed(error.to_string()))?;
-        let host = url
-            .host_str()
-            .ok_or_else(|| RepositoryRefError::Malformed(input.to_owned()))?;
+        let url = Url::parse(input).map_err(|_| malformed())?;
+        let host = url.host_str().ok_or_else(malformed)?;
         let path = clean_path(url.path());
         if path.is_empty() {
-            return Err(RepositoryRefError::Malformed(input.to_owned()));
+            return Err(malformed());
         }
 
-        if !url.path().ends_with(".git")
-            && let Some(reference) = Self::parse_browser_url(&url, host, &path)?
-        {
+        if let Some(reference) = Self::parse_browser_url(&url, host, input)? {
             return Ok(reference);
         }
 
@@ -110,27 +113,32 @@ impl RepositoryRef {
     }
 
     fn parse_scp(input: &str) -> Result<Self, RepositoryRefError> {
-        let at = input
-            .rfind('@')
-            .ok_or_else(|| RepositoryRefError::Malformed(input.to_owned()))?;
+        let at = input.rfind('@').ok_or_else(malformed)?;
+        let username = &input[..at];
+        if !ordinary_username(username) {
+            return Err(malformed());
+        }
         let colon = input[at + 1..]
             .find(':')
             .map(|offset| at + 1 + offset)
-            .ok_or_else(|| RepositoryRefError::Malformed(input.to_owned()))?;
+            .ok_or_else(malformed)?;
         let host = &input[at + 1..colon];
         let path = clean_path(&input[colon + 1..]);
-        if host.is_empty() || path.is_empty() {
-            return Err(RepositoryRefError::Malformed(input.to_owned()));
+        if host.is_empty()
+            || host
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, '/' | '\\' | '@'))
+            || path.is_empty()
+        {
+            return Err(malformed());
         }
         Self::from_host_path(host, &path, input.to_owned())
     }
 
     fn parse_host_path(input: &str) -> Result<Self, RepositoryRefError> {
-        let (host, path) = input
-            .split_once('/')
-            .ok_or_else(|| RepositoryRefError::Malformed(input.to_owned()))?;
+        let (host, path) = input.split_once('/').ok_or_else(malformed)?;
         if host.is_empty() || path.is_empty() {
-            return Err(RepositoryRefError::Malformed(input.to_owned()));
+            return Err(malformed());
         }
         let clone_url = default_ssh_url(host, path);
         Self::from_host_path(host, path, clone_url)
@@ -139,31 +147,27 @@ impl RepositoryRef {
     fn parse_browser_url(
         url: &Url,
         host: &str,
-        path: &str,
+        input: &str,
     ) -> Result<Option<Self>, RepositoryRefError> {
-        let pieces: Vec<&str> = path.split('/').filter(|piece| !piece.is_empty()).collect();
-        let is_github = host == "github.com" || host.ends_with("github.com");
-        let is_bitbucket_cloud = host == "bitbucket.org";
-        if is_github && pieces.len() == 2 {
-            return Ok(Some(Self::from_host_path(
-                host,
-                path,
-                default_ssh_url(host, path),
-            )?));
-        }
-        if is_bitbucket_cloud && pieces.len() == 2 {
-            return Ok(Some(Self::from_host_path(
-                host,
-                path,
-                default_ssh_url(host, path),
-            )?));
-        }
-        if pieces.len() == 5 && pieces[0] == "projects" && pieces[2] == "repos" {
+        // Match the literal route, not URL normalization of a neighboring path.
+        let path = input
+            .split_once("://")
+            .and_then(|(_, rest)| rest.find('/').map(|index| &rest[index..]))
+            .unwrap_or("");
+        let path = path.strip_suffix('/').unwrap_or(path);
+        let pieces: Vec<&str> = path.strip_prefix('/').unwrap_or(path).split('/').collect();
+        if matches!(url.scheme(), "http" | "https")
+            && pieces.len() == 5
+            && pieces[0] == "projects"
+            && !pieces[1].is_empty()
+            && pieces[2] == "repos"
+            && !pieces[3].is_empty()
+            && pieces[4] == "browse"
+        {
             let dc_path = format!("{}/{}", pieces[1], pieces[3]);
             let ssh = format!("ssh://git@{}:7999/{}.git", host, dc_path);
             return Ok(Some(Self::from_host_path(host, &dc_path, ssh)?));
         }
-        let _ = url;
         Ok(None)
     }
 
@@ -174,7 +178,7 @@ impl RepositoryRef {
     ) -> Result<Self, RepositoryRefError> {
         let path = clean_path(path);
         if path.is_empty() {
-            return Err(RepositoryRefError::Malformed(clone_url));
+            return Err(malformed());
         }
         let wildcard = path.ends_with("/*");
         let path = path.trim_end_matches("/*").trim_end_matches('/');
@@ -184,7 +188,7 @@ impl RepositoryRef {
             .map(ToOwned::to_owned)
             .collect();
         if segments.is_empty() || segments.iter().any(|segment| segment.contains('\0')) {
-            return Err(RepositoryRefError::Malformed(clone_url));
+            return Err(malformed());
         }
         let destination_segments = if host == "github.com" || host == "bitbucket.org" {
             segments.clone()
@@ -203,6 +207,47 @@ impl RepositoryRef {
             wildcard,
         })
     }
+}
+
+/// Only sensitive failures abort independent-target batches before any effects.
+/// Ordinary syntax errors remain the responsibility of each target operation.
+pub(crate) fn validate_reference_safety(input: &str) -> Result<(), RepositoryRefError> {
+    let input = input.trim();
+    let sensitive = input.contains(['?', '#'])
+        || if let Some((scheme, rest)) = input.split_once("://") {
+            let parsed_credentials = Url::parse(input).is_ok_and(|url| {
+                url.password().is_some()
+                    || (!url.username().is_empty()
+                        && (url.scheme() != "ssh" || !ordinary_username(url.username())))
+            });
+            // Also reject empty userinfo and password syntax that URL parsing normalizes away.
+            let authority = rest.split('/').next().unwrap_or("");
+            parsed_credentials
+                || authority.rsplit_once('@').is_some_and(|(user, _)| {
+                    !scheme.eq_ignore_ascii_case("ssh") || !ordinary_username(user)
+                })
+        } else {
+            input
+                .rsplit_once('@')
+                .is_some_and(|(user, _)| !ordinary_username(user))
+        };
+    if sensitive {
+        return Err(malformed());
+    }
+    Ok(())
+}
+
+fn malformed() -> RepositoryRefError {
+    RepositoryRefError::Malformed(
+        "invalid syntax or forbidden credentials, query, or fragment".to_owned(),
+    )
+}
+
+fn ordinary_username(username: &str) -> bool {
+    !username.is_empty()
+        && !username
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, ':' | '@' | '/' | '\\' | '%'))
 }
 
 fn clean_path(path: &str) -> String {
@@ -240,7 +285,7 @@ mod tests {
         assert_eq!(shorthand.clone_url, "git@github.com:nikbrunner/lager.git");
 
         let browser = RepositoryRef::parse("https://github.com/nikbrunner/lager").unwrap();
-        assert_eq!(browser.clone_url, "git@github.com:nikbrunner/lager.git");
+        assert_eq!(browser.clone_url, "https://github.com/nikbrunner/lager");
     }
 
     #[test]

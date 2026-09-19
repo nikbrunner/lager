@@ -53,6 +53,23 @@ pub trait ConfigStore {
     fn remove(&self, path: &Path, references: &[String]) -> Result<Vec<Mutation>, Self::Error>;
 }
 
+/// One reference and its independently chosen post-clone hook.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistrationRequest {
+    pub reference: String,
+    pub post_clone: Option<String>,
+}
+
+/// Registration that commits all requests or leaves the configuration unchanged.
+/// Deliberately separate from `ConfigStore`: there is no incremental fallback.
+pub trait AtomicRegistrationStore: ConfigStore {
+    fn register_batch(
+        &self,
+        path: &Path,
+        requests: &[RegistrationRequest],
+    ) -> Result<Vec<Mutation>, Self::Error>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnsureEvent<'a> {
     CloneStarted {
@@ -74,6 +91,11 @@ pub trait EnsureReporter {
 
 pub trait GitClient {
     type Error: Display;
+
+    /// Classify a native interruption before its error is reduced to display text.
+    fn is_cancelled(&self, _error: &Self::Error) -> bool {
+        false
+    }
 
     fn clone_repository(
         &self,
@@ -114,6 +136,11 @@ pub trait RemovalFilesystem {
 
 pub trait HookRunner {
     type Error: Display;
+
+    /// Classify a native interruption before its error is reduced to display text.
+    fn is_cancelled(&self, _error: &Self::Error) -> bool {
+        false
+    }
 
     fn run_hook(&self, command: &str, directory: &Path) -> Result<(), Self::Error>;
 }

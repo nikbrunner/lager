@@ -11,8 +11,20 @@ use crate::application::ports::{
 use crate::application::{configuration, ports, warehouse};
 use crate::domain::repository::RepositoryRef;
 use crate::infrastructure::{
-    config::FileConfigStore, git::NativeGit, providers::ConfiguredProviders, shell::Shell,
+    config::{CommandConfigStore, FileConfigStore},
+    git::NativeGit,
+    providers::ConfiguredProviders,
+    shell::Shell,
 };
+use crate::presentation::escape;
+
+fn displayed_reference(reference: &str) -> String {
+    if RepositoryRef::parse(reference).is_ok() {
+        escape(reference)
+    } else {
+        "invalid repository reference".to_owned()
+    }
+}
 
 pub fn run(
     args: Args,
@@ -22,6 +34,20 @@ pub fn run(
     interactive: bool,
 ) -> i32 {
     let config_path = ports::config_path(args.config.as_deref());
+    let references = match &args.command {
+        Command::Register(command) => command.repositories.as_slice(),
+        Command::Unregister(command) => command.repositories.as_slice(),
+        Command::Add(command) => command.repositories.as_slice(),
+        Command::Remove(command) => command.repositories.as_slice(),
+        Command::Hook(command) => command.repositories.as_slice(),
+        _ => &[],
+    };
+    for reference in references {
+        if let Err(error) = crate::domain::repository::validate_reference_safety(reference) {
+            eprintln!("lager: {}", escape(error));
+            return 1;
+        }
+    }
     match args.command {
         Command::Init(command) => init(&config_path, command, interaction, tools, interactive),
         Command::Register(command) => {
@@ -69,7 +95,7 @@ fn init(
         Ok(choices) => choices,
         Err(InteractionError::Cancelled) => return 130,
         Err(InteractionError::Failed(error)) => {
-            eprintln!("lager: {error}");
+            eprintln!("lager: {}", escape(error));
             return if interactive { 1 } else { 2 };
         }
     };
@@ -89,12 +115,12 @@ fn init(
     ) {
         Ok(()) => {
             for message in configuration::init_diagnostics(tools, choices.github) {
-                eprintln!("lager: warning: {message}");
+                eprintln!("lager: warning: {}", escape(message));
             }
             0
         }
         Err(error) => {
-            eprintln!("lager: {error}");
+            eprintln!("lager: {}", escape(error));
             1
         }
     }
@@ -107,9 +133,11 @@ fn register(
     interaction: &mut dyn Interaction,
     interactive: bool,
 ) -> i32 {
+    let store = CommandConfigStore::default();
     let home = home_dir();
     let (repositories, provider_failed) = if args.repositories.is_empty() {
         match pick(
+            &store,
             path,
             warehouse::PickerContext::Register,
             args.include_archived,
@@ -131,8 +159,7 @@ fn register(
     if repositories.is_empty() {
         return i32::from(provider_failed);
     }
-    let store = FileConfigStore;
-    match crate::application::registry::register_many(
+    match crate::application::registry::register_batch(
         &store,
         path,
         &repositories,
@@ -157,16 +184,18 @@ fn register(
             crate::application::registry::RegistrationError::Interaction(error)
             | crate::application::registry::RegistrationError::Store(error),
         ) => {
-            eprintln!("lager: {error}");
+            eprintln!("lager: {}", escape(error));
             1
         }
     }
 }
 
 fn unregister(path: &Path, args: UnregisterArgs, selector: &dyn RepositorySelector) -> i32 {
+    let store = CommandConfigStore::default();
     let home = home_dir();
     let (repositories, provider_failed) = if args.repositories.is_empty() {
         match pick(
+            &store,
             path,
             warehouse::PickerContext::Unregister,
             args.include_archived,
@@ -188,7 +217,6 @@ fn unregister(path: &Path, args: UnregisterArgs, selector: &dyn RepositorySelect
     if repositories.is_empty() {
         return i32::from(provider_failed);
     }
-    let store = FileConfigStore;
     match configuration::unregister(&store, path, &repositories) {
         Ok(results) => {
             for result in results {
@@ -203,7 +231,7 @@ fn unregister(path: &Path, args: UnregisterArgs, selector: &dyn RepositorySelect
             i32::from(provider_failed)
         }
         Err(error) => {
-            eprintln!("lager: {error}");
+            eprintln!("lager: {}", escape(error));
             1
         }
     }
@@ -227,9 +255,11 @@ fn add(
         return 2;
     }
     let register = args.register || args.post_clone.is_some();
+    let store = CommandConfigStore::default();
     let home = home_dir();
     let selected = if args.repositories.is_empty() {
         match pick(
+            &store,
             path,
             warehouse::PickerContext::Add,
             args.include_archived,
@@ -246,7 +276,6 @@ fn add(
     if selected.as_ref().is_some_and(|(items, _)| items.is_empty()) {
         return i32::from(provider_failed);
     }
-    let store = FileConfigStore;
     let git = NativeGit;
     let shell = Shell;
     let outcome = if let Some((repositories, _)) = selected {
@@ -302,7 +331,11 @@ fn add(
                 .filter(|item| matches!(item.status, warehouse::OperationStatus::Failed(_)))
             {
                 if let warehouse::OperationStatus::Failed(error) = &repository.status {
-                    eprintln!("lager: {}: {error}", repository.reference);
+                    eprintln!(
+                        "lager: {}: {}",
+                        escape(&repository.reference),
+                        escape(error)
+                    );
                 }
             }
             if outcome.cancelled {
@@ -312,7 +345,7 @@ fn add(
             }
         }
         Err(error) => {
-            eprintln!("lager: {error}");
+            eprintln!("lager: {}", escape(error));
             1
         }
     }
@@ -327,14 +360,15 @@ impl EnsureReporter for TerminalEnsureReporter {
                 reference,
                 destination,
             } => cliclack::log::info(format!(
-                "Cloning {reference} into {}",
-                destination.display()
+                "Cloning {} into {}",
+                escape(reference),
+                escape(destination.display())
             )),
             EnsureEvent::CloneSucceeded { reference } => {
-                cliclack::log::success(format!("Cloned {reference}"))
+                cliclack::log::success(format!("Cloned {}", escape(reference)))
             }
             EnsureEvent::CloneFailed { reference, error } => {
-                cliclack::log::error(format!("Failed {reference}: {error}"))
+                cliclack::log::error(format!("Failed {}: {}", escape(reference), escape(error)))
             }
         };
         let _ = result;
@@ -345,21 +379,21 @@ fn ensure(path: &Path, args: EnsureArgs) -> i32 {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    let store = FileConfigStore;
+    let store = CommandConfigStore::default();
     let git = NativeGit;
     let shell = Shell;
     let mut reporter = TerminalEnsureReporter;
     let config = match store.load(path) {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("lager: {error}");
+            eprintln!("lager: {}", escape(error));
             return 1;
         }
     };
     let providers = match ConfiguredProviders::from_config(&config) {
         Ok(providers) => providers,
         Err(error) => {
-            eprintln!("lager: {error}");
+            eprintln!("lager: {}", escape(error));
             return 1;
         }
     };
@@ -376,10 +410,14 @@ fn ensure(path: &Path, args: EnsureArgs) -> i32 {
         Ok(outcome) => {
             print_provider_failures(&outcome);
             print_ensure_summary(&outcome);
-            i32::from(outcome.failed())
+            if outcome.cancelled {
+                130
+            } else {
+                i32::from(outcome.failed())
+            }
         }
         Err(error) => {
-            eprintln!("lager: {error}");
+            eprintln!("lager: {}", escape(error));
             1
         }
     }
@@ -387,7 +425,11 @@ fn ensure(path: &Path, args: EnsureArgs) -> i32 {
 
 fn print_provider_failures(outcome: &warehouse::BatchOutcome) {
     for error in &outcome.provider_errors {
-        eprintln!("lager: {}: {}", error.provider, error.error);
+        eprintln!(
+            "lager: {}: {}",
+            escape(&error.provider),
+            escape(&error.error)
+        );
     }
 }
 
@@ -431,9 +473,17 @@ fn print_ensure_summary(outcome: &warehouse::BatchOutcome) {
 }
 
 fn hook(path: &Path, args: HookArgs, selector: &dyn RepositorySelector) -> i32 {
+    let store = CommandConfigStore::default();
     let home = home_dir();
     let (repositories, picker_failed) = if args.repositories.is_empty() {
-        match pick(path, warehouse::PickerContext::Hook, false, &home, selector) {
+        match pick(
+            &store,
+            path,
+            warehouse::PickerContext::Hook,
+            false,
+            &home,
+            selector,
+        ) {
             Ok((references, failed)) => (
                 references
                     .into_iter()
@@ -446,7 +496,6 @@ fn hook(path: &Path, args: HookArgs, selector: &dyn RepositorySelector) -> i32 {
     } else {
         (args.repositories, false)
     };
-    let store = FileConfigStore;
     let git = NativeGit;
     let shell = Shell;
     match warehouse::hook(&store, &git, &shell, path, &repositories, &home) {
@@ -454,45 +503,53 @@ fn hook(path: &Path, args: HookArgs, selector: &dyn RepositorySelector) -> i32 {
             for repository in &outcome.outcomes {
                 match &repository.status {
                     warehouse::OperationStatus::Failed(error) => {
-                        eprintln!("lager: {}: {error}", repository.reference);
+                        eprintln!(
+                            "lager: {}: {}",
+                            displayed_reference(&repository.reference),
+                            escape(error)
+                        );
                     }
                     warehouse::OperationStatus::Noop => {
                         eprintln!(
                             "lager: {}: no post-clone hook configured",
-                            repository.reference
+                            escape(&repository.reference)
                         );
                     }
                     _ => {}
                 }
             }
-            i32::from(outcome.failed() || picker_failed)
+            if outcome.cancelled {
+                130
+            } else {
+                i32::from(outcome.failed() || picker_failed)
+            }
         }
         Err(error) => {
-            eprintln!("lager: {error}");
+            eprintln!("lager: {}", escape(error));
             1
         }
     }
 }
 
 fn pick(
+    store: &CommandConfigStore,
     path: &Path,
     context: warehouse::PickerContext,
     include_archived: bool,
     home: &Path,
     selector: &dyn RepositorySelector,
 ) -> Result<(Vec<RepositoryRef>, bool), i32> {
-    let store = FileConfigStore;
     let git = NativeGit;
     let config = store.load(path).map_err(|error| {
-        eprintln!("lager: {error}");
+        eprintln!("lager: {}", escape(error));
         1
     })?;
     let providers = ConfiguredProviders::from_config(&config).map_err(|error| {
-        eprintln!("lager: {error}");
+        eprintln!("lager: {}", escape(error));
         1
     })?;
     let report = warehouse::picker_candidates(
-        &store,
+        store,
         &git,
         &providers,
         path,
@@ -501,11 +558,15 @@ fn pick(
         home,
     )
     .map_err(|error| {
-        eprintln!("lager: {error}");
+        eprintln!("lager: {}", escape(error));
         1
     })?;
     for error in &report.provider_errors {
-        eprintln!("lager: {}: {}", error.provider, error.error);
+        eprintln!(
+            "lager: {}: {}",
+            escape(&error.provider),
+            escape(&error.error)
+        );
     }
     if report.candidates.is_empty() {
         return Ok((Vec::new(), report.failed()));
@@ -515,7 +576,7 @@ fn pick(
         .map_err(|error| match error {
             SelectionError::Cancelled => 130,
             SelectionError::Unavailable(message) | SelectionError::Failed(message) => {
-                eprintln!("lager: {message}");
+                eprintln!("lager: {}", escape(message));
                 1
             }
         })?;
@@ -542,19 +603,19 @@ fn list(path: &Path, args: ListArgs) -> i32 {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    let store = FileConfigStore;
+    let store = CommandConfigStore::default();
     let git = NativeGit;
     let config = match store.load(path) {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("lager: {error}");
+            eprintln!("lager: {}", escape(error));
             return 1;
         }
     };
     let providers = match ConfiguredProviders::from_config(&config) {
         Ok(providers) => providers,
         Err(error) => {
-            eprintln!("lager: {error}");
+            eprintln!("lager: {}", escape(error));
             return 1;
         }
     };
@@ -572,7 +633,7 @@ fn list(path: &Path, args: ListArgs) -> i32 {
                 match serde_json::to_string(&report) {
                     Ok(document) => println!("{document}"),
                     Err(error) => {
-                        eprintln!("lager: could not render list: {error}");
+                        eprintln!("lager: could not render list: {}", escape(error));
                         return 1;
                     }
                 }
@@ -580,12 +641,16 @@ fn list(path: &Path, args: ListArgs) -> i32 {
                 render_list(&report);
             }
             for error in &report.provider_errors {
-                eprintln!("lager: {}: {}", error.provider, error.error);
+                eprintln!(
+                    "lager: {}: {}",
+                    escape(&error.provider),
+                    escape(&error.error)
+                );
             }
             i32::from(report.failed())
         }
         Err(error) => {
-            eprintln!("lager: {error}");
+            eprintln!("lager: {}", escape(error));
             1
         }
     }
@@ -599,7 +664,13 @@ fn render_list(report: &warehouse::ListReport) {
             .unwrap_or_else(|| "wildcard".to_owned());
         let destination = row.destination.as_deref().unwrap_or("-");
         let archived = if row.archived { " [archived]" } else { "" };
-        println!("{}\t{}\t{}{}", row.identity, state, destination, archived);
+        println!(
+            "{}\t{}\t{}{}",
+            escape(&row.identity),
+            state,
+            escape(destination),
+            archived
+        );
     }
 }
 
@@ -622,7 +693,7 @@ fn remove(
         None
     };
     let home = home_dir();
-    let store = FileConfigStore;
+    let store = CommandConfigStore::default();
     let git = NativeGit;
     let filesystem = crate::infrastructure::filesystem::Filesystem;
     let selected = if args.repositories.is_empty() {
@@ -635,13 +706,13 @@ fn remove(
                     Ok(selected) => Some(selected),
                     Err(SelectionError::Cancelled) => return 130,
                     Err(SelectionError::Unavailable(error) | SelectionError::Failed(error)) => {
-                        eprintln!("lager: {error}");
+                        eprintln!("lager: {}", escape(error));
                         return 1;
                     }
                 }
             }
             Err(error) => {
-                eprintln!("lager: {error}");
+                eprintln!("lager: {}", escape(error));
                 return 1;
             }
         }
@@ -685,16 +756,20 @@ fn remove(
             for repository in &outcome.outcomes {
                 match &repository.status {
                     warehouse::RemovalStatus::Failed(error) => {
-                        eprintln!("lager: {}: {error}", repository.reference)
+                        eprintln!(
+                            "lager: {}: {}",
+                            displayed_reference(&repository.reference),
+                            escape(error)
+                        )
                     }
                     warehouse::RemovalStatus::Removed => {
-                        println!("{}: removed", repository.reference)
+                        println!("{}: removed", escape(&repository.reference))
                     }
                     warehouse::RemovalStatus::Absent => {
-                        println!("{}: absent", repository.reference)
+                        println!("{}: absent", escape(&repository.reference))
                     }
                     warehouse::RemovalStatus::Skipped => {
-                        println!("{}: skipped", repository.reference)
+                        println!("{}: skipped", escape(&repository.reference))
                     }
                 }
             }
@@ -705,7 +780,7 @@ fn remove(
             }
         }
         Err(error) => {
-            eprintln!("lager: {error}");
+            eprintln!("lager: {}", escape(error));
             1
         }
     }

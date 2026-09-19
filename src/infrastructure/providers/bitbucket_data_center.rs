@@ -122,7 +122,7 @@ impl BitbucketDataCenter {
             .find(|link| link.name.eq_ignore_ascii_case("ssh"))
             .or_else(|| repository.links.clone.first())
             .ok_or_else(|| "Bitbucket repository omitted clone links".to_owned())?;
-        let _returned_clone_url = &link.href;
+        RepositoryRef::parse(&link.href).map_err(|error| error.to_string())?;
         let user = self.config.ssh_user.as_deref().unwrap_or("git");
         let port = self.config.ssh_port.unwrap_or(7999);
         let fallback = format!(

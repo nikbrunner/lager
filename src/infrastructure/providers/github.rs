@@ -61,13 +61,6 @@ struct Repository {
     is_archived: bool,
     #[serde(rename = "sshUrl")]
     ssh_url: String,
-    owner: Owner,
-    name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct Owner {
-    login: String,
 }
 
 impl Github {
@@ -102,7 +95,7 @@ impl Github {
                 if !include_archived && repository.is_archived {
                     continue;
                 }
-                result.push(summary(&self.host, &self.config, repository));
+                result.push(summary(&self.host, &self.config, repository)?);
             }
         }
         Ok(result)
@@ -138,7 +131,7 @@ impl Github {
                 if !include_archived && repository.is_archived {
                     continue;
                 }
-                result.push(summary(&self.host, &self.config, repository));
+                result.push(summary(&self.host, &self.config, repository)?);
             }
         }
         Ok(result)
@@ -170,16 +163,20 @@ impl Github {
     }
 }
 
-fn summary(host: &str, config: &ProviderConfig, repository: Repository) -> RepositorySummary {
+fn summary(
+    host: &str,
+    config: &ProviderConfig,
+    repository: Repository,
+) -> Result<RepositorySummary, String> {
     let path = RepositoryRef::parse(&repository.ssh_url)
         .map(|reference| reference.path)
-        .unwrap_or_else(|_| format!("{}/{}", repository.owner.login, repository.name));
-    let reference = RepositoryRef::parse(&ssh_url(host, config, &path))
-        .expect("GitHub repository fields form a valid reference");
-    RepositorySummary {
+        .map_err(|error| error.to_string())?;
+    let reference =
+        RepositoryRef::parse(&ssh_url(host, config, &path)).map_err(|error| error.to_string())?;
+    Ok(RepositorySummary {
         reference,
         archived: repository.is_archived,
-    }
+    })
 }
 
 fn ssh_url(host: &str, config: &ProviderConfig, path: &str) -> String {

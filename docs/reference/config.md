@@ -91,12 +91,60 @@ exclude = ["retired"]
 
 Only one trailing `/*` is valid. Wildcards require a configured provider and cannot have hooks. Explicit declarations cannot have exclusions. Equivalent declarations must have the same hook, exclusions, and wildcard status.
 
+Accepted explicit SCP, SSH, HTTP(S), and file clone references retain their text
+in TOML, `clone_url` JSON, and Git clone arguments regardless of a `.git` suffix.
+Identity comparison and destination mapping remain transport-independent; an
+equivalent registration does not replace the existing stored URL.
+Shorthand and canonical IDs still materialize default SSH URLs. The sole browser
+convenience is an HTTP(S) URL with exact `/projects/PROJECT/repos/REPO/browse`
+path (optionally one trailing slash), converted to SSH user `git` on port `7999`.
+`/archive`, `/browse/src`, and other neighboring paths retain literal transport.
+
+Explicit URL schemes are limited to `http`, `https`, `ssh`, and `file`.
+Repository references may not contain HTTP(S) userinfo, including username-only
+tokens, passwords in any scheme, file-URL userinfo, or queries/fragments.
+Ordinary SSH/SCP usernames (including `alice+ci`) remain supported; usernames
+cannot contain whitespace, password/userinfo separators, path separators, or
+percent escapes. SCP hosts must be nonempty and contain no whitespace or path
+separators, and the clone path must be nonempty. All declarations are checked before
+diagnostics can quote them or operations begin. Providers apply the same policy
+to the selected clone link after archive filtering; unused links and excluded
+archived repositories are not displayed, persisted, or validated as clone inputs.
+Existing affected configuration fails with a generic diagnostic and is never
+automatically rewritten. TOML syntax/type errors report line and column when
+available, without source values that could expose credentials. Trusted
+`post_clone` commands remain executable configuration, not a secret-scanning surface.
+
 A canonical ID for a custom host requires a matching provider entry. Full clone URLs remain valid without a provider. GitHub and Bitbucket Cloud map `host/path` to `root/prefix/path`; custom hosts include the host in the destination. Data Center removes a leading `~` only from a personal-project path segment.
 
 ## Reads and writes
 
-Unknown TOML keys produce stderr warnings, remain preserved through mutations, and never contaminate JSON stdout. Recognized invalid values fail before external operations.
+Unknown TOML keys produce one stderr warning per key per command, remain preserved through mutations, and never contaminate JSON stdout. Recognized invalid values fail before external operations. Semantic CLI usage errors are reported before reading configuration.
+
+Warnings visibly escape control characters and literal backslashes in key names;
+the stored keys and values are not rewritten for display safety.
 
 A configuration may be a direct, relative, multi-hop, or dangling symlink. Mutations write the resolved target atomically while preserving the target permissions and the logical link. Lager serializes mutations with a lock under `LAGER_CACHE_DIR`, or `$HOME/.cache/lager` by default.
+
+`init` refuses any existing logical configuration path, including a dangling
+symlink, without creating its target or the requested root. Mutations require a
+readable existing target; they do not repair dangling links.
+
+CLI registration validates all inputs and the loaded configuration before asking
+for hook choices outside the lock, then reads the latest
+configuration under the lock, applies requests in order, validates the final
+document, and writes once. A failed batch leaves original bytes, symlinks, and
+target permissions unchanged; a no-op batch does not rewrite the file.
+
+For Rust callers, `AtomicRegistrationStore` and `registry::register_batch` expose
+this all-or-nothing capability. The original `ConfigStore::register` remains
+available for uniform-hook requests, and `registry::register_many` retains its
+legacy incremental behavior: earlier writes survive a later failure or cancellation.
+Credential/query/fragment-sensitive reference failures abort an entire target
+batch before effects, including unsupported-scheme userinfo. Ordinary malformed
+`add`, `remove`, and `hook` targets fail independently while other targets continue.
+The legacy incremental registration helper keeps earlier writes on an ordinary
+malformed later reference; atomic CLI registration still validates every input
+before any writes.
 
 See [provider setup](../how-to/providers.md), [wildcards](../how-to/wildcards.md), and [automation](../how-to/automation.md) for operational use.

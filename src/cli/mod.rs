@@ -12,11 +12,13 @@ pub(crate) fn prompt_eligible(stdin_is_terminal: bool, stderr_is_terminal: bool)
     stdin_is_terminal && stderr_is_terminal
 }
 
+/// Run with the embedding process's signal policy; installs no signal handlers.
 pub fn run() -> i32 {
+    let args = Args::parse();
     let selector = Fzf::default();
     let mut interaction = TerminalInteraction;
     controller::run(
-        Args::parse(),
+        args,
         &selector,
         &mut interaction,
         &NativeTools,

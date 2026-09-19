@@ -100,9 +100,15 @@ See the [configuration reference](docs/reference/config.md) for every field, def
 | `remove` | Permanently deletes guarded local checkouts. | `--unregister`, `--keep-registered`, `--yes`, `--force` |
 | `ensure` | Creates missing declared checkouts. | `--include-archived` |
 | `hook` | Runs a declared repository's post-clone hook again. | — |
-| `list` | Shows declarations and their local state. | `--remote`, `--include-archived`, `--json` |
+| `list`, `ls` | Shows declarations and their local state. | `--remote`, `--include-archived`, `--json` |
 
-`list` is offline by default. Use `list --json` for stable machine-readable output. The [CLI reference](docs/reference/cli.md) documents every option, default, and interactive behavior.
+`ls` is an identical alias for `list`, which is offline by default. Use `list --json` for stable machine-readable output. The [CLI reference](docs/reference/cli.md) documents every option, default, and interactive behavior.
+
+Lager escapes terminal control characters and literal backslashes in its own
+human fields, diagnostics, and picker labels. Stored values, JSON, and native
+Git/hook streams are unchanged. See [safe removal](docs/how-to/remove-safely.md)
+before deleting checkouts; `--force` never bypasses ownership or dependent
+worktree guards.
 
 ## Documentation
 
@@ -120,6 +126,11 @@ cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets
 ```
+
+Use the sandboxed [human acceptance checklist](HOW_TO_TEST.md) to verify the
+repository-management journeys. Current milestone evidence is recorded in
+[PRD §3](docs/prd/1.0.0.md#3-repository-management); local macOS results are not
+a substitute for the outstanding Linux validation.
 
 ## License
 

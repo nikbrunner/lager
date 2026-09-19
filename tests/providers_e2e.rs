@@ -176,8 +176,9 @@ JSON
         r##"#!/bin/sh
 if [ "$FZF_MODE" = cancel ]; then exit 130; fi
 if [ "$FZF_MODE" = one ]; then
-  cat > /dev/null
-  printf '%s\n' github.com/org/one
+  while IFS= read -r row; do
+    case "$row" in *github.com/org/one) printf '%s\n' "$row" ;; esac
+  done
 else
   cat
 fi
@@ -437,6 +438,61 @@ fn cloud_pagination_accepts_relative_and_same_origin_opaque_links()
 }
 
 #[test]
+fn bitbucket_discovery_ignores_unused_clone_links_and_excluded_archives() {
+    for preset in ["bitbucket-cloud", "bitbucket-data-center"] {
+        for archived_link in [None, Some("malformed-SENTINEL")] {
+            let temp = tempfile::tempdir().unwrap();
+            let config = temp.path().join("config.toml");
+            let repository = |archived, href: &str| {
+                serde_json::json!({
+                    "is_archived": archived, "archived": archived,
+                    "full_name": "workspace/repo", "slug": "repo", "project": {"key": "workspace"},
+                    "links": {"clone": [
+                        {"name": "https", "href": "https://SENTINEL@bitbucket.org/workspace/repo.git"},
+                        {"name": "ssh", "href": href}
+                    ]}
+                })
+            };
+            let mut repositories = vec![repository(false, "git@bitbucket.org:workspace/repo.git")];
+            if let Some(link) = archived_link {
+                repositories.push(repository(true, link));
+            }
+            let route = if preset == "bitbucket-cloud" {
+                "/2.0/repositories/workspace"
+            } else {
+                "/rest/api/1.0/projects/workspace/repos?start=0&limit=25"
+            };
+            let fixture = HttpFixture::new(vec![(
+                route.to_owned(),
+                serde_json::json!({
+                    "values": repositories, "isLastPage": true
+                })
+                .to_string(),
+            )]);
+            let original = format!(
+                "root = 'repos'\n[providers.'bitbucket.org']\npreset = '{preset}'\napi_url = '{}'\n[[repositories]]\nurl = 'bitbucket.org/workspace/*'\n",
+                fixture.base
+            );
+            std::fs::write(&config, &original).unwrap();
+            let output = support::lager(temp.path(), &config)
+                .args(["list", "--remote", "--json"])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{preset}: {output:?}");
+            let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(json["repositories"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                json["repositories"][0]["identity"],
+                "bitbucket.org/workspace/repo"
+            );
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("SENTINEL"));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains("SENTINEL"));
+            assert_eq!(std::fs::read_to_string(config).unwrap(), original);
+        }
+    }
+}
+
+#[test]
 fn cloud_listing_follows_opaque_next_filters_archived_and_ensures_idempotently()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -608,7 +664,7 @@ esac
     )?;
     executable(
         &bin.join("fzf"),
-        "#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' github.com/org/active\n",
+        "#!/bin/sh\nwhile IFS= read -r row; do\ncase \"$row\" in *github.com/org/active) printf '%s\\n' \"$row\" ;; esac\ndone\n",
     )?;
     std::fs::write(
         &config,
@@ -658,6 +714,18 @@ fn provider_failures_preserve_successful_rows_and_skip_fzf_when_all_fail()
     assert_eq!(document["repositories"].as_array().unwrap().len(), 1);
     assert_eq!(document["provider_errors"].as_array().unwrap().len(), 1);
     assert!(String::from_utf8_lossy(&listed.stderr).contains("dc.example"));
+    let alias = run(&home, &config, &["ls", "--remote", "--json"])?;
+    assert_eq!(alias.status.code(), listed.status.code());
+    assert_eq!(alias.stdout, listed.stdout);
+    assert_eq!(alias.stderr, listed.stderr);
+    let human = run(&home, &config, &["list", "--remote"])?;
+    let alias = run(&home, &config, &["ls", "--remote"])?;
+    assert_eq!(human.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&human.stdout).contains("bitbucket.org/workspace/active"));
+    assert!(String::from_utf8_lossy(&human.stderr).contains("dc.example"));
+    assert_eq!(alias.status.code(), human.status.code());
+    assert_eq!(alias.stdout, human.stdout);
+    assert_eq!(alias.stderr, human.stderr);
     let ensured = run_with_env(
         &home,
         &config,
@@ -807,6 +875,73 @@ fn data_center_uses_personal_project_path_auth_headers_and_destination_mapping()
     let requests = fixture.requests();
     assert!(requests.iter().any(|(_, auth)| auth.starts_with("Basic ")));
     Ok(())
+}
+
+#[test]
+fn cloud_bearer_and_basic_environment_credentials_succeed_without_persistence() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config.toml");
+    for (auth, fields, envs, expected) in [
+        (
+            "bearer",
+            "token_env = 'CLOUD_TOKEN'",
+            vec![("CLOUD_TOKEN", "secret-token")],
+            "Bearer secret-token",
+        ),
+        (
+            "basic",
+            "username_env = 'CLOUD_USER'\npassword_env = 'CLOUD_PASSWORD'",
+            vec![
+                ("CLOUD_USER", "alice"),
+                ("CLOUD_PASSWORD", "secret-password"),
+            ],
+            "Basic YWxpY2U6c2VjcmV0LXBhc3N3b3Jk",
+        ),
+    ] {
+        let fixture = HttpFixture::new(vec![(
+            "/2.0/repositories/workspace".into(),
+            r#"{"values":[{"is_archived":false,"full_name":"workspace/active","links":{"clone":[{"name":"ssh","href":"git@bitbucket.org:workspace/active.git"}]}}],"next":null}"#.into(),
+        )]);
+        let original = format!(
+            "root = 'repos'\n[providers.'bitbucket.org']\npreset = 'bitbucket-cloud'\napi_url = '{}'\nauth = '{auth}'\n{fields}\n[[repositories]]\nurl = 'bitbucket.org/workspace/*'\n",
+            fixture.base
+        );
+        std::fs::write(&config, &original).unwrap();
+        let output =
+            run_with_env(temp.path(), &config, &["list", "--remote", "--json"], &envs).unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            value["repositories"][0]["identity"],
+            "bitbucket.org/workspace/active"
+        );
+        assert_eq!(
+            fixture.requests(),
+            [("/2.0/repositories/workspace".into(), expected.into())]
+        );
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
+        let output = run_with_env(
+            temp.path(),
+            &config,
+            &[
+                "register",
+                "bitbucket.org/workspace/active",
+                "--post-clone",
+                "echo ready",
+            ],
+            &envs,
+        )
+        .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let saved = std::fs::read_to_string(&config).unwrap();
+        assert!(saved.contains("echo ready"));
+        for (_, secret) in &envs {
+            assert!(!saved.contains(secret), "{saved}");
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(secret));
+        }
+        assert!(!saved.contains(expected));
+    }
 }
 
 fn run_with_env(

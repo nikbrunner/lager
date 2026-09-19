@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 #[cfg(test)]
 use std::ffi::OsString;
 use std::io::Write;
@@ -6,6 +6,20 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::application::ports::{RepositorySelector, SelectionCandidate, SelectionError};
+use crate::presentation::escape;
+
+// Exact-checkout labels have renderer-owned columns. Never interpret the public
+// display string as a row: library-supplied labels without paths are opaque fields.
+fn label(candidate: &SelectionCandidate) -> String {
+    match &candidate.exact_path {
+        Some(path) => format!(
+            "{}\t{}",
+            escape(candidate.reference.identity()),
+            escape(path.display())
+        ),
+        None => escape(&candidate.display),
+    }
+}
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum FzfError {
@@ -53,11 +67,18 @@ impl Fzf {
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
+        let rows: Vec<_> = candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| format!("{index}\t{}", label(candidate)))
+            .collect();
         let mut command = Command::new(&self.executable);
         #[cfg(test)]
         command.args(&self.arguments);
         let mut child = command
-            .args(["--multi"])
+            // with-nth transforms both display and search; applying nth again
+            // would drop the first visible field (the whole label for most rows).
+            .args(["--multi", "--delimiter=\t", "--with-nth=2.."])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -71,8 +92,8 @@ impl Fzf {
         let mut write_error = None;
         {
             let stdin = child.stdin.as_mut().expect("fzf stdin configured");
-            for candidate in candidates {
-                if let Err(error) = writeln!(stdin, "{}", candidate.display) {
+            for row in &rows {
+                if let Err(error) = writeln!(stdin, "{row}") {
                     write_error = Some(error);
                     break;
                 }
@@ -95,19 +116,14 @@ impl Fzf {
             return Err(FzfError::Start(error.to_string()));
         }
 
-        // Display strings are only picker labels. Keep a queue per label so duplicate
-        // labels map to distinct candidates without interpreting label contents.
-        let mut indexes: HashMap<&str, VecDeque<usize>> = HashMap::new();
-        for (index, candidate) in candidates.iter().enumerate() {
-            indexes
-                .entry(candidate.display.as_str())
-                .or_default()
-                .push_back(index);
-        }
+        // Hidden row IDs, never rendered labels, identify untouched candidates.
+        let mut indexes: HashMap<String, usize> = (0..candidates.len())
+            .map(|index| (index.to_string(), index))
+            .collect();
         let mut selected = Vec::new();
         for line in String::from_utf8_lossy(&output.stdout).lines() {
-            if let Some(queue) = indexes.get_mut(line)
-                && let Some(index) = queue.pop_front()
+            if let Some((id, _)) = line.split_once('\t')
+                && let Some(index) = indexes.remove(id)
             {
                 selected.push(candidates[index].clone());
             }
@@ -189,6 +205,19 @@ mod tests {
                 .map(|candidate| candidate.reference.identity())
                 .collect::<Vec<_>>(),
             ["github.com/org/first", "github.com/org/second"]
+        );
+    }
+
+    #[test]
+    fn selecting_only_second_identical_label_preserves_identity() {
+        let (_directory, path) = script("sed -n '2p'");
+        let candidates = [
+            candidate("org/first", "duplicate"),
+            candidate("org/second", "duplicate"),
+        ];
+        assert_eq!(
+            Fzf::new(path).select(&candidates).unwrap(),
+            [candidates[1].clone()]
         );
     }
 

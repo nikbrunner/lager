@@ -38,7 +38,10 @@ pub enum Command {
     Ensure(EnsureArgs),
     #[command(about = "Run configured hooks for explicit repositories")]
     Hook(HookArgs),
-    #[command(about = "Show declarations and local repository state")]
+    #[command(
+        visible_alias = "ls",
+        about = "Show declarations and local repository state"
+    )]
     List(ListArgs),
 }
 
