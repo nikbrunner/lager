@@ -121,6 +121,16 @@ worktree guards.
 
 ## Development
 
+Install standalone [Lefthook](https://lefthook.dev/) before working on a clone,
+then install the Git hooks from the repository root:
+
+```sh
+lefthook install
+```
+
+The installed hooks run the same checks by stage: `pre-commit` runs formatting,
+and `pre-push` runs Clippy and tests.
+
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
