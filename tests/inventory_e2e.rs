@@ -568,7 +568,7 @@ exclude = ["repo"]
 
     let transcript = run_inventory_pty_with_size(
         support::lager(&home, &config).arg("inventory"),
-        &["7 rows"],
+        &["7 rows", "local scan complete"],
         b"q",
         80,
         220,
