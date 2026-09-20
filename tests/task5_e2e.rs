@@ -180,6 +180,30 @@ fn clone_success_repeated_matching_noop_honors_add_and_conflicts_are_untouched()
 }
 
 #[test]
+fn add_reports_destination_after_fresh_clone() -> TestResult {
+    let fixture = Fixture::new()?;
+    create_remote(&fixture, "reported")?;
+    let reference = fixture.reference("reported");
+
+    let output = fixture.run(&["add", &reference, "--no-register"]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(&format!(
+            "Cloned {reference} into {}",
+            fixture.destination("reported").display()
+        )),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[test]
 fn clone_repeated_inputs_continue_after_failure() -> TestResult {
     let fixture = Fixture::new()?;
     create_remote(&fixture, "continued")?;

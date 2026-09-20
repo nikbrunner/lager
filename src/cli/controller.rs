@@ -278,9 +278,14 @@ fn add(
     }
     let git = NativeGit;
     let shell = Shell;
+    let mut reporter = TerminalEnsureReporter::default();
     let outcome = if let Some((repositories, _)) = selected {
+        let repositories = repositories
+            .iter()
+            .map(|reference| reference.clone_url.clone())
+            .collect::<Vec<_>>();
         if ask_registration {
-            warehouse::clone_references_with_interaction(
+            warehouse::clone_many_with_interaction_reporter(
                 &store,
                 &git,
                 &shell,
@@ -288,9 +293,10 @@ fn add(
                 path,
                 &repositories,
                 &home,
+                &mut reporter,
             )
         } else {
-            warehouse::clone_references(
+            warehouse::clone_many_with_reporter(
                 &store,
                 &git,
                 &shell,
@@ -299,10 +305,11 @@ fn add(
                 register,
                 args.post_clone.as_deref(),
                 &home,
+                &mut reporter,
             )
         }
     } else if ask_registration {
-        warehouse::clone_many_with_interaction(
+        warehouse::clone_many_with_interaction_reporter(
             &store,
             &git,
             &shell,
@@ -310,9 +317,10 @@ fn add(
             path,
             &args.repositories,
             &home,
+            &mut reporter,
         )
     } else {
-        warehouse::clone_many(
+        warehouse::clone_many_with_reporter(
             &store,
             &git,
             &shell,
@@ -321,6 +329,7 @@ fn add(
             register,
             args.post_clone.as_deref(),
             &home,
+            &mut reporter,
         )
     };
     match outcome {
@@ -351,7 +360,10 @@ fn add(
     }
 }
 
-struct TerminalEnsureReporter;
+#[derive(Default)]
+struct TerminalEnsureReporter {
+    destination: Option<PathBuf>,
+}
 
 impl EnsureReporter for TerminalEnsureReporter {
     fn report(&mut self, event: EnsureEvent<'_>) {
@@ -359,13 +371,21 @@ impl EnsureReporter for TerminalEnsureReporter {
             EnsureEvent::CloneStarted {
                 reference,
                 destination,
-            } => cliclack::log::info(format!(
-                "Cloning {} into {}",
-                escape(reference),
-                escape(destination.display())
-            )),
+            } => {
+                self.destination = Some(destination.to_path_buf());
+                cliclack::log::info(format!(
+                    "Cloning {} into {}",
+                    escape(reference),
+                    escape(destination.display())
+                ))
+            }
             EnsureEvent::CloneSucceeded { reference } => {
-                cliclack::log::success(format!("Cloned {}", escape(reference)))
+                let destination = self
+                    .destination
+                    .as_deref()
+                    .map(|destination| format!(" into {}", escape(destination.display())))
+                    .unwrap_or_default();
+                cliclack::log::success(format!("Cloned {}{destination}", escape(reference)))
             }
             EnsureEvent::CloneFailed { reference, error } => {
                 cliclack::log::error(format!("Failed {}: {}", escape(reference), escape(error)))
@@ -382,7 +402,7 @@ fn ensure(path: &Path, args: EnsureArgs) -> i32 {
     let store = CommandConfigStore::default();
     let git = NativeGit;
     let shell = Shell;
-    let mut reporter = TerminalEnsureReporter;
+    let mut reporter = TerminalEnsureReporter::default();
     let config = match store.load(path) {
         Ok(config) => config,
         Err(error) => {

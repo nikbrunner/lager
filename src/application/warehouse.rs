@@ -562,6 +562,61 @@ where
     G: GitClient + GitState,
     H: HookRunner,
 {
+    clone_many_with_interaction_inner(
+        store,
+        git,
+        hooks,
+        interaction,
+        config_path,
+        references,
+        home,
+        None,
+    )
+}
+
+pub fn clone_many_with_interaction_reporter<S, G, H>(
+    store: &S,
+    git: &G,
+    hooks: &H,
+    interaction: &mut dyn Interaction,
+    config_path: &Path,
+    references: &[String],
+    home: &Path,
+    reporter: &mut dyn EnsureReporter,
+) -> Result<BatchOutcome, String>
+where
+    S: ConfigStore,
+    G: GitClient + GitState,
+    H: HookRunner,
+{
+    clone_many_with_interaction_inner(
+        store,
+        git,
+        hooks,
+        interaction,
+        config_path,
+        references,
+        home,
+        Some(reporter),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn clone_many_with_interaction_inner<S, G, H>(
+    store: &S,
+    git: &G,
+    hooks: &H,
+    interaction: &mut dyn Interaction,
+    config_path: &Path,
+    references: &[String],
+    home: &Path,
+    reporter: Option<&mut dyn EnsureReporter>,
+) -> Result<BatchOutcome, String>
+where
+    S: ConfigStore,
+    G: GitClient + GitState,
+    H: HookRunner,
+{
     validate_references(references.iter().map(String::as_str))?;
     let parsed = references
         .iter()
@@ -571,7 +626,16 @@ where
                 .map_err(|error| ("invalid repository reference".to_owned(), error.to_string()))
         })
         .collect::<Vec<_>>();
-    clone_parsed_with_interaction(store, git, hooks, interaction, config_path, &parsed, home)
+    clone_parsed_with_interaction(
+        store,
+        git,
+        hooks,
+        interaction,
+        config_path,
+        &parsed,
+        home,
+        reporter,
+    )
 }
 
 pub fn clone_references_with_interaction<S, G, H>(
@@ -598,7 +662,16 @@ where
         .cloned()
         .map(|reference| Ok((reference.clone(), reference.clone_url)))
         .collect::<Vec<_>>();
-    clone_parsed_with_interaction(store, git, hooks, interaction, config_path, &parsed, home)
+    clone_parsed_with_interaction(
+        store,
+        git,
+        hooks,
+        interaction,
+        config_path,
+        &parsed,
+        home,
+        None,
+    )
 }
 
 fn clone_parsed_with_interaction<S, G, H>(
@@ -609,6 +682,7 @@ fn clone_parsed_with_interaction<S, G, H>(
     config_path: &Path,
     references: &[ParsedCloneInput],
     home: &Path,
+    mut reporter: Option<&mut dyn EnsureReporter>,
 ) -> Result<BatchOutcome, String>
 where
     S: ConfigStore,
@@ -636,7 +710,7 @@ where
             false,
             None,
             home,
-            None,
+            &mut reporter,
         );
         let succeeded = !matches!(outcome.outcome.status, OperationStatus::Failed(_));
         let fresh = matches!(outcome.outcome.status, OperationStatus::Cloned);
@@ -722,6 +796,66 @@ where
     G: GitClient + GitState,
     H: HookRunner,
 {
+    clone_many_inner(
+        store,
+        git,
+        hooks,
+        config_path,
+        references,
+        add,
+        post_clone,
+        home,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn clone_many_with_reporter<S, G, H>(
+    store: &S,
+    git: &G,
+    hooks: &H,
+    config_path: &Path,
+    references: &[String],
+    add: bool,
+    post_clone: Option<&str>,
+    home: &Path,
+    reporter: &mut dyn EnsureReporter,
+) -> Result<BatchOutcome, String>
+where
+    S: ConfigStore,
+    G: GitClient + GitState,
+    H: HookRunner,
+{
+    clone_many_inner(
+        store,
+        git,
+        hooks,
+        config_path,
+        references,
+        add,
+        post_clone,
+        home,
+        Some(reporter),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn clone_many_inner<S, G, H>(
+    store: &S,
+    git: &G,
+    hooks: &H,
+    config_path: &Path,
+    references: &[String],
+    add: bool,
+    post_clone: Option<&str>,
+    home: &Path,
+    mut reporter: Option<&mut dyn EnsureReporter>,
+) -> Result<BatchOutcome, String>
+where
+    S: ConfigStore,
+    G: GitClient + GitState,
+    H: HookRunner,
+{
     validate_references(references.iter().map(String::as_str))?;
     let config = store.load(config_path).map_err(|error| error.to_string())?;
     let mut result = BatchOutcome::default();
@@ -736,6 +870,7 @@ where
             add || post_clone.is_some(),
             post_clone,
             home,
+            &mut reporter,
         );
         if record_clone(&mut result, outcome) {
             break;
@@ -767,6 +902,7 @@ where
     )?;
     let config = store.load(config_path).map_err(|error| error.to_string())?;
     let mut result = BatchOutcome::default();
+    let mut reporter = None;
     for reference in references {
         let outcome = clone_reference(
             store,
@@ -779,7 +915,7 @@ where
             add || post_clone.is_some(),
             post_clone,
             home,
-            None,
+            &mut reporter,
         );
         if record_clone(&mut result, outcome) {
             break;
@@ -813,6 +949,7 @@ where
         provider_errors,
         cancelled: false,
     };
+    let mut reporter = Some(reporter);
     for (reference, hook) in candidates {
         let outcome = clone_reference(
             store,
@@ -825,7 +962,7 @@ where
             false,
             hook.as_deref(),
             home,
-            Some(reporter),
+            &mut reporter,
         );
         if record_clone(&mut result, outcome) {
             break;
@@ -915,6 +1052,7 @@ fn clone_candidate<S, G, H>(
     add: bool,
     requested_hook: Option<&str>,
     home: &Path,
+    reporter: &mut Option<&mut dyn EnsureReporter>,
 ) -> CloneOutcome
 where
     S: ConfigStore,
@@ -937,7 +1075,7 @@ where
         add,
         requested_hook,
         home,
-        None,
+        reporter,
     )
 }
 
@@ -953,7 +1091,7 @@ fn clone_reference<S, G, H>(
     add: bool,
     requested_hook: Option<&str>,
     home: &Path,
-    mut reporter: Option<&mut dyn EnsureReporter>,
+    mut reporter: &mut Option<&mut dyn EnsureReporter>,
 ) -> CloneOutcome
 where
     S: ConfigStore,
