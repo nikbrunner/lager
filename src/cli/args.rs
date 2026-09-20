@@ -43,6 +43,8 @@ pub enum Command {
         about = "Show declarations and local repository state"
     )]
     List(ListArgs),
+    #[command(visible_alias = "inv", about = "Open the repository inventory")]
+    Inventory(InventoryArgs),
 }
 
 #[derive(Debug, ClapArgs)]
@@ -188,4 +190,12 @@ pub struct ListArgs {
     pub include_archived: bool,
     #[arg(long, help = "Render one stable JSON document")]
     pub json: bool,
+}
+
+#[derive(Debug, Clone, ClapArgs)]
+pub struct InventoryArgs {
+    #[arg(long, help = "Remote discovery is unavailable in this build")]
+    pub remote: bool,
+    #[arg(long, help = "Include archived repositories; requires --remote")]
+    pub include_archived: bool,
 }

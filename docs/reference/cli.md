@@ -4,7 +4,7 @@
 lager [--config PATH] <COMMAND>
 ```
 
-Lager reads one configuration for each command. It selects the path in this order:
+Lager selects the configuration path in this order:
 
 1. `--config PATH`
 2. `LAGER_CONFIG`
@@ -24,6 +24,7 @@ Lager reads one configuration for each command. It selects the path in this orde
 | `ensure` | `ensure [--include-archived]` | Creates missing effective declarations sequentially. |
 | `hook` | `hook [REPOSITORY]...` | Runs hooks for explicit declarations. Without repositories, it selects explicit declarations. |
 | `list`, `ls` | `list [--remote] [--include-archived] [--json]` | Reports declarations and local state. `--remote` expands wildcards through providers. |
+| `inventory`, `inv` | `inventory` | Opens a read-only offline overview; requires TTY stdin and stdout. |
 
 `ls` is a visible alias for `list`. Both names accept the same arguments, options, and configuration selection, and produce identical data output and exit statuses. Help and usage text reflect the invoked name.
 
@@ -73,6 +74,31 @@ Equivalent repeated references are no-ops after the first change. Retrying the
 same batch is safe. `add` and `ensure` retain per-target behavior; they are not
 all-or-nothing clone batches.
 
+## Offline inventory
+
+`inventory` and `inv` have identical behavior. They show declarations and local
+Git roots beneath the configured root without provider requests or configuration
+writes. Registration and checkout state are independent; duplicate origins keep
+separate rows for their exact paths. Originless checkouts display `No origin`.
+
+Discovery recurses through directories, prunes found Git roots, and excludes
+directory symlinks, linked worktrees, submodules and bare repositories. Unreadable
+paths produce partial-scan diagnostics. Pending, failed and stale observations
+remain distinct from clean status.
+
+Press `R` to reload configuration and refresh local observations. Earlier
+observations remain marked stale until refreshed. Press `q` or Esc to cancel
+background work and quit, restoring the terminal. A normal quit returns `1` if
+an operational failure occurred during the session, even after a successful
+refresh; otherwise it returns `0`. Informational exclusions and deliberate
+cancellation do not count as failures.
+
+This checkpoint supports quit and local refresh. Navigation, search, menus and
+mutations are unavailable. Remote discovery is unavailable: `--remote`, including
+with `--include-archived`, exits `2` before raw mode. `--include-archived` without
+`--remote` is also invalid. Non-TTY use exits `2`; fatal startup/configuration
+errors exit `1`.
+
 ## Non-interactive use
 
 Outside a terminal, Lager never prompts:
@@ -80,6 +106,7 @@ Outside a terminal, Lager never prompts:
 - `init` requires `--root`, one root-creation choice, and one GitHub choice.
 - `add` requires exactly one of `--register` or `--no-register`, unless `--post-clone` supplies registration.
 - `remove` requires exactly one of `--unregister` or `--keep-registered`, plus `--yes`.
+- `inventory` requires TTY stdin and stdout; use `list --json` for automation.
 
 `--post-clone` conflicts with `--no-register`. `list --include-archived` requires `--remote`. Explicit repository arguments bypass the picker.
 
@@ -102,6 +129,6 @@ opaque escaped field when `exact_path` is absent; when present, it renders the
 identity and path instead. Duplicate labels map back to distinct untouched
 candidates by hidden row ID, in the order returned by the picker.
 
-A picker or interaction cancellation exits 130. Invalid usage exits 2. Configuration, provider, Git, hook, filesystem, and aggregate failures exit 1. Success, no-op, empty selections, and explicitly skipped removals exit 0.
+A picker or repository interaction cancellation exits 130. Inventory's `q` and Esc use the session exit status described above. Invalid usage exits 2. Configuration, provider, Git, hook, filesystem, and aggregate failures exit 1. Success, no-op, empty selections, and explicitly skipped removals exit 0.
 
 See [JSON output](list-json.md), [exit codes](exit-codes.md), [automation](../how-to/automation.md), and [safe removal](../how-to/remove-safely.md) for the detailed contracts.

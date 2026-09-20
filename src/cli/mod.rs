@@ -1,6 +1,7 @@
 pub mod args;
 pub mod controller;
 pub mod interaction;
+mod inventory;
 use std::io::IsTerminal;
 
 use crate::infrastructure::{fzf::Fzf, tools::NativeTools};
