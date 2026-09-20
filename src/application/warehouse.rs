@@ -574,6 +574,7 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn clone_many_with_interaction_reporter<S, G, H>(
     store: &S,
     git: &G,
@@ -674,6 +675,7 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn clone_parsed_with_interaction<S, G, H>(
     store: &S,
     git: &G,
@@ -1091,7 +1093,7 @@ fn clone_reference<S, G, H>(
     add: bool,
     requested_hook: Option<&str>,
     home: &Path,
-    mut reporter: &mut Option<&mut dyn EnsureReporter>,
+    reporter: &mut Option<&mut dyn EnsureReporter>,
 ) -> CloneOutcome
 where
     S: ConfigStore,
@@ -1100,18 +1102,18 @@ where
 {
     if parsed.is_wildcard() {
         return reported_failure(
-            &mut reporter,
+            reporter,
             input,
             "wildcard references cannot be cloned directly",
         );
     }
     let root = match config.resolve_root(home) {
         Ok(root) => root,
-        Err(error) => return reported_failure(&mut reporter, input, &error.to_string()),
+        Err(error) => return reported_failure(reporter, input, &error.to_string()),
     };
     let destination = match destination(config, parsed, home) {
         Ok(destination) => destination,
-        Err(error) => return reported_failure(&mut reporter, input, &error),
+        Err(error) => return reported_failure(reporter, input, &error),
     };
     let state = git.classify_destination(&destination, &parsed.clone_url);
     let fresh = match state {
@@ -1124,21 +1126,17 @@ where
             }
             if let Err(error) = git.clone_repository(&parsed.clone_url, home, &root, &destination) {
                 let cancelled = git.is_cancelled(&error);
-                return reported_failure(&mut reporter, input, &error.to_string())
+                return reported_failure(reporter, input, &error.to_string())
                     .with_cancelled(cancelled);
             }
             true
         }
         LocalState::Cloned => false,
         LocalState::Conflict => {
-            return reported_failure(
-                &mut reporter,
-                input,
-                "destination conflicts with repository",
-            );
+            return reported_failure(reporter, input, "destination conflicts with repository");
         }
         LocalState::Unreadable => {
-            return reported_failure(&mut reporter, input, "destination is unreadable");
+            return reported_failure(reporter, input, "destination is unreadable");
         }
     };
 
@@ -1146,7 +1144,7 @@ where
         let command = requested_hook;
         if let Err(error) = store.register(config_path, &[input.to_owned()], command) {
             return reported_failure(
-                &mut reporter,
+                reporter,
                 input,
                 &format!("could not persist declaration: {error}"),
             );
@@ -1166,8 +1164,7 @@ where
             && let Err(error) = hooks.run_hook(command, &destination)
         {
             let cancelled = hooks.is_cancelled(&error);
-            return reported_failure(&mut reporter, input, &error.to_string())
-                .with_cancelled(cancelled);
+            return reported_failure(reporter, input, &error.to_string()).with_cancelled(cancelled);
         }
         if let Some(reporter) = reporter {
             reporter.report(EnsureEvent::CloneSucceeded { reference: input });
