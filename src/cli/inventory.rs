@@ -395,7 +395,7 @@ impl TerminalSession {
                 }
             };
             let visible_rows = matching_rows(&report, &selection.query);
-            selection.reconcile(&visible_rows);
+            selection.reconcile(&visible_rows, session.complete);
             if let Err(error) = self.draw_report(&report, &visible_rows, session, &mut selection) {
                 eprintln!("lager: terminal render failed: {}", escape(error));
                 return 1;
@@ -986,8 +986,8 @@ struct Selection {
 }
 
 impl Selection {
-    fn reconcile(&mut self, rows: &[&model::InventoryRow]) {
-        let index = self
+    fn reconcile(&mut self, rows: &[&model::InventoryRow], complete: bool) {
+        let matched = self
             .key
             .as_ref()
             .and_then(|key| rows.iter().position(|row| &row.key == key))
@@ -1006,19 +1006,20 @@ impl Selection {
                     rows.iter()
                         .position(|row| row.observed_path.as_ref() == Some(path))
                 })
-            })
-            .or_else(|| {
-                (!rows.is_empty()).then_some(
-                    self.table
-                        .selected()
-                        .unwrap_or(0)
-                        .min(rows.len().saturating_sub(1)),
-                )
             });
+        let index = matched.or_else(|| {
+            (!rows.is_empty()).then_some(
+                self.table
+                    .selected()
+                    .unwrap_or(0)
+                    .min(rows.len().saturating_sub(1)),
+            )
+        });
         self.table.select(index);
-        // An empty filtered or in-flight refresh frame must not discard the target needed when
-        // its checkout or declaration row returns.
-        if let Some(index) = index {
+        // During a scan, a provisional row must not replace the remembered target.
+        if let Some(index) = index
+            && (matched.is_some() || complete || self.key.is_none())
+        {
             self.remember(Some(rows[index]));
         }
     }
@@ -1474,11 +1475,49 @@ mod tests {
         selection.open_inspection(&[&alpha]);
 
         // Reconciliation legitimately advances the table to beta, but an open inspection cannot.
-        selection.reconcile(&[&beta]);
+        selection.reconcile(&[&beta], true);
 
         assert_eq!(selection.selected_row(&[&beta]), Some(&beta));
         assert!(selection.inspection);
         assert_eq!(selection.inspected_row(&[&beta]), None);
+    }
+
+    #[test]
+    fn provisional_selection_yields_to_scan_completion_and_explicit_navigation() {
+        let row = |name: &str| InventoryRow {
+            key: RowKey::Pattern(name.to_owned()),
+            repository: name.to_owned(),
+            path: name.to_owned(),
+            registration: RegistrationState::Pattern,
+            checkout: CheckoutState::Pattern,
+            origin: name.to_owned(),
+            branch: ObservationField::NotApplicable,
+            changes: ObservationField::NotApplicable,
+            configured_destination: None,
+            observed_path: None,
+            declaration: Some(name.to_owned()),
+            warnings: Vec::new(),
+            markable: false,
+        };
+        let alpha = row("alpha");
+        let beta = row("beta");
+        let mut selection = Selection::default();
+        selection.reconcile(&[&beta], false);
+        selection.reconcile(&[&alpha], false);
+        assert_eq!(selection.selected_row(&[&alpha]), Some(&alpha));
+        assert_eq!(selection.key, Some(beta.key.clone()));
+        selection.reconcile(&[&alpha, &beta], true);
+        assert_eq!(selection.selected_row(&[&alpha, &beta]), Some(&beta));
+
+        selection.reconcile(&[&alpha], true);
+        selection.reconcile(&[&beta, &alpha], true);
+        assert_eq!(selection.selected_row(&[&beta, &alpha]), Some(&alpha));
+
+        selection.move_by(&[&beta, &alpha], -1);
+        selection.reconcile(&[&alpha], false);
+        selection.move_by(&[&alpha], 1);
+        selection.reconcile(&[&beta, &alpha], true);
+        assert_eq!(selection.selected_row(&[&beta, &alpha]), Some(&alpha));
     }
 
     #[test]

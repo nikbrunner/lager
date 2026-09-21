@@ -2336,23 +2336,62 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
     init_repo(&root.join("alpha"), "git@github.com:org/alpha.git", true);
     init_repo(&configured, "git@github.com:org/same.git", true);
     init_repo(&duplicate, "git@github.com:org/same.git", true);
+    let tools = temp.path().join("tools");
+    let hold = temp.path().join("hold");
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(
+        tools.join("git"),
+        format!(
+            "#!/bin/sh\nif [ \"$2\" != {} ]; then while [ -e {} ]; do /bin/sleep 0.02; done; fi\nexec {} \"$@\"\n",
+            shell_word(&root.join("alpha")),
+            shell_word(&hold),
+            shell_word(&support::real_tool("git")),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
     let mut frames = Vec::new();
 
     run_inventory_pty_with_exit_observing(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
         &[
             (
-                vec!["local scan complete", "selected: github.com/org/alpha"],
-                b"j/cloned\r".to_vec(),
+                vec!["local scan complete", "3 rows"],
+                b"kkj/cloned\r".to_vec(),
             ),
-            (vec!["NORMAL / cloned · 3 rows"], b"R".to_vec()),
             (
-                vec!["generation 2", "explicit", "selected: github.com/org/same"],
+                vec!["NORMAL / cloned · 3 rows", "selected: github.com/org/same"],
+                b"R".to_vec(),
+            ),
+            (
+                vec![
+                    "generation 2",
+                    "NORMAL / cloned · 1 rows",
+                    "github.com/org/alpha",
+                ],
+                Vec::new(),
+            ),
+            (
+                vec![
+                    "generation 2",
+                    "local scan complete",
+                    "explicit",
+                    "selected: github.com/org/same",
+                ],
                 b"R".to_vec(),
             ),
             (
                 vec![
                     "generation 3",
+                    "NORMAL / cloned · 1 rows",
+                    "github.com/org/alpha",
+                ],
+                Vec::new(),
+            ),
+            (
+                vec![
+                    "generation 3",
+                    "local scan complete",
                     "unregistered",
                     "selected: github.com/org/same",
                 ],
@@ -2363,16 +2402,21 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
         500,
         0,
         |index, _, frame| match index {
-            1 => fs::write(
-                &config,
-                "root = \"repos\"\n\n[[repositories]]\nurl = \"github.com/org/same\"\n",
-            )
-            .unwrap(),
-            2 => {
+            1 => {
+                fs::write(&hold, "hold").unwrap();
+                fs::write(
+                    &config,
+                    "root = \"repos\"\n\n[[repositories]]\nurl = \"github.com/org/same\"\n",
+                )
+                .unwrap();
+            }
+            2 | 4 => fs::remove_file(&hold).unwrap(),
+            3 => {
                 frames.push(frame.to_owned());
+                fs::write(&hold, "hold").unwrap();
                 fs::write(&config, "root = \"repos\"\n").unwrap();
             }
-            3 => frames.push(frame.to_owned()),
+            5 => frames.push(frame.to_owned()),
             _ => {}
         },
     );
@@ -2514,7 +2558,9 @@ fn run_inventory_pty_with_exit_observing(
             let _ = child.0.kill();
             let _ = child.0.wait();
             retain_transcript(&transcript, rows, cols);
-            panic!("inventory PTY timed out; transcript retained:\n{transcript}");
+            panic!(
+                "inventory PTY timed out at action {action_index}; transcript retained:\n{transcript}"
+            );
         }
         read_pty(&mut writer, &mut bytes);
         transcript = String::from_utf8_lossy(&bytes).into_owned();
