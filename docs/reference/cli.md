@@ -93,11 +93,12 @@ an operational failure occurred during the session, even after a successful
 refresh; otherwise it returns `0`. Informational exclusions and deliberate
 cancellation do not count as failures.
 
-This checkpoint supports quit and local refresh. Navigation, search, menus and
-mutations are unavailable. Remote discovery is unavailable: `--remote`, including
-with `--include-archived`, exits `2` before raw mode. `--include-archived` without
-`--remote` is also invalid. Non-TTY use exits `2`; fatal startup/configuration
-errors exit `1`.
+Use `j`/`k` or arrow keys to select a row, `/` for live fuzzy search, Enter to
+inspect the selected repository, `m` for the available local actions, and `?` for
+effective bindings. These actions are read-only. Repository mutations and remote
+discovery are unavailable. `--remote`, including with `--include-archived`, exits
+`2` before raw mode. `--include-archived` without `--remote` is also invalid.
+Non-TTY use exits `2`; fatal startup/configuration errors exit `1`.
 
 ## Non-interactive use
 
