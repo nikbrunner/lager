@@ -53,9 +53,46 @@ fn load_with_warnings(path: &Path, warnings: bool) -> Result<Config, ConfigStore
     let document = parse_document(path, &content)?;
     let config = decode_config(path, &document)?;
     if warnings {
-        warn_unknown_keys(&document.into_mut());
+        for warning in unknown_key_warnings(&document.into_mut()) {
+            eprintln!("lager: warning: {warning}");
+        }
     }
     Ok(config)
+}
+
+pub(crate) type InventoryKeyOverrides =
+    std::collections::BTreeMap<String, std::collections::BTreeMap<String, Vec<String>>>;
+
+pub(crate) fn load_inventory(
+    path: &Path,
+) -> Result<(Config, InventoryKeyOverrides, Vec<String>), ConfigStoreError> {
+    #[derive(Default, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct InventorySettings {
+        #[serde(default)]
+        keys: InventoryKeyOverrides,
+    }
+    #[derive(serde::Deserialize)]
+    struct Settings {
+        #[serde(default)]
+        inventory: InventorySettings,
+    }
+    let content = fs::read_to_string(path).map_err(|source| ConfigStoreError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let document = parse_document(path, &content)?;
+    let config = decode_config(path, &document)?;
+    let settings: Settings =
+        toml_edit::de::from_str(&content).map_err(|error| ConfigStoreError::Parse {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+    Ok((
+        config,
+        settings.inventory.keys,
+        unknown_key_warnings(&document.into_mut()),
+    ))
 }
 
 pub fn init(path: &Path, root: &str, github: bool) -> Result<(), ConfigStoreError> {
@@ -308,7 +345,9 @@ fn mutate<T>(
     decode_config(&target, &document)?;
     let mut document = document.into_mut();
     if warnings {
-        warn_unknown_keys(&document);
+        for warning in unknown_key_warnings(&document) {
+            eprintln!("lager: warning: {warning}");
+        }
     }
     let original = document.to_string();
     let result = operation(&mut document)?;
@@ -482,10 +521,11 @@ fn relative_wildcard_name(pattern: &RepositoryRef, candidate: &RepositoryRef) ->
         .to_owned()
 }
 
-fn warn_unknown_keys(document: &DocumentMut) {
+fn unknown_key_warnings(document: &DocumentMut) -> Vec<String> {
+    let mut warnings = Vec::new();
     for (key, _) in document.iter() {
-        if !matches!(key, "root" | "providers" | "repositories") {
-            eprintln!("lager: warning: unknown config key `{}`", escape(key));
+        if !matches!(key, "root" | "providers" | "repositories" | "inventory") {
+            warnings.push(format!("unknown config key `{}`", escape(key)));
         }
     }
     if let Some(providers) = document.get("providers").and_then(Item::as_table_like) {
@@ -504,11 +544,11 @@ fn warn_unknown_keys(document: &DocumentMut) {
                             | "ssh_user"
                             | "ssh_port"
                     ) {
-                        eprintln!(
-                            "lager: warning: unknown provider key `{}.{}`",
+                        warnings.push(format!(
+                            "unknown provider key `{}.{}`",
                             escape(host),
                             escape(key)
-                        );
+                        ));
                     }
                 }
             }
@@ -521,14 +561,15 @@ fn warn_unknown_keys(document: &DocumentMut) {
         for (index, repository) in repositories.iter().enumerate() {
             for (key, _) in repository.iter() {
                 if !matches!(key, "url" | "post_clone" | "exclude") {
-                    eprintln!(
-                        "lager: warning: unknown repository key `repositories[{index}].{}`",
+                    warnings.push(format!(
+                        "unknown repository key `repositories[{index}].{}`",
                         escape(key)
-                    );
+                    ));
                 }
             }
         }
     }
+    warnings
 }
 
 fn home_dir() -> PathBuf {
