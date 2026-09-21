@@ -203,6 +203,7 @@ fn overlapping_wildcards_restore_all_exclusions_and_keep_explicit_hook() {
 
 #[cfg(unix)]
 fn interactive_batch(cancel: bool) {
+    use rustix_openpty::rustix::termios::{LocalModes, tcgetattr};
     use std::io::{Read, Write};
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::process::Stdio;
@@ -265,7 +266,14 @@ fn interactive_batch(cancel: bool) {
         if let Ok(bytes) = receiver.recv_timeout(Duration::from_millis(20)) {
             transcript.push_str(&String::from_utf8_lossy(&bytes));
         }
-        if next < steps.len() && transcript.contains(steps[next].0) {
+        // Prompt rendering can precede raw-mode input readiness.
+        if next < steps.len()
+            && transcript.contains(steps[next].0)
+            && !tcgetattr(&writer)
+                .unwrap()
+                .local_modes
+                .intersects(LocalModes::ICANON | LocalModes::ISIG)
+        {
             // The entire batch must remain uncommitted while any prompt is open.
             assert_eq!(fs::read_to_string(&target).unwrap(), latest);
             if !cancel && next == 2 {
