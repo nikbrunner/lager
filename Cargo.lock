@@ -883,6 +883,7 @@ dependencies = [
  "cliclack",
  "crossterm 0.29.0",
  "fs2",
+ "libc",
  "ratatui",
  "reqwest",
  "rustix 1.1.4",

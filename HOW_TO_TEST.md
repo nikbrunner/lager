@@ -1,5 +1,7 @@
 # Repository-management acceptance checklist
 
+For the read-only TUI, use the [inventory acceptance walkthrough](docs/how-to/verify-inventory.md).
+
 ## Test context
 
 - Build: repository-hardening implementation. Record `lager --version` with

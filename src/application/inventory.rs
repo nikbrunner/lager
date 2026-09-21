@@ -191,6 +191,7 @@ pub fn build_inventory(
 
     for declaration in &concrete {
         let identity = declaration.reference.identity();
+        let (_, relationships) = registration_for(&identity, &wildcards, &explicit_identities);
         let key = declaration_key(&identity, &declaration.destination);
         rows_by_key.insert(
             key.clone(),
@@ -214,7 +215,7 @@ pub fn build_inventory(
                 configured_destination: Some(declaration.destination.clone()),
                 observed_path: None,
                 declaration: Some(declaration.declaration.url.clone()),
-                warnings: Vec::new(),
+                warnings: relationships,
                 markable: true,
             },
         );

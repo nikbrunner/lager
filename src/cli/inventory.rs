@@ -28,7 +28,7 @@ use super::args::InventoryArgs;
 mod keys;
 use keys::{Action, Bindings, Mode};
 
-pub fn run(config_path: &Path, args: InventoryArgs) -> i32 {
+pub fn run(config_path: &Path, args: InventoryArgs, interrupted: impl Fn() -> Option<i32>) -> i32 {
     if args.include_archived && !args.remote {
         eprintln!("lager: --include-archived requires --remote");
         return 2;
@@ -88,7 +88,7 @@ pub fn run(config_path: &Path, args: InventoryArgs) -> i32 {
             return 1;
         }
     };
-    terminal.run(&mut session)
+    terminal.run(&mut session, &interrupted)
 }
 
 struct InventorySession {
@@ -383,9 +383,17 @@ impl TerminalSession {
         }).map(|_| ()).map_err(|error| error.to_string())
     }
 
-    fn run(&mut self, session: &mut InventorySession) -> i32 {
+    fn run(
+        &mut self,
+        session: &mut InventorySession,
+        interrupted: &dyn Fn() -> Option<i32>,
+    ) -> i32 {
         let mut selection = Selection::default();
         loop {
+            if let Some(code) = interrupted() {
+                session.worker.cancel_and_join();
+                return code;
+            }
             session.receive_events();
             let report = match session.report() {
                 Ok(report) => report,
@@ -400,9 +408,19 @@ impl TerminalSession {
                 eprintln!("lager: terminal render failed: {}", escape(error));
                 return 1;
             }
-            match event::poll(Duration::from_millis(50)) {
+            let ready = event::poll(Duration::from_millis(50));
+            if let Some(code) = interrupted() {
+                session.worker.cancel_and_join();
+                return code;
+            }
+            match ready {
                 Ok(true) => match event::read() {
                     Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                        if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL
+                        {
+                            session.worker.cancel_and_join();
+                            return 130;
+                        }
                         let mode = if selection.help || selection.inspection {
                             Mode::Inspection
                         } else if selection.menu {
@@ -412,13 +430,20 @@ impl TerminalSession {
                         } else {
                             Mode::Normal
                         };
-                        match session.bindings.action(mode, key) {
+                        let action = session.bindings.action(mode, key);
+                        let action = if mode == Mode::Menu && action == Some(Action::Accept) {
+                            root_menu_actions().get(selection.menu_index).copied()
+                        } else {
+                            action
+                        };
+                        match action {
                             Some(Action::Quit) => {
                                 session.worker.cancel_and_join();
                                 session.receive_events();
                                 return i32::from(session.had_failure);
                             }
                             Some(Action::Refresh) => {
+                                selection.menu = false;
                                 if let Err(error) = session.refresh() {
                                     session.had_failure = true;
                                     session.notice =
@@ -434,8 +459,14 @@ impl TerminalSession {
                                 selection.menu = false;
                                 selection.search = true;
                             }
-                            Some(Action::ClearSearch) => selection.query.clear(),
+                            Some(Action::ClearSearch) => {
+                                selection.menu = false;
+                                selection.query.clear();
+                            }
                             Some(Action::Help) => {
+                                if !selection.help {
+                                    selection.help_mode = mode;
+                                }
                                 selection.help = !selection.help;
                                 selection.help_scroll = 0;
                             }
@@ -448,28 +479,6 @@ impl TerminalSession {
                             Some(Action::Cancel) if selection.menu => {
                                 selection.menu = false;
                                 selection.menu_scroll = 0;
-                            }
-                            Some(Action::Accept) if selection.menu => {
-                                let action = root_menu_actions()
-                                    .get(selection.menu_index)
-                                    .copied()
-                                    .expect("menu selection is clamped");
-                                selection.menu = false;
-                                selection.menu_scroll = 0;
-                                match action {
-                                    Action::Inspect => selection.open_inspection(&visible_rows),
-                                    Action::Search => selection.search = true,
-                                    Action::Help => {
-                                        selection.help = true;
-                                        selection.help_scroll = 0;
-                                    }
-                                    Action::Quit => {
-                                        session.worker.cancel_and_join();
-                                        session.receive_events();
-                                        return i32::from(session.had_failure);
-                                    }
-                                    _ => unreachable!("root menu contains only overview actions"),
-                                }
                             }
                             Some(Action::Cancel | Action::Accept) if selection.search => {
                                 selection.search = false;
@@ -487,7 +496,7 @@ impl TerminalSession {
                                 selection.help_scroll = selection
                                     .help_scroll
                                     .saturating_add(1)
-                                    .min(self.help_scroll_limit(session));
+                                    .min(self.help_scroll_limit(session, selection.help_mode));
                             }
                             Some(Action::PageUp) if selection.help => {
                                 selection.help_scroll = selection.help_scroll.saturating_sub(10);
@@ -496,7 +505,7 @@ impl TerminalSession {
                                 selection.help_scroll = selection
                                     .help_scroll
                                     .saturating_add(10)
-                                    .min(self.help_scroll_limit(session));
+                                    .min(self.help_scroll_limit(session, selection.help_mode));
                             }
                             Some(Action::Up) if selection.inspection => {
                                 selection.inspection_scroll =
@@ -505,7 +514,7 @@ impl TerminalSession {
                             Some(Action::Down) if selection.inspection => {
                                 let limit = selection
                                     .inspected_row(&visible_rows)
-                                    .map(|row| self.inspection_scroll_limit(row))
+                                    .map(|row| self.inspection_scroll_limit(row, &session.bindings))
                                     .unwrap_or(0);
                                 selection.inspection_scroll =
                                     selection.inspection_scroll.saturating_add(1).min(limit);
@@ -517,7 +526,7 @@ impl TerminalSession {
                             Some(Action::PageDown) if selection.inspection => {
                                 let limit = selection
                                     .inspected_row(&visible_rows)
-                                    .map(|row| self.inspection_scroll_limit(row))
+                                    .map(|row| self.inspection_scroll_limit(row, &session.bindings))
                                     .unwrap_or(0);
                                 selection.inspection_scroll =
                                     selection.inspection_scroll.saturating_add(10).min(limit);
@@ -547,17 +556,25 @@ impl TerminalSession {
         }
     }
 
-    fn help_scroll_limit(&self, session: &InventorySession) -> u16 {
-        let lines = session.bindings.help(Mode::Normal).len() as u16;
-        let viewport = self
-            .terminal
+    fn help_scroll_limit(&self, session: &InventorySession, mode: Mode) -> u16 {
+        self.terminal
             .size()
-            .map(|size| size.height.saturating_sub(5))
-            .unwrap_or(1);
-        lines.saturating_sub(viewport.max(1))
+            .map(|size| {
+                let width = size.width.saturating_sub(2);
+                let hints = hint_widget(&session.bindings, Mode::Inspection, width);
+                let viewport = size
+                    .height
+                    .saturating_sub(3 + hints.line_count(width) as u16)
+                    .max(1);
+                help_widget(&session.bindings, mode)
+                    .line_count(width)
+                    .saturating_sub(usize::from(viewport))
+                    .min(usize::from(u16::MAX)) as u16
+            })
+            .unwrap_or(0)
     }
 
-    fn inspection_scroll_limit(&self, row: &model::InventoryRow) -> u16 {
+    fn inspection_scroll_limit(&self, row: &model::InventoryRow, bindings: &Bindings) -> u16 {
         let area = self
             .terminal
             .size()
@@ -567,10 +584,10 @@ impl TerminalSession {
                 horizontal: 1,
                 vertical: 1,
             });
-        inspection_scroll_limit(row, inspection_popup_area(area))
+        inspection_scroll_limit(row, inspection_popup_area(area), bindings)
     }
 
-    fn menu_scroll_metrics(&self) -> (u16, u16) {
+    fn menu_scroll_metrics(&self, bindings: &Bindings) -> (u16, u16) {
         let area = self
             .terminal
             .size()
@@ -580,7 +597,7 @@ impl TerminalSession {
                 horizontal: 1,
                 vertical: 1,
             });
-        menu_scroll_metrics(inspection_popup_area(area))
+        menu_scroll_metrics(inspection_popup_area(area), bindings)
     }
 
     fn draw_report(
@@ -591,13 +608,15 @@ impl TerminalSession {
         selection: &mut Selection,
     ) -> Result<(), String> {
         let complete = session.complete;
-        selection.help_scroll = selection.help_scroll.min(self.help_scroll_limit(session));
+        selection.help_scroll = selection
+            .help_scroll
+            .min(self.help_scroll_limit(session, selection.help_mode));
         if let Some(row) = selection.inspected_row(visible_rows) {
             selection.inspection_scroll = selection
                 .inspection_scroll
-                .min(self.inspection_scroll_limit(row));
+                .min(self.inspection_scroll_limit(row, &session.bindings));
         }
-        let (menu_limit, menu_viewport) = self.menu_scroll_metrics();
+        let (menu_limit, menu_viewport) = self.menu_scroll_metrics(&session.bindings);
         selection.clamp_menu_scroll(menu_limit, menu_viewport);
         let (mut header, mut summary) = report_lines(
             report,
@@ -617,7 +636,6 @@ impl TerminalSession {
             Mode::Normal
         };
         summary.push(Line::raw("remote unavailable"));
-        summary.push(Line::raw(session.bindings.help(mode).join(" · ")));
         self.terminal
             .draw(|frame| {
                 let area = frame.area();
@@ -631,12 +649,14 @@ impl TerminalSession {
                     horizontal: 1,
                     vertical: 1,
                 });
+                let hints = hint_widget(&session.bindings, mode, inner.width);
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(1),
                         Constraint::Min(1),
                         Constraint::Length(summary.len() as u16),
+                        Constraint::Length(hints.line_count(inner.width) as u16),
                     ])
                     .split(inner);
                 frame.render_widget(
@@ -667,25 +687,20 @@ impl TerminalSession {
                     Paragraph::new(summary).style(Style::default().fg(Color::Reset)),
                     chunks[2],
                 );
+                frame.render_widget(hints, chunks[3]);
                 if selection.help {
-                    let help = session.bindings.help(Mode::Normal).join("\n");
+                    let help = help_widget(&session.bindings, selection.help_mode);
+                    let hints = hint_widget(&session.bindings, Mode::Inspection, inner.width);
                     frame.render_widget(ratatui::widgets::Clear, inner);
                     let help_chunks = Layout::vertical([
                         Constraint::Length(1),
                         Constraint::Min(1),
-                        Constraint::Length(2),
+                        Constraint::Length(hints.line_count(inner.width) as u16),
                     ])
                     .split(inner);
                     frame.render_widget(Paragraph::new("HELP / inventory"), help_chunks[0]);
-                    frame.render_widget(
-                        Paragraph::new(help).scroll((selection.help_scroll, 0)),
-                        help_chunks[1],
-                    );
-                    frame.render_widget(
-                        Paragraph::new(session.bindings.help(Mode::Inspection).join(" · "))
-                            .wrap(Wrap { trim: false }),
-                        help_chunks[2],
-                    );
+                    frame.render_widget(help.scroll((selection.help_scroll, 0)), help_chunks[1]);
+                    frame.render_widget(hints, help_chunks[2]);
                 } else if selection.inspection {
                     if let Some(row) = selection.inspected_row(visible_rows) {
                         draw_inspection(frame, inner, row, selection.inspection_scroll, session);
@@ -741,10 +756,15 @@ fn inspection_lines(row: &model::InventoryRow) -> Vec<Line<'static>> {
         )));
     }
     lines.push(Line::raw(if row.markable {
-        "Mark: available".to_owned()
+        "Mark: unavailable (marking is not implemented)".to_owned()
     } else {
         "Mark: unavailable (declaration patterns cannot be marked)".to_owned()
     }));
+    lines.extend([
+        Line::raw("Add/register/unregister/clone/remove: unavailable (read-only inventory)"),
+        Line::raw("Copy/open: unavailable (desktop actions are not implemented)"),
+        Line::raw("Remote discovery: unavailable (offline inventory)"),
+    ]);
     if !row.warnings.is_empty() {
         lines.push(Line::raw("Warnings:"));
         lines.extend(
@@ -756,28 +776,73 @@ fn inspection_lines(row: &model::InventoryRow) -> Vec<Line<'static>> {
     lines
 }
 
-fn inspection_scroll_limit(row: &model::InventoryRow, area: Rect) -> u16 {
-    let content = area.inner(Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
+fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
+    Paragraph::new(bindings.help(mode).join("\n")).wrap(Wrap { trim: false })
+}
+
+fn hint_widget(bindings: &Bindings, mode: Mode, width: u16) -> Paragraph<'static> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for hint in bindings.help(mode) {
+        if !line.is_empty() && Line::raw(format!("{line} · {hint}")).width() > usize::from(width) {
+            lines.push(Line::raw(std::mem::take(&mut line)));
+        }
+        if !line.is_empty() {
+            line.push_str(" · ");
+        }
+        line.push_str(&hint);
+    }
+    if !line.is_empty() {
+        lines.push(Line::raw(line));
+    }
+    Paragraph::new(lines)
+        .style(Style::default().fg(Color::Reset))
+        .wrap(Wrap { trim: false })
+}
+
+fn popup_regions(content: Rect, bindings: &Bindings, mode: Mode) -> [Rect; 2] {
+    let height = hint_widget(bindings, mode, content.width).line_count(content.width) as u16;
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(height)]).split(content);
+    [chunks[0], chunks[1]]
+}
+
+fn inspection_scroll_limit(row: &model::InventoryRow, area: Rect, bindings: &Bindings) -> u16 {
+    let [content, _] = popup_regions(
+        area.inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        }),
+        bindings,
+        Mode::Inspection,
+    );
     let required = Paragraph::new(inspection_lines(row))
         .wrap(Wrap { trim: false })
         .line_count(content.width);
-    let viewport = usize::from(content.height.saturating_sub(1).max(1));
+    let viewport = usize::from(content.height.max(1));
     required.saturating_sub(viewport).min(usize::from(u16::MAX)) as u16
 }
 
 fn root_menu_actions() -> &'static [Action] {
-    &[Action::Inspect, Action::Search, Action::Help, Action::Quit]
+    &[
+        Action::Inspect,
+        Action::Search,
+        Action::ClearSearch,
+        Action::Refresh,
+        Action::Help,
+        Action::Quit,
+    ]
 }
 
-fn menu_scroll_metrics(popup: Rect) -> (u16, u16) {
-    let content = popup.inner(Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
-    let viewport = content.height.saturating_sub(1).max(1);
+fn menu_scroll_metrics(popup: Rect, bindings: &Bindings) -> (u16, u16) {
+    let [content, _] = popup_regions(
+        popup.inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        }),
+        bindings,
+        Mode::Menu,
+    );
+    let viewport = content.height.max(1);
     (
         (root_menu_actions().len() as u16).saturating_sub(viewport),
         viewport,
@@ -796,7 +861,7 @@ fn draw_root_menu(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
     let content = block.inner(popup);
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(content);
+    let chunks = popup_regions(content, &session.bindings, Mode::Menu);
     let items = root_menu_actions()
         .iter()
         .enumerate()
@@ -824,8 +889,7 @@ fn draw_root_menu(
         chunks[0],
     );
     frame.render_widget(
-        Paragraph::new(session.bindings.help(Mode::Menu).join(" · "))
-            .style(Style::default().fg(Color::Reset)),
+        hint_widget(&session.bindings, Mode::Menu, chunks[1].width),
         chunks[1],
     );
 }
@@ -841,18 +905,18 @@ fn draw_unavailable_inspection(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
     let content = block.inner(popup);
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(content);
+    let chunks = popup_regions(content, &session.bindings, Mode::Inspection);
     frame.render_widget(ratatui::widgets::Clear, popup);
     frame.render_widget(block, popup);
     frame.render_widget(
         Paragraph::new(
             "Inspected target is unavailable or stale. Close this popup and inspect a current row.",
-        ),
+        )
+        .wrap(Wrap { trim: false }),
         chunks[0],
     );
     frame.render_widget(
-        Paragraph::new(session.bindings.help(Mode::Inspection).join(" · "))
-            .style(Style::default().fg(Color::Reset)),
+        hint_widget(&session.bindings, Mode::Inspection, chunks[1].width),
         chunks[1],
     );
 }
@@ -870,7 +934,7 @@ fn draw_inspection(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
     let content = block.inner(popup);
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(content);
+    let chunks = popup_regions(content, &session.bindings, Mode::Inspection);
     frame.render_widget(ratatui::widgets::Clear, popup);
     frame.render_widget(block, popup);
     frame.render_widget(
@@ -880,8 +944,7 @@ fn draw_inspection(
         chunks[0],
     );
     frame.render_widget(
-        Paragraph::new(session.bindings.help(Mode::Inspection).join(" · "))
-            .style(Style::default().fg(Color::Reset)),
+        hint_widget(&session.bindings, Mode::Inspection, chunks[1].width),
         chunks[1],
     );
 }
@@ -979,6 +1042,7 @@ struct Selection {
     menu_index: usize,
     menu_scroll: u16,
     help: bool,
+    help_mode: Mode,
     help_scroll: u16,
     inspection: bool,
     inspection_key: Option<model::RowKey>,
