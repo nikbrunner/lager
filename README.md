@@ -55,7 +55,7 @@ mise uninstall --all github:nikbrunner/lager
 mise reshim --force
 ```
 
-Git is required for `add`, `remove`, `ensure`, and `hook`. Interactive repository selection uses [`fzf`](https://github.com/junegunn/fzf). GitHub discovery uses an authenticated `gh` CLI; Bitbucket discovery uses the credentials named in the configuration.
+Git is required for `add`, `remove`, `ensure`, `hook`, and `inventory`. Interactive repository selection uses [`fzf`](https://github.com/junegunn/fzf). GitHub discovery uses an authenticated `gh` CLI; Bitbucket discovery uses the credentials named in the configuration.
 
 ## Quick start
 
@@ -101,6 +101,7 @@ See the [configuration reference](docs/reference/config.md) for every field, def
 | `ensure` | Creates missing declared checkouts. | `--include-archived` |
 | `hook` | Runs a declared repository's post-clone hook again. | — |
 | `list`, `ls` | Shows declarations and their local state. | `--remote`, `--include-archived`, `--json` |
+| `inventory`, `inv` | Opens a read-only offline overview in a terminal. | `R` refreshes; `q` or Esc quits. |
 
 `ls` is an identical alias for `list`, which is offline by default. Use `list --json` for stable machine-readable output. The [CLI reference](docs/reference/cli.md) documents every option, default, and interactive behavior.
 
@@ -120,6 +121,16 @@ worktree guards.
 - [Declarations and local state](docs/explanation/declarations-and-local-state.md)
 
 ## Development
+
+Install standalone [Lefthook](https://lefthook.dev/) before working on a clone,
+then install the Git hooks from the repository root:
+
+```sh
+lefthook install
+```
+
+The installed hooks run the same checks by stage: `pre-commit` runs formatting,
+and `pre-push` runs Clippy and tests.
 
 ```sh
 cargo fmt --check

@@ -30,6 +30,31 @@ fn command(directory: &Path, program: &str, args: &[&str]) -> String {
         .to_owned()
 }
 
+fn overlay_current_sources(source: &Path, destination: &Path) {
+    for relative in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "build.rs",
+        "src/application/inventory.rs",
+        "src/application/mod.rs",
+        "src/cli/args.rs",
+        "src/cli/controller.rs",
+        "src/cli/inventory.rs",
+        "src/cli/inventory/keys.rs",
+        "src/cli/mod.rs",
+        "src/infrastructure/config.rs",
+        "src/infrastructure/inventory.rs",
+        "src/infrastructure/mod.rs",
+    ] {
+        let target = destination.join(relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).expect("create source overlay parent");
+        }
+        fs::copy(source.join(relative), target)
+            .unwrap_or_else(|error| panic!("copy {relative} into version fixture: {error}"));
+    }
+}
+
 #[test]
 fn version_identifies_an_untagged_git_checkout() {
     let output = checked_output(Command::new(env!("CARGO_BIN_EXE_lager")).arg("--version"));
@@ -65,12 +90,7 @@ fn version_changes_after_an_empty_commit() {
             checkout.to_str().expect("checkout path is UTF-8"),
         ],
     );
-    fs::copy(source.join("build.rs"), checkout.join("build.rs")).expect("copy build script");
-    fs::copy(
-        source.join("src/cli/args.rs"),
-        checkout.join("src/cli/args.rs"),
-    )
-    .expect("copy CLI arguments");
+    overlay_current_sources(source, &checkout);
     command(&checkout, "git", &["config", "user.name", "Lager test"]);
     command(
         &checkout,
@@ -81,7 +101,7 @@ fn version_changes_after_an_empty_commit() {
     if !command(&checkout, "git", &["tag", "--list", &tag]).is_empty() {
         command(&checkout, "git", &["tag", "--delete", &tag]);
     }
-    command(&checkout, "git", &["add", "build.rs", "src/cli/args.rs"]);
+    command(&checkout, "git", &["add", "."]);
     command(
         &checkout,
         "git",
@@ -162,12 +182,7 @@ fn version_falls_back_to_package_version_without_git_metadata() {
             archive.to_str().expect("archive path is UTF-8"),
         ],
     );
-    fs::copy(source.join("build.rs"), archive.join("build.rs")).expect("copy build script");
-    fs::copy(
-        source.join("src/cli/args.rs"),
-        archive.join("src/cli/args.rs"),
-    )
-    .expect("copy CLI arguments");
+    overlay_current_sources(source, &archive);
     fs::remove_dir_all(archive.join(".git")).expect("remove Git metadata");
 
     let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/version-e2e-no-git");

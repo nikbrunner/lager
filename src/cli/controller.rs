@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use super::args::{
-    Args, CloneArgs, Command, EnsureArgs, HookArgs, InitArgs, ListArgs, RemoveArgs, RepositoryArgs,
-    UnregisterArgs,
+    Args, CloneArgs, Command, EnsureArgs, HookArgs, InitArgs, InventoryArgs, ListArgs, RemoveArgs,
+    RepositoryArgs, UnregisterArgs,
 };
 use super::interaction::{Interaction, InteractionError};
 use crate::application::ports::{
@@ -61,6 +61,7 @@ pub fn run(
         Command::Ensure(command) => ensure(&config_path, command),
         Command::Hook(command) => hook(&config_path, command, selector),
         Command::List(command) => list(&config_path, command),
+        Command::Inventory(command) => inventory(&config_path, command),
     }
 }
 
@@ -613,6 +614,10 @@ fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn inventory(path: &Path, args: InventoryArgs) -> i32 {
+    super::inventory::run(path, args)
 }
 
 fn list(path: &Path, args: ListArgs) -> i32 {

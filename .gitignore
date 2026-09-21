@@ -1,1 +1,8 @@
 /target/
+/graphify-out/*
+!/graphify-out/graph.json
+!/graphify-out/manifest.json
+!/graphify-out/.graphify_labels.json
+!/graphify-out/GRAPH_REPORT.md
+!/graphify-out/graph-health.json
+/.DS_Store

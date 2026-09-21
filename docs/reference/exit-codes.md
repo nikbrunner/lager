@@ -3,9 +3,16 @@
 - `0`: success, no-op, empty candidate set, or an explicitly skipped removal.
 - `1`: configuration, provider, Git, hook, filesystem, or aggregate operation failure.
 - `2`: invalid usage, missing non-TTY confirmation/registration choice, or unsupported command/flag.
-- `130`: picker or interaction cancellation (Esc or Ctrl-C), or a completed
+- `130`: picker or repository interaction cancellation (Esc or Ctrl-C), or a completed
   native Git/hook child reported as interrupted by SIGINT or exiting with
   status `130`.
+
+For `inventory` / `inv`, `q` and Esc perform a normal quit: `1` if discovery,
+observation or another operational failure occurred in the session, including
+failures followed by successful refresh; otherwise `0`. Informational exclusions
+and deliberate background-work cancellation do not count as failures. Non-TTY
+use, invalid flags and unavailable remote discovery exit `2` before raw mode;
+fatal startup/configuration errors exit `1`.
 
 Native Git and hooks inherit stdin, stdout, and stderr. Ordinary child failures
 return aggregate status `1` and allow independent later targets to run.
