@@ -87,6 +87,21 @@ impl Action {
                     | Self::Quit
                     | Self::Search
                     | Self::ClearSearch
+                    | Self::Inspect
+                    | Self::Menu
+            ),
+            Mode::Menu => matches!(
+                self,
+                Self::Up
+                    | Self::Down
+                    | Self::PageUp
+                    | Self::PageDown
+                    | Self::Accept
+                    | Self::Cancel
+                    | Self::Help
+                    | Self::Quit
+                    | Self::Search
+                    | Self::Inspect
             ),
             Mode::Search => matches!(self, Self::Accept | Self::Cancel | Self::Help | Self::Quit),
             Mode::Inspection => matches!(
@@ -123,7 +138,7 @@ impl Bindings {
                 return Err(format!("unknown inventory key mode `{mode}`"));
             }
         }
-        let mut maps = BTreeMap::new();
+        let mut maps: BTreeMap<Mode, BTreeMap<Action, Vec<(KeyEvent, String)>>> = BTreeMap::new();
         for (name, mode) in modes {
             let typing = matches!(mode, Mode::Search | Mode::Input);
             let mut defaults: Vec<(Action, Vec<&str>)> = vec![
@@ -163,6 +178,12 @@ impl Bindings {
                         (PageUp, vec!["PageUp"]),
                         (PageDown, vec!["PageDown"]),
                     ]);
+                }
+                if mode == Mode::Menu {
+                    // These inherit normal-mode shortcuts unless the menu map explicitly
+                    // replaces them. They are added after parsing so menu navigation keeps
+                    // precedence for any conflicting keys.
+                    defaults.extend([(Search, vec![]), (Inspect, vec![])]);
                 }
             }
             let mut map: BTreeMap<_, _> = defaults
@@ -228,6 +249,26 @@ impl Bindings {
                     bindings.push((event, key));
                 }
                 parsed.insert(action, bindings);
+            }
+            if mode == Mode::Menu {
+                let normal = &maps[&Mode::Normal];
+                let custom = overrides.get(name);
+                for action in [Search, Inspect] {
+                    if custom.is_some_and(|bindings| bindings.contains_key(action.name())) {
+                        continue;
+                    }
+                    for (event, label) in &normal[&action] {
+                        // Menu-local bindings win so a normal shortcut can never make an
+                        // advertised menu action behave as navigation or acceptance instead.
+                        if !used.contains(event) {
+                            used.push(*event);
+                            parsed
+                                .get_mut(&action)
+                                .expect("menu action has an effective binding entry")
+                                .push((*event, label.clone()));
+                        }
+                    }
+                }
             }
             maps.insert(mode, parsed);
         }

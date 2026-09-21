@@ -9,7 +9,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Margin};
+use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, HighlightSpacing, Paragraph, Row, Table, TableState, Wrap};
@@ -403,8 +403,10 @@ impl TerminalSession {
             match event::poll(Duration::from_millis(50)) {
                 Ok(true) => match event::read() {
                     Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                        let mode = if selection.help {
+                        let mode = if selection.help || selection.inspection {
                             Mode::Inspection
+                        } else if selection.menu {
+                            Mode::Menu
                         } else if selection.search {
                             Mode::Search
                         } else {
@@ -423,7 +425,15 @@ impl TerminalSession {
                                         Some(format!("refresh failed: {}", escape(error)));
                                 }
                             }
-                            Some(Action::Search) => selection.search = true,
+                            Some(Action::Menu) if !selection.search => {
+                                selection.menu = true;
+                                selection.menu_index = 0;
+                                selection.menu_scroll = 0;
+                            }
+                            Some(Action::Search) => {
+                                selection.menu = false;
+                                selection.search = true;
+                            }
                             Some(Action::ClearSearch) => selection.query.clear(),
                             Some(Action::Help) => {
                                 selection.help = !selection.help;
@@ -432,8 +442,42 @@ impl TerminalSession {
                             Some(Action::Cancel | Action::Accept) if selection.help => {
                                 selection.help = false;
                             }
+                            Some(Action::Cancel | Action::Accept) if selection.inspection => {
+                                selection.close_inspection();
+                            }
+                            Some(Action::Cancel) if selection.menu => {
+                                selection.menu = false;
+                                selection.menu_scroll = 0;
+                            }
+                            Some(Action::Accept) if selection.menu => {
+                                let action = root_menu_actions()
+                                    .get(selection.menu_index)
+                                    .copied()
+                                    .expect("menu selection is clamped");
+                                selection.menu = false;
+                                selection.menu_scroll = 0;
+                                match action {
+                                    Action::Inspect => selection.open_inspection(&visible_rows),
+                                    Action::Search => selection.search = true,
+                                    Action::Help => {
+                                        selection.help = true;
+                                        selection.help_scroll = 0;
+                                    }
+                                    Action::Quit => {
+                                        session.worker.cancel_and_join();
+                                        session.receive_events();
+                                        return i32::from(session.had_failure);
+                                    }
+                                    _ => unreachable!("root menu contains only overview actions"),
+                                }
+                            }
                             Some(Action::Cancel | Action::Accept) if selection.search => {
                                 selection.search = false;
+                            }
+                            Some(Action::Inspect) if !selection.search => {
+                                selection.menu = false;
+                                selection.menu_scroll = 0;
+                                selection.open_inspection(&visible_rows);
                             }
                             Some(Action::Cancel | Action::Accept) => {}
                             Some(Action::Up) if selection.help => {
@@ -454,6 +498,34 @@ impl TerminalSession {
                                     .saturating_add(10)
                                     .min(self.help_scroll_limit(session));
                             }
+                            Some(Action::Up) if selection.inspection => {
+                                selection.inspection_scroll =
+                                    selection.inspection_scroll.saturating_sub(1);
+                            }
+                            Some(Action::Down) if selection.inspection => {
+                                let limit = selection
+                                    .inspected_row(&visible_rows)
+                                    .map(|row| self.inspection_scroll_limit(row))
+                                    .unwrap_or(0);
+                                selection.inspection_scroll =
+                                    selection.inspection_scroll.saturating_add(1).min(limit);
+                            }
+                            Some(Action::PageUp) if selection.inspection => {
+                                selection.inspection_scroll =
+                                    selection.inspection_scroll.saturating_sub(10);
+                            }
+                            Some(Action::PageDown) if selection.inspection => {
+                                let limit = selection
+                                    .inspected_row(&visible_rows)
+                                    .map(|row| self.inspection_scroll_limit(row))
+                                    .unwrap_or(0);
+                                selection.inspection_scroll =
+                                    selection.inspection_scroll.saturating_add(10).min(limit);
+                            }
+                            Some(Action::Up) if selection.menu => selection.move_menu_by(-1),
+                            Some(Action::Down) if selection.menu => selection.move_menu_by(1),
+                            Some(Action::PageUp) if selection.menu => selection.move_menu_by(-10),
+                            Some(Action::PageDown) if selection.menu => selection.move_menu_by(10),
                             Some(Action::Up) => selection.move_by(&visible_rows, -1),
                             Some(Action::Down) => selection.move_by(&visible_rows, 1),
                             None if selection.search => selection.edit_query(key),
@@ -485,6 +557,32 @@ impl TerminalSession {
         lines.saturating_sub(viewport.max(1))
     }
 
+    fn inspection_scroll_limit(&self, row: &model::InventoryRow) -> u16 {
+        let area = self
+            .terminal
+            .size()
+            .map(|size| Rect::new(0, 0, size.width, size.height))
+            .unwrap_or_default()
+            .inner(Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+        inspection_scroll_limit(row, inspection_popup_area(area))
+    }
+
+    fn menu_scroll_metrics(&self) -> (u16, u16) {
+        let area = self
+            .terminal
+            .size()
+            .map(|size| Rect::new(0, 0, size.width, size.height))
+            .unwrap_or_default()
+            .inner(Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+        menu_scroll_metrics(inspection_popup_area(area))
+    }
+
     fn draw_report(
         &mut self,
         report: &InventoryReport,
@@ -494,6 +592,13 @@ impl TerminalSession {
     ) -> Result<(), String> {
         let complete = session.complete;
         selection.help_scroll = selection.help_scroll.min(self.help_scroll_limit(session));
+        if let Some(row) = selection.inspected_row(visible_rows) {
+            selection.inspection_scroll = selection
+                .inspection_scroll
+                .min(self.inspection_scroll_limit(row));
+        }
+        let (menu_limit, menu_viewport) = self.menu_scroll_metrics();
+        selection.clamp_menu_scroll(menu_limit, menu_viewport);
         let (mut header, mut summary) = report_lines(
             report,
             complete,
@@ -511,10 +616,8 @@ impl TerminalSession {
         } else {
             Mode::Normal
         };
-        summary.push(Line::raw(format!(
-            "{} · remote unavailable",
-            session.bindings.help(mode).join(" · ")
-        )));
+        summary.push(Line::raw("remote unavailable"));
+        summary.push(Line::raw(session.bindings.help(mode).join(" · ")));
         self.terminal
             .draw(|frame| {
                 let area = frame.area();
@@ -583,11 +686,206 @@ impl TerminalSession {
                             .wrap(Wrap { trim: false }),
                         help_chunks[2],
                     );
+                } else if selection.inspection {
+                    if let Some(row) = selection.inspected_row(visible_rows) {
+                        draw_inspection(frame, inner, row, selection.inspection_scroll, session);
+                    } else {
+                        draw_unavailable_inspection(frame, inner, session);
+                    }
+                } else if selection.menu {
+                    draw_root_menu(frame, inner, selection, session);
                 }
             })
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
+}
+
+fn inspection_popup_area(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(4).clamp(1, 100);
+    let height = area.height.saturating_sub(4).clamp(1, 20);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+fn inspection_lines(row: &model::InventoryRow) -> Vec<Line<'static>> {
+    let mut lines = [
+        ("Repository", escape(&row.repository)),
+        ("Path", escape(&row.path)),
+        ("Registration", escape(row.registration.label())),
+        ("Checkout", escape(row.checkout.label())),
+        ("Origin", escape(&row.origin)),
+        ("Branch", escape(row.branch.label())),
+        ("Changes", escape(row.changes.label())),
+    ]
+    .into_iter()
+    .map(|(name, value)| Line::raw(format!("{name}: {value}")))
+    .collect::<Vec<_>>();
+    if let Some(declaration) = &row.declaration {
+        lines.push(Line::raw(format!("Declaration: {}", escape(declaration))));
+    }
+    if let Some(path) = &row.configured_destination {
+        lines.push(Line::raw(format!(
+            "Configured path: {}",
+            escape(path.to_string_lossy())
+        )));
+    }
+    if let Some(path) = &row.observed_path {
+        lines.push(Line::raw(format!(
+            "Found path: {}",
+            escape(path.to_string_lossy())
+        )));
+    }
+    lines.push(Line::raw(if row.markable {
+        "Mark: available".to_owned()
+    } else {
+        "Mark: unavailable (declaration patterns cannot be marked)".to_owned()
+    }));
+    if !row.warnings.is_empty() {
+        lines.push(Line::raw("Warnings:"));
+        lines.extend(
+            row.warnings
+                .iter()
+                .map(|warning| Line::raw(format!("- {}", escape(warning)))),
+        );
+    }
+    lines
+}
+
+fn inspection_scroll_limit(row: &model::InventoryRow, area: Rect) -> u16 {
+    let content = area.inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let width = usize::from(content.width.max(1));
+    let required = inspection_lines(row)
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(width))
+        .sum::<usize>();
+    let viewport = usize::from(content.height.saturating_sub(1).max(1));
+    required.saturating_sub(viewport).min(usize::from(u16::MAX)) as u16
+}
+
+fn root_menu_actions() -> &'static [Action] {
+    &[Action::Inspect, Action::Search, Action::Help, Action::Quit]
+}
+
+fn menu_scroll_metrics(popup: Rect) -> (u16, u16) {
+    let content = popup.inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let viewport = content.height.saturating_sub(1).max(1);
+    (
+        (root_menu_actions().len() as u16).saturating_sub(viewport),
+        viewport,
+    )
+}
+
+fn draw_root_menu(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    selection: &Selection,
+    session: &InventorySession,
+) {
+    let popup = inspection_popup_area(area);
+    let block = Block::default()
+        .title("MENU / actions")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let content = block.inner(popup);
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(content);
+    let items = root_menu_actions()
+        .iter()
+        .enumerate()
+        .map(|(index, action)| {
+            let style = if index == selection.menu_index {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            let hint = session.bindings.hint(Mode::Menu, *action);
+            Line::from(Span::styled(
+                if hint.is_empty() {
+                    action.name().to_owned()
+                } else {
+                    format!("{hint} {}", action.name())
+                },
+                style,
+            ))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(ratatui::widgets::Clear, popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(
+        Paragraph::new(items).scroll((selection.menu_scroll, 0)),
+        chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new(session.bindings.help(Mode::Menu).join(" · "))
+            .style(Style::default().fg(Color::Reset)),
+        chunks[1],
+    );
+}
+
+fn draw_unavailable_inspection(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    session: &InventorySession,
+) {
+    let popup = inspection_popup_area(area);
+    let block = Block::default()
+        .title("INSPECT / unavailable")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let content = block.inner(popup);
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(content);
+    frame.render_widget(ratatui::widgets::Clear, popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(
+        Paragraph::new(
+            "Inspected target is unavailable or stale. Close this popup and inspect a current row.",
+        ),
+        chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new(session.bindings.help(Mode::Inspection).join(" · "))
+            .style(Style::default().fg(Color::Reset)),
+        chunks[1],
+    );
+}
+
+fn draw_inspection(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    row: &model::InventoryRow,
+    scroll: u16,
+    session: &InventorySession,
+) {
+    let popup = inspection_popup_area(area);
+    let block = Block::default()
+        .title(format!("INSPECT / {}", escape(&row.repository)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let content = block.inner(popup);
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(content);
+    frame.render_widget(ratatui::widgets::Clear, popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(
+        Paragraph::new(inspection_lines(row))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new(session.bindings.help(Mode::Inspection).join(" · "))
+            .style(Style::default().fg(Color::Reset)),
+        chunks[1],
+    );
 }
 
 impl Drop for TerminalSession {
@@ -679,8 +977,14 @@ struct Selection {
     table: TableState,
     search: bool,
     query: String,
+    menu: bool,
+    menu_index: usize,
+    menu_scroll: u16,
     help: bool,
     help_scroll: u16,
+    inspection: bool,
+    inspection_key: Option<model::RowKey>,
+    inspection_scroll: u16,
 }
 
 impl Selection {
@@ -718,6 +1022,56 @@ impl Selection {
         // its checkout or declaration row returns.
         if let Some(index) = index {
             self.remember(Some(rows[index]));
+        }
+    }
+
+    fn selected_row<'a>(
+        &self,
+        rows: &'a [&model::InventoryRow],
+    ) -> Option<&'a model::InventoryRow> {
+        self.table
+            .selected()
+            .and_then(|index| rows.get(index).copied())
+    }
+
+    /// Inspection is anchored to the rendered row key, not the table index. Background updates
+    /// and refreshes can reorder rows, but must never retarget an open inspection.
+    fn inspected_row<'a>(
+        &self,
+        rows: &'a [&model::InventoryRow],
+    ) -> Option<&'a model::InventoryRow> {
+        self.inspection_key
+            .as_ref()
+            .and_then(|key| rows.iter().find(|row| row.key == *key).copied())
+    }
+
+    fn open_inspection(&mut self, rows: &[&model::InventoryRow]) {
+        let Some(row) = self.selected_row(rows) else {
+            return;
+        };
+        self.inspection = true;
+        self.inspection_key = Some(row.key.clone());
+        self.inspection_scroll = 0;
+    }
+
+    fn close_inspection(&mut self) {
+        self.inspection = false;
+        self.inspection_key = None;
+        self.inspection_scroll = 0;
+    }
+
+    fn move_menu_by(&mut self, delta: isize) {
+        let last = root_menu_actions().len().saturating_sub(1);
+        self.menu_index = self.menu_index.saturating_add_signed(delta).min(last);
+    }
+
+    fn clamp_menu_scroll(&mut self, limit: u16, viewport: u16) {
+        self.menu_scroll = self.menu_scroll.min(limit);
+        let selected = self.menu_index.min(u16::MAX as usize) as u16;
+        if selected < self.menu_scroll {
+            self.menu_scroll = selected;
+        } else if selected >= self.menu_scroll.saturating_add(viewport) {
+            self.menu_scroll = selected.saturating_add(1).saturating_sub(viewport);
         }
     }
 
@@ -997,11 +1351,12 @@ mod tests {
     use std::sync::mpsc;
 
     use super::{
-        Bindings, InventorySession, StartupError, TerminalRestore, enter_after_restore,
+        Bindings, InventorySession, Selection, StartupError, TerminalRestore, enter_after_restore,
         start_with_loading,
     };
     use crate::application::inventory::{
-        InventoryFilesystem, LocalCheckout, LocalScan, ObservationField, OriginFact,
+        CheckoutState, InventoryFilesystem, InventoryRow, LocalCheckout, LocalScan,
+        ObservationField, OriginFact, RegistrationState, RowKey,
     };
     use crate::domain::config::Config;
     use crate::infrastructure::inventory::LocalInventoryFilesystem;
@@ -1095,6 +1450,37 @@ mod tests {
 
         assert!(session.scan.checkouts.is_empty());
         assert_eq!(session.scan.stale_paths, vec![checkout]);
+    }
+
+    #[test]
+    fn inspection_anchor_does_not_follow_reconciled_table_selection() {
+        let row = |key: &str| InventoryRow {
+            key: RowKey::Pattern(key.to_owned()),
+            repository: key.to_owned(),
+            path: key.to_owned(),
+            registration: RegistrationState::Pattern,
+            checkout: CheckoutState::Pattern,
+            origin: key.to_owned(),
+            branch: ObservationField::NotApplicable,
+            changes: ObservationField::NotApplicable,
+            configured_destination: None,
+            observed_path: None,
+            declaration: Some(key.to_owned()),
+            warnings: Vec::new(),
+            markable: false,
+        };
+        let alpha = row("github.com/org/alpha/*");
+        let beta = row("github.com/org/beta/*");
+        let mut selection = Selection::default();
+        selection.table.select(Some(0));
+        selection.open_inspection(&[&alpha]);
+
+        // Reconciliation legitimately advances the table to beta, but an open inspection cannot.
+        selection.reconcile(&[&beta]);
+
+        assert_eq!(selection.selected_row(&[&beta]), Some(&beta));
+        assert!(selection.inspection);
+        assert_eq!(selection.inspected_row(&[&beta]), None);
     }
 
     #[test]

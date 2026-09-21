@@ -14,6 +14,123 @@ use std::{fs, process::Command};
 
 #[cfg(unix)]
 #[test]
+fn inventory_inspect_shows_current_declaration_and_action_reason_after_resize_and_scroll() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    let padding = (0..3)
+        .map(|index| format!("\"padding-{index}-{}\"", "a ".repeat(70)))
+        .chain(std::iter::once("\"escape-\\n\\t\\u001b\"".to_owned()))
+        .chain((3..10).map(|index| format!("\"padding-{index}-{}\"", "a ".repeat(70))))
+        .collect::<Vec<_>>()
+        .join(", ");
+    fs::write(
+        &config,
+        format!(
+            "root = \"repos\"\n\n[providers.\"github.com\"]\npreset = \"github\"\n\n[[repositories]]\nurl = \"github.com/org/alpha\"\n\n[[repositories]]\nurl = \"github.com/org/*\"\nexclude = [{padding}]\n\n[inventory.keys.inspection]\npage_down = [\"x\"]\n"
+        ),
+    )
+    .unwrap();
+
+    let selected = "selected: github.com/org/*";
+    let mut scrolled_frames = Vec::new();
+    run_inventory_pty_with_exit_observing(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (vec!["selected: github.com/org/alpha"], b"j\r".to_vec()),
+            (
+                vec![
+                    "INSPECT / github.com/org/*",
+                    "Declaration: github.com/org/*",
+                    "Mark: unavailable",
+                    "declaration patterns cannot be marked",
+                ],
+                b"xxx".to_vec(),
+            ),
+            (
+                vec!["INSPECT", "excludes escape-\\n\\t\\x1b"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", selected], b"q".to_vec()),
+        ],
+        24,
+        80,
+        0,
+        |action, writer, frame| match action {
+            1 => resize_pty(writer, 16, 80),
+            2 => scrolled_frames.push(frame.to_owned()),
+            _ => {}
+        },
+    );
+
+    let [scrolled] = scrolled_frames.as_slice() else {
+        panic!("expected one resized, scrolled inspection frame: {scrolled_frames:?}");
+    };
+    let screen = screen_text(scrolled, 16, 80);
+    for text in ["INSPECT", "excludes escape-\\n\\t\\x1b"] {
+        assert!(screen.contains(text), "missing {text}:\n{screen}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_root_menu_uses_effective_hints_and_preserves_search_and_selection() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(
+        &config,
+        "root = \"repos\"\n\n[[repositories]]\nurl = \"github.com/org/alpha\"\n\n[[repositories]]\nurl = \"github.com/org/beta\"\n\n[inventory.keys.normal]\nmenu = [\"M\"]\nsearch = [\"s\"]\ninspect = [\"i\"]\n",
+    )
+    .unwrap();
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["local scan complete", "selected: github.com/org/alpha"],
+                b"jsbeta\rM".to_vec(),
+            ),
+            (
+                vec![
+                    "MENU / actions",
+                    "i inspect",
+                    "s search",
+                    "? help",
+                    "q quit",
+                    "NORMAL / beta",
+                ],
+                b"i".to_vec(),
+            ),
+            (vec!["INSPECT / github.com/org/beta"], b"\x1b".to_vec()),
+            (
+                vec!["NORMAL / beta", "selected: github.com/org/beta"],
+                b"M".to_vec(),
+            ),
+            (vec!["MENU / actions", "s search"], b"s".to_vec()),
+            (
+                vec!["SEARCH / beta", "github.com/org/beta"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL / beta", "selected: github.com/org/beta"],
+                b"M".to_vec(),
+            ),
+            (vec!["MENU / actions"], b"\x1b".to_vec()),
+            (
+                vec!["NORMAL / beta", "selected: github.com/org/beta"],
+                b"q".to_vec(),
+            ),
+        ],
+        24,
+        80,
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn inventory_search_matches_full_origins_and_keeps_text_and_filters_safe() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
@@ -1998,9 +2115,9 @@ fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
             (
                 vec![
                     "HELP / inventory",
-                    "R refresh",
-                    "/ search",
                     "Backspace clear_search",
+                    "Enter inspect",
+                    "m menu",
                 ],
                 b"z".to_vec(),
             ),
@@ -2011,9 +2128,9 @@ fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
             (
                 vec![
                     "HELP / inventory",
-                    "R refresh",
-                    "/ search",
                     "Backspace clear_search",
+                    "Enter inspect",
+                    "m menu",
                 ],
                 Vec::new(),
             ),
@@ -2036,7 +2153,7 @@ fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
         panic!("expected a scrolled and resized help frame: {frames:?}");
     };
     let scrolled = screen_text(scrolled_frame, 8, 100);
-    assert!(scrolled.contains("R refresh"), "{scrolled}");
+    assert!(scrolled.contains("Enter inspect"), "{scrolled}");
     assert!(
         !scrolled.contains("k/Up up"),
         "custom page-down did not scroll help: {scrolled}"
