@@ -1,3 +1,3 @@
 fn main() {
-    std::process::exit(lager::cli::run());
+    std::process::exit(lager::cli::run_binary());
 }

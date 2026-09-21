@@ -22,6 +22,7 @@ post_clone = "make setup"
 | `root` | Yes | — | `~`, `~/relative`, or a relative path under `HOME`. Absolute paths, `..`, and escapes are rejected. |
 | `providers` | No | Empty table | Provider entries are keyed by lowercase host names. |
 | `repositories` | No | Empty array | Each item is an explicit repository or a trailing `/*` wildcard. |
+| `inventory` | No | Default bindings | Mode-aware inventory key maps. |
 
 `root` resolves from `HOME`, never from the working directory. `init` converts an absolute root under `HOME` to a portable `~` path before writing it.
 
@@ -116,6 +117,57 @@ available, without source values that could expose credentials. Trusted
 `post_clone` commands remain executable configuration, not a secret-scanning surface.
 
 A canonical ID for a custom host requires a matching provider entry. Full clone URLs remain valid without a provider. GitHub and Bitbucket Cloud map `host/path` to `root/prefix/path`; custom hosts include the host in the destination. Data Center removes a leading `~` only from a personal-project path segment.
+
+## Inventory key maps
+
+Shortcuts live under `[inventory.keys.<mode>]`. The modes are `normal`, `menu`,
+`search`, `input`, `confirmation` and `inspection`. Omitted actions inherit their
+defaults; an explicit list replaces every default key for that action.
+
+```toml
+[inventory.keys.normal]
+down = ["n", "Down"]
+refresh = ["x"]
+
+[inventory.keys.search]
+accept = ["Ctrl+a"]
+cancel = ["Ctrl+e"]
+
+[inventory.keys.inspection]
+page_down = ["x", "PageDown"]
+```
+
+Normal actions are `up`, `down`, `refresh`, `search`, `clear_search`, `inspect`,
+`menu`, `help` and `quit`. Menu uses navigation, paging, accept, cancel, help,
+quit, Search, Inspect, Refresh and Clear search. It inherits those last four
+normal shortcuts unless a menu override or a menu-local binding takes precedence.
+Inspection uses navigation, paging, accept, cancel, help and quit. Help popups use inspection
+bindings to scroll and close while listing the invoking mode's bindings.
+Menu, Inspect and Help default to Esc/q for cancel and Ctrl-Q for quit. Normal
+mode uses q/Esc for quit. To bind popup quit to q explicitly, also set
+`cancel = ["Esc"]` in that mode so the actions do not collide.
+
+Search uses accept, cancel, help and quit, with Enter, Esc, F1 and Ctrl-Q as
+defaults. Its letters remain text. Input and confirmation settings are reserved
+for future dialogs. Known future normal actions can be configured but remain
+unavailable until implemented.
+
+Keys include single characters, Enter, Esc, arrows, Home, End, PageUp, PageDown,
+Tab, Shift+Tab, Backspace, Delete, Space, F1 and Ctrl combinations. Ctrl-letter
+case is equivalent. Terminal aliases are normalized before collision checks:
+`Ctrl+i` is Tab, `Ctrl+m` is Enter, `Ctrl+[` / `Ctrl+3` is Esc, and `Ctrl+?` /
+`Ctrl+8` is Backspace. `Ctrl+@` / `Ctrl+2` is `Ctrl+Space`; `Ctrl+\`, `Ctrl+]`,
+`Ctrl+^` and `Ctrl+_` / `Ctrl+/` share the terminal encodings of `Ctrl+4` through
+`Ctrl+7`. Unsupported Ctrl
+combinations are rejected. Ctrl-C and Ctrl-Z are native controls and cannot be
+rebound.
+
+Unknown modes/actions, collisions, missing required help/quit/accept/cancel
+routes, and bindings that consume ordinary text-editing keys in typing modes
+are rejected. Startup rejects invalid maps before raw mode. A valid local
+refresh swaps configuration and bindings together; an invalid refresh keeps
+the previous map, shows the failure and contributes to session exit status 1.
+Repository configuration mutations preserve inventory settings.
 
 ## Reads and writes
 

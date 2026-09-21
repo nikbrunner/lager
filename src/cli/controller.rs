@@ -617,7 +617,7 @@ fn home_dir() -> PathBuf {
 }
 
 fn inventory(path: &Path, args: InventoryArgs) -> i32 {
-    super::inventory::run(path, args)
+    super::inventory::run(path, args, || None)
 }
 
 fn list(path: &Path, args: ListArgs) -> i32 {

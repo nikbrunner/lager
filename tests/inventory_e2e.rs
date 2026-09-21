@@ -51,7 +51,7 @@ fn inventory_inspect_shows_current_declaration_and_action_reason_after_resize_an
                 vec!["INSPECT", "excludes escape-\\n\\t\\x1b"],
                 b"\x1b".to_vec(),
             ),
-            (vec!["NORMAL", selected], b"q".to_vec()),
+            (vec!["NORMAL", selected, "absent: INSPECT"], b"q".to_vec()),
         ],
         24,
         80,
@@ -2134,7 +2134,7 @@ fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
                 ],
                 Vec::new(),
             ),
-            (vec!["HELP / inventory", "k/Up up"], b"q".to_vec()),
+            (vec!["HELP / inventory", "k/Up up"], vec![17]),
         ],
         8,
         100,
@@ -2464,6 +2464,773 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn inventory_terminal_equivalent_keys_share_reachability_and_collision_checks() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    let base = "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n";
+    for (binding, input) in [
+        ("Ctrl+i", b'\t'),
+        ("Ctrl+M", b'\r'),
+        ("Ctrl+A", 1),
+        ("Ctrl+]", 29),
+        ("Ctrl+@", 0),
+    ] {
+        fs::write(
+            &config,
+            format!("{base}\n[inventory.keys.search]\naccept = [\"{binding}\"]\n"),
+        )
+        .unwrap();
+        run_inventory_pty_actions(
+            support::lager(&home, &config).arg("inventory"),
+            &[
+                (vec!["local scan complete"], b"/alpha".to_vec()),
+                (vec!["SEARCH / alpha", binding], vec![input]),
+                (vec!["NORMAL / alpha"], b"q".to_vec()),
+            ],
+            24,
+            132,
+        );
+    }
+    for (settings, expected) in [
+        ("[inventory.keys.normal]\nquit = [\"Ctrl+m\"]", "collision"),
+        (
+            "[inventory.keys.search]\naccept = [\"Ctrl+0\"]",
+            "unsupported Ctrl binding",
+        ),
+        (
+            "[inventory.keys.search]\naccept = [\"Ctrl+Enter\"]",
+            "unsupported Ctrl binding",
+        ),
+        (
+            "[inventory.keys.search]\naccept = [\"Ctrl+[\"]",
+            "collision",
+        ),
+        (
+            "[inventory.keys.search]\naccept = [\"Ctrl+?\"]",
+            "preserve ordinary input",
+        ),
+    ] {
+        fs::write(&config, format!("{base}\n{settings}\n")).unwrap();
+        let transcript = run_inventory_pty_with_exit(
+            support::lager(&home, &config).arg("inventory"),
+            &[],
+            24,
+            80,
+            1,
+            |_| {},
+        );
+        assert!(transcript.contains(expected), "{transcript}");
+        assert!(!transcript.contains("\x1b[?1049h"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_interruptions_restore_the_controlling_terminal_and_reap_active_probes() {
+    use std::os::fd::AsRawFd;
+    for signal in [Some(libc::SIGINT), Some(libc::SIGTERM), None] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let root = home.join("repos");
+        let config = temp.path().join("config.toml");
+        let tools = temp.path().join("tools");
+        let marker = temp.path().join("pids");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&tools).unwrap();
+        fs::write(&config, "root = \"repos\"\n").unwrap();
+        init_repo(&root.join("active"), "git@github.com:org/active.git", true);
+        fs::write(tools.join("git"), format!(
+            "#!/bin/sh\nif [ \"$3\" = status ]; then /bin/sleep 30 & printf '%s %s' \"$$\" \"$!\" > {}; wait; fi\nexec {} \"$@\"\n",
+            shell_word(&marker), shell_word(&support::real_tool("git")),
+        )).unwrap();
+        fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+        let processes = FixtureProcesses(marker);
+        let mut interrupted_at = None;
+        let transcript = run_inventory_pty_with_exit_observing(
+            support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+            &[(
+                vec!["pending"],
+                if signal.is_none() {
+                    vec![3]
+                } else {
+                    Vec::new()
+                },
+            )],
+            24,
+            132,
+            128 + signal.unwrap_or(libc::SIGINT),
+            |_, terminal, _| {
+                processes.assert_running();
+                interrupted_at = Some(Instant::now());
+                if let Some(signal) = signal {
+                    // SAFETY: the PTY descriptor is live; the foreground PID belongs to this fixture.
+                    unsafe {
+                        let foreground = libc::tcgetpgrp(terminal.as_raw_fd());
+                        assert!(foreground > 0);
+                        assert_eq!(libc::kill(foreground, signal), 0);
+                    }
+                }
+            },
+        );
+        processes.assert_reaped_by(interrupted_at.unwrap() + Duration::from_secs(2));
+        assert!(transcript.contains("\x1b[?1049l"));
+        assert!(transcript.contains("\x1b[?25h"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_menu_refresh_uses_effective_binding_and_preserves_filter() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(&config, "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n[inventory.keys.normal]\nrefresh = [\"x\"]\n").unwrap();
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (vec!["local scan complete"], b"/alpha\rm".to_vec()),
+            (
+                vec!["MENU / actions", "x refresh", "clear_search"],
+                b"jjj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL / alpha",
+                    "generation 2",
+                    "selected: github.com/org/alpha",
+                ],
+                b"m".to_vec(),
+            ),
+            (vec!["MENU / actions"], b"x".to_vec()),
+            (vec!["NORMAL / alpha", "generation 3"], b"q".to_vec()),
+        ],
+        24,
+        132,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_compact_hints_keep_actions_and_popup_exit_routes_visible() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(
+        &config,
+        "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n",
+    )
+    .unwrap();
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec![
+                    "local scan complete",
+                    "Enter inspect",
+                    "m menu",
+                    "Backspace clear_search",
+                ],
+                b"m".to_vec(),
+            ),
+            (
+                vec![
+                    "MENU / actions",
+                    "Enter accept",
+                    "Esc/q cancel",
+                    "Ctrl+q quit",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                vec![
+                    "INSPECT / github.com/org/alpha",
+                    "Enter accept",
+                    "Esc/q cancel",
+                    "Ctrl+q quit",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "Enter inspect", "m menu"], b"q".to_vec()),
+        ],
+        24,
+        80,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_help_uses_the_invoking_mode_and_returns_to_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(&config, "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n[inventory.keys.search]\naccept = [\"Ctrl+a\"]\ncancel = [\"Ctrl+e\"]\n").unwrap();
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (vec!["local scan complete"], b"/alpha\x1bOP".to_vec()),
+            (
+                vec!["HELP / inventory", "Ctrl+a accept", "Ctrl+e cancel"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["SEARCH / alpha"], vec![5]),
+            (vec!["NORMAL / alpha"], b"m?".to_vec()),
+            (
+                vec!["HELP / inventory", "j/Down/Tab down", "R refresh"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["MENU / actions"], b"\r?".to_vec()),
+            (
+                vec!["HELP / inventory", "j/Down/Tab down", "PageDown page_down"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["INSPECT / github.com/org/alpha"], vec![17]),
+        ],
+        24,
+        80,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_inspect_explains_unavailable_actions_without_changing_the_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    let repository = home.join("repos/org/alpha");
+    fs::create_dir_all(&repository).unwrap();
+    let settings = "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n";
+    fs::write(&config, settings).unwrap();
+    init_repo(&repository, "git@github.com:org/alpha.git", true);
+    let head = fs::read(repository.join(".git/HEAD")).unwrap();
+    let git_config = fs::read(repository.join(".git/config")).unwrap();
+    let transcript = run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (vec!["local scan complete"], b"\r".to_vec()),
+            (vec!["INSPECT / github.com/org/alpha"], vec![b'j'; 40]),
+            (
+                vec![
+                    "Mark: unavailable",
+                    "marking is not implemented",
+                    "read-only inventory",
+                    "desktop actions",
+                    "offline inventory",
+                ],
+                b"ar \x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "selected: github.com/org/alpha"],
+                b"q".to_vec(),
+            ),
+        ],
+        24,
+        80,
+    );
+    assert!(!transcript.contains("Mark: available"));
+    assert_eq!(fs::read_to_string(&config).unwrap(), settings);
+    assert_eq!(fs::read(repository.join(".git/HEAD")).unwrap(), head);
+    assert_eq!(
+        fs::read(repository.join(".git/config")).unwrap(),
+        git_config
+    );
+    assert!(repository.is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_inspect_keeps_wildcard_relationships_on_exact_declarations() {
+    for cloned in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let config = temp.path().join("config.toml");
+        let root = home.join("repos");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&config, "root = \"repos\"\n[providers.\"github.com\"]\npreset = \"github\"\n[[repositories]]\nurl = \"github.com/org/*\"\nexclude = [\"team/alpha\"]\n[[repositories]]\nurl = \"github.com/org/team/*\"\n[[repositories]]\nurl = \"github.com/org/team/alpha\"\n").unwrap();
+        if cloned {
+            init_repo(
+                &root.join("org/team/alpha"),
+                "git@github.com:org/team/alpha.git",
+                true,
+            );
+        }
+        run_inventory_pty_actions(
+            support::lager(&home, &config).arg("inventory"),
+            &[
+                (vec!["local scan complete"], b"\r".to_vec()),
+                (
+                    vec![
+                        "INSPECT / github.com/org/team/alpha",
+                        "Registration: explicit",
+                    ],
+                    vec![b'j'; 60],
+                ),
+                (
+                    vec![
+                        "excluded by github.com/org/*",
+                        "covered by github.com/org/team/*",
+                    ],
+                    b"\x1b".to_vec(),
+                ),
+                (
+                    vec!["NORMAL", "selected: github.com/org/team/alpha"],
+                    b"q".to_vec(),
+                ),
+            ],
+            24,
+            80,
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_menu_scrolls_with_visible_title_and_hints_after_resize() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    let mut frames = Vec::new();
+    run_inventory_pty_with_exit_observing(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (vec!["local scan complete"], b"m".to_vec()),
+            (vec!["MENU / actions", "inspect"], b"\x1b[6~?".to_vec()),
+            (vec!["HELP / inventory"], b"\x1b".to_vec()),
+            (
+                vec!["MENU / actions", "Enter accept", "Esc/q cancel"],
+                b"\x1b[5~\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: MENU / actions"], b"q".to_vec()),
+        ],
+        12,
+        80,
+        0,
+        |action, terminal, frame| {
+            if action == 3 {
+                frames.push(frame.to_owned());
+                resize_pty(terminal, 24, 80);
+            }
+        },
+    );
+    let small = screen_text(&frames[0], 12, 80);
+    let item = small.lines().nth(4).unwrap();
+    assert!(
+        item.contains("q quit"),
+        "menu did not scroll to its final item:\n{small}"
+    );
+    assert!(!item.contains("inspect"));
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_search_and_inspection_remain_live_during_a_controlled_probe() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let tools = temp.path().join("tools");
+    let marker = temp.path().join("started");
+    let release = temp.path().join("release");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    init_repo(
+        &root.join("hidden/zephyr-target"),
+        "git@github.com:org/alpha.git",
+        true,
+    );
+    fs::write(tools.join("git"), format!(
+        "#!/bin/sh\nif [ \"$3\" = status ]; then printf started > {}; while [ ! -f {} ]; do /bin/sleep 0.02; done; fi\nexec {} \"$@\"\n",
+        shell_word(&marker), shell_word(&release), shell_word(&support::real_tool("git")),
+    )).unwrap();
+    fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    run_inventory_pty_actions_with_hook(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        &[
+            (vec!["pending"], b"/zphrtrgt".to_vec()),
+            (
+                vec!["SEARCH / zphrtrgt", "1 rows", "pending"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL / zphrtrgt"], b"\r".to_vec()),
+            (vec!["INSPECT", "Origin: pending"], Vec::new()),
+            (vec!["INSPECT / unavailable"], b"\x1b".to_vec()),
+            (
+                vec!["local scan complete", "NORMAL / zphrtrgt"],
+                b"\x7f/git@github.com:org/alpha.git\r".to_vec(),
+            ),
+            (
+                vec!["NORMAL / git@github.com:org/alpha.git", "1 rows"],
+                b"q".to_vec(),
+            ),
+        ],
+        24,
+        80,
+        |action| {
+            if action == 0 {
+                wait_for_file(&marker);
+            }
+            if action == 1 {
+                assert!(!release.exists());
+            }
+            if action == 3 {
+                fs::write(&release, "go").unwrap();
+            }
+        },
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_dialog_overrides_refresh_atomically_and_keep_all_exit_routes_reachable() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    let settings = |accept: &str, menu_accept: &str| {
+        format!(
+            "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n[inventory.keys.menu]\naccept = [{menu_accept}]\ncancel = [\"Ctrl+e\"]\nhelp = [\"F1\"]\nquit = [\"Ctrl+q\"]\n[inventory.keys.inspection]\naccept = [\"{accept}\"]\ncancel = [\"Ctrl+e\"]\nhelp = [\"F1\"]\nquit = [\"Ctrl+q\"]\n"
+        )
+    };
+    fs::write(&config, settings("Ctrl+b", "\"Ctrl+a\"")).unwrap();
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (vec!["local scan complete"], b"m".to_vec()),
+            (
+                vec!["MENU / actions", "Ctrl+a accept", "Ctrl+e cancel"],
+                vec![1],
+            ),
+            (
+                vec!["INSPECT / github.com/org/alpha", "Ctrl+b accept"],
+                vec![2],
+            ),
+            (vec!["NORMAL", "absent: INSPECT"], b"R".to_vec()),
+            (vec!["generation 2"], b"m\x1bOP".to_vec()),
+            (vec!["HELP / inventory", "Ctrl+d accept"], vec![4]),
+            (vec!["MENU / actions", "absent: HELP"], vec![5]),
+            (vec!["NORMAL", "absent: MENU"], b"\r".to_vec()),
+            (
+                vec!["INSPECT / github.com/org/alpha", "Ctrl+d accept"],
+                b"\x1bOP".to_vec(),
+            ),
+            (vec!["HELP / inventory", "Ctrl+d accept"], vec![4]),
+            (vec!["INSPECT", "absent: HELP"], vec![5]),
+            (vec!["NORMAL", "absent: INSPECT"], b"R".to_vec()),
+            (
+                vec!["refresh failed:", "must remain reachable"],
+                b"m".to_vec(),
+            ),
+            (vec!["MENU / actions", "Ctrl+a accept"], vec![1]),
+            (vec!["INSPECT", "Ctrl+d accept"], vec![17]),
+        ],
+        24,
+        100,
+        1,
+        |action| match action {
+            3 => fs::write(&config, settings("Ctrl+d", "\"Ctrl+a\"")).unwrap(),
+            11 => fs::write(&config, settings("Ctrl+b", "")).unwrap(),
+            _ => {}
+        },
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_inspect_keeps_originless_conflict_and_unreadable_facts_distinct() {
+    for (case, fact, exit) in [
+        ("originless", "Origin: No origin", 0),
+        ("conflict", "Checkout: conflict", 0),
+        ("unreadable", "Checkout: unreadable", 1),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let config = temp.path().join("config.toml");
+        let repository = home.join("repos/org/alpha");
+        fs::create_dir_all(&repository).unwrap();
+        fs::write(
+            &config,
+            if case == "originless" {
+                "root = \"repos\"\n"
+            } else {
+                "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n"
+            },
+        )
+        .unwrap();
+        match case {
+            "originless" => init_repo_without_origin(&repository),
+            "conflict" => init_repo(&repository, "git@github.com:org/different.git", true),
+            _ => fs::set_permissions(&repository, fs::Permissions::from_mode(0o000)).unwrap(),
+        }
+        let ready = if case == "unreadable" {
+            "partial scan:"
+        } else {
+            "local scan complete"
+        };
+        run_inventory_pty_with_exit(
+            support::lager(&home, &config).arg("inventory"),
+            &[
+                (vec![ready], b"\r".to_vec()),
+                (vec!["INSPECT /", fact], vec![17]),
+            ],
+            24,
+            80,
+            exit,
+            |action| {
+                if action == 1 && case == "unreadable" {
+                    fs::set_permissions(&repository, fs::Permissions::from_mode(0o755)).unwrap();
+                }
+            },
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_no_color_applies_to_rows_and_popups() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(
+        &config,
+        "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n",
+    )
+    .unwrap();
+    let transcript = run_inventory_pty_actions(
+        support::lager(&home, &config)
+            .arg("inventory")
+            .env("NO_COLOR", "1"),
+        &[
+            (
+                vec!["local scan complete", "explicit", "missing"],
+                b"m".to_vec(),
+            ),
+            (vec!["MENU / actions"], b"\r".to_vec()),
+            (vec!["INSPECT / github.com/org/alpha"], b"?".to_vec()),
+            (vec!["HELP / inventory"], vec![17]),
+        ],
+        24,
+        80,
+    );
+    for sequence in transcript.split("\x1b[").skip(1) {
+        if let Some((parameters, _)) = sequence.split_once('m')
+            && parameters
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == ';')
+        {
+            assert!(
+                !parameters
+                    .split(';')
+                    .filter_map(|code| code.parse::<u16>().ok())
+                    .any(|code| matches!(code, 30..=38 | 90..=97)),
+                "NO_COLOR emitted foreground SGR {parameters}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_help_wraps_long_effective_binding_lists() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(&config, r#"root = "repos"
+[inventory.keys.normal]
+down = ["Ctrl+a", "Ctrl+b", "Ctrl+d", "Ctrl+e", "Ctrl+f", "Ctrl+g", "Ctrl+h", "Ctrl+j", "Ctrl+k", "Ctrl+l", "Ctrl+n", "Ctrl+o", "Ctrl+p", "Ctrl+q", "Ctrl+r", "Ctrl+s", "Ctrl+t", "Ctrl+u", "Ctrl+v", "Ctrl+w", "Ctrl+x", "Ctrl+y"]
+"#).unwrap();
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (vec!["local scan complete"], b"?".to_vec()),
+            (vec!["HELP / inventory", "Ctrl+x/Ctrl+y"], vec![17]),
+        ],
+        24,
+        80,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_event_reader_preserves_input_ready_with_resize() {
+    use crossterm::{event, terminal};
+
+    let name = "inventory_event_reader_preserves_input_ready_with_resize";
+    if let Some(release) = std::env::var_os("LAGER_TEST_EVENT_RELEASE") {
+        terminal::enable_raw_mode().unwrap();
+        assert!(!event::poll(Duration::from_millis(1)).unwrap());
+        println!("\r\nREADY\x1b[0m\r");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while terminal::size().unwrap() != (80, 16) {
+            assert!(Instant::now() < deadline, "resize was not delivered");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        println!("\r\nRESIZED\x1b[0m\r");
+        while !std::path::Path::new(&release).exists() {
+            assert!(Instant::now() < deadline, "input was not released");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let mut resized = false;
+        let mut escaped = false;
+        for _ in 0..2 {
+            if event::poll(Duration::from_millis(200)).unwrap() {
+                match event::read().unwrap() {
+                    event::Event::Resize(80, 16) => resized = true,
+                    event::Event::Key(key) if key.code == event::KeyCode::Esc => escaped = true,
+                    _ => {}
+                }
+            }
+        }
+        terminal::disable_raw_mode().unwrap();
+        assert!(
+            resized && escaped,
+            "lost ready event: resize={resized}, escape={escaped}"
+        );
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let release = temp.path().join("release");
+    run_inventory_pty_with_exit_observing(
+        Command::new(std::env::current_exe().unwrap())
+            .args([name, "--exact", "--nocapture"])
+            .env("LAGER_TEST_EVENT_RELEASE", &release),
+        &[(vec!["READY"], vec![]), (vec!["RESIZED"], vec![])],
+        24,
+        80,
+        0,
+        |action, writer, _| match action {
+            0 => resize_pty(writer, 16, 80),
+            1 => {
+                writer.write_all(b"\x1b").unwrap();
+                writer.flush().unwrap();
+                fs::write(&release, "ready").unwrap();
+            }
+            _ => unreachable!(),
+        },
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_popup_q_returns_to_the_previous_view() {
+    let temp = tempfile::Builder::new().prefix("beta-").tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(&config, "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n[[repositories]]\nurl = \"github.com/org/beta\"\n").unwrap();
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["local scan complete"],
+                b"/github.com/org/beta\r".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL / github.com/org/beta",
+                    "selected: github.com/org/beta",
+                ],
+                b"m".to_vec(),
+            ),
+            (vec!["MENU / actions"], b"?".to_vec()),
+            (vec!["HELP / inventory"], b"q".to_vec()),
+            (vec!["MENU / actions", "absent: HELP"], b"q".to_vec()),
+            (
+                vec![
+                    "NORMAL / github.com/org/beta",
+                    "selected: github.com/org/beta",
+                    "absent: MENU",
+                ],
+                b"\r".to_vec(),
+            ),
+            (vec!["INSPECT / github.com/org/beta"], b"?".to_vec()),
+            (vec!["HELP / inventory"], b"q".to_vec()),
+            (
+                vec!["INSPECT / github.com/org/beta", "absent: HELP"],
+                b"q".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL / github.com/org/beta",
+                    "selected: github.com/org/beta",
+                    "absent: INSPECT",
+                ],
+                b"?".to_vec(),
+            ),
+            (vec!["HELP / inventory"], b"q".to_vec()),
+            (
+                vec![
+                    "NORMAL / github.com/org/beta",
+                    "selected: github.com/org/beta",
+                    "absent: HELP",
+                ],
+                b"/\x1bOP".to_vec(),
+            ),
+            (vec!["HELP / inventory"], b"q".to_vec()),
+            (
+                vec!["SEARCH / github.com/org/beta", "absent: HELP"],
+                b"q".to_vec(),
+            ),
+            (vec!["SEARCH / github.com/org/betaq"], b"\x1b".to_vec()),
+            (vec!["NORMAL / github.com/org/betaq"], vec![127]),
+            (vec!["NORMAL /  · 2 rows"], b"q".to_vec()),
+        ],
+        24,
+        80,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_popup_quit_routes_and_explicit_overrides_remain_effective() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    for (overrides, quit) in [
+        ("", vec![17]),
+        (
+            "[inventory.keys.menu]\ncancel = [\"Esc\"]\nquit = [\"q\"]\n[inventory.keys.inspection]\ncancel = [\"Esc\"]\nquit = [\"q\"]\n",
+            b"q".to_vec(),
+        ),
+    ] {
+        fs::write(
+            &config,
+            format!(
+                "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n{overrides}"
+            ),
+        )
+        .unwrap();
+        for (open, title) in [
+            (b"m", "MENU / actions"),
+            (b"\r", "INSPECT / github.com/org/alpha"),
+            (b"?", "HELP / inventory"),
+        ] {
+            let transcript = run_inventory_pty_actions(
+                support::lager(&home, &config).arg("inventory"),
+                &[
+                    (vec!["local scan complete"], open.to_vec()),
+                    (vec![title], quit.clone()),
+                ],
+                24,
+                80,
+            );
+            assert!(transcript.contains("\x1b[?1049l") && transcript.contains("\x1b[?25h"));
+        }
+    }
+}
+
 fn output(command: &mut Command) -> std::process::Output {
     command.output().unwrap()
 }
@@ -2548,12 +3315,24 @@ fn run_inventory_pty_with_exit_observing(
         .stdin(Stdio::from(terminal.try_clone().unwrap()))
         .stdout(Stdio::from(terminal.try_clone().unwrap()))
         .stderr(Stdio::from(terminal));
+    // SAFETY: the child only calls async-signal-safe libc functions before exec.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     let mut child = PtyChild(command.spawn().unwrap());
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut bytes = Vec::new();
     let mut transcript = String::new();
     let mut action_index = 0;
     loop {
+        let size = rustix_openpty::rustix::termios::tcgetwinsize(&writer).unwrap();
+        let (rows, cols) = (size.ws_row, size.ws_col);
         if Instant::now() >= deadline {
             let _ = child.0.kill();
             let _ = child.0.wait();
@@ -2578,6 +3357,8 @@ fn run_inventory_pty_with_exit_observing(
                         repository,
                     )
                     .is_some()
+                } else if let Some(absent) = text.strip_prefix("absent: ") {
+                    !screen_text(completed_frame, rows as usize, cols as usize).contains(absent)
                 } else {
                     screen_text(completed_frame, rows as usize, cols as usize).contains(text)
                 }

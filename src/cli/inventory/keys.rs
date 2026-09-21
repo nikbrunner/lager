@@ -4,8 +4,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::infrastructure::config::InventoryKeyOverrides;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Mode {
+    #[default]
     Normal,
     Menu,
     Search,
@@ -102,6 +103,8 @@ impl Action {
                     | Self::Quit
                     | Self::Search
                     | Self::Inspect
+                    | Self::Refresh
+                    | Self::ClearSearch
             ),
             Mode::Search => matches!(self, Self::Accept | Self::Cancel | Self::Help | Self::Quit),
             Mode::Inspection => matches!(
@@ -141,9 +144,10 @@ impl Bindings {
         let mut maps: BTreeMap<Mode, BTreeMap<Action, Vec<(KeyEvent, String)>>> = BTreeMap::new();
         for (name, mode) in modes {
             let typing = matches!(mode, Mode::Search | Mode::Input);
+            let popup = matches!(mode, Mode::Menu | Mode::Inspection);
             let mut defaults: Vec<(Action, Vec<&str>)> = vec![
                 (Help, vec![if typing { "F1" } else { "?" }]),
-                (Quit, vec![if typing { "Ctrl+q" } else { "q" }]),
+                (Quit, vec![if typing || popup { "Ctrl+q" } else { "q" }]),
             ];
             if mode == Mode::Normal {
                 defaults.extend([
@@ -170,7 +174,10 @@ impl Bindings {
                     (Archives, vec![]),
                 ]);
             } else {
-                defaults.extend([(Accept, vec!["Enter"]), (Cancel, vec!["Esc"])]);
+                defaults.extend([
+                    (Accept, vec!["Enter"]),
+                    (Cancel, if popup { vec!["Esc", "q"] } else { vec!["Esc"] }),
+                ]);
                 if !typing {
                     defaults.extend([
                         (Up, vec!["k", "Up", "Shift+Tab"]),
@@ -183,7 +190,12 @@ impl Bindings {
                     // These inherit normal-mode shortcuts unless the menu map explicitly
                     // replaces them. They are added after parsing so menu navigation keeps
                     // precedence for any conflicting keys.
-                    defaults.extend([(Search, vec![]), (Inspect, vec![])]);
+                    defaults.extend([
+                        (Search, vec![]),
+                        (Inspect, vec![]),
+                        (Refresh, vec![]),
+                        (ClearSearch, vec![]),
+                    ]);
                 }
             }
             let mut map: BTreeMap<_, _> = defaults
@@ -253,7 +265,7 @@ impl Bindings {
             if mode == Mode::Menu {
                 let normal = &maps[&Mode::Normal];
                 let custom = overrides.get(name);
-                for action in [Search, Inspect] {
+                for action in [Search, Inspect, Refresh, ClearSearch] {
                     if custom.is_some_and(|bindings| bindings.contains_key(action.name())) {
                         continue;
                     }
@@ -311,6 +323,29 @@ fn normalized(mut key: KeyEvent) -> KeyEvent {
         key.code = KeyCode::Char(character.to_ascii_uppercase());
         key.modifiers.remove(KeyModifiers::SHIFT);
     }
+    if let KeyCode::Char(character) = key.code
+        && key.modifiers == KeyModifiers::CONTROL
+    {
+        let character = character.to_ascii_lowercase();
+        let equivalent = match character {
+            'i' => Some(KeyCode::Tab),
+            'm' => Some(KeyCode::Enter),
+            '[' | '3' => Some(KeyCode::Esc),
+            '?' | '8' => Some(KeyCode::Backspace),
+            _ => None,
+        };
+        if let Some(code) = equivalent {
+            return KeyEvent::new(code, KeyModifiers::NONE);
+        }
+        key.code = KeyCode::Char(match character {
+            '@' | '2' => ' ',
+            '\\' => '4',
+            ']' => '5',
+            '^' => '6',
+            '_' | '/' => '7',
+            _ => character,
+        });
+    }
     KeyEvent::new(key.code, key.modifiers)
 }
 
@@ -349,5 +384,15 @@ fn parse_key(value: &str) -> Result<KeyEvent, String> {
     {
         return Err("native terminal controls cannot be rebound".to_owned());
     }
-    Ok(normalized(KeyEvent::new(code, modifiers)))
+    let event = normalized(KeyEvent::new(code, modifiers));
+    if event.modifiers == KeyModifiers::CONTROL
+        && !matches!(event.code,
+            KeyCode::Char('a'..='z' | '4'..='7' | ' ')
+                | KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+                | KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown
+                | KeyCode::Delete | KeyCode::F(1))
+    {
+        return Err(format!("unsupported Ctrl binding `{value}`"));
+    }
+    Ok(event)
 }

@@ -95,10 +95,27 @@ cancellation do not count as failures.
 
 Use `j`/`k` or arrow keys to select a row, `/` for live fuzzy search, Enter to
 inspect the selected repository, `m` for the available local actions, and `?` for
-effective bindings. These actions are read-only. Repository mutations and remote
+effective bindings. Search matches full attributes, paths and origins; Enter/Esc
+retain the filter and normal-mode Backspace clears it. Ordinary search letters
+remain text; F1 opens search help. Help describes the mode it was opened from.
+The menu includes Inspect, Search, Clear search, local Refresh, Help and Quit.
+Popup content scrolls independently of its title and effective action hints.
+In Menu, Inspect and Help, q or Esc closes the current popup; Ctrl-Q quits the
+app. Normal-mode q and Esc quit.
+Configure shortcuts through [inventory key maps](config.md#inventory-key-maps).
+
+These actions are read-only. Repository mutations and remote
 discovery are unavailable. `--remote`, including with `--include-archived`, exits
 `2` before raw mode. `--include-archived` without `--remote` is also invalid.
 Non-TTY use exits `2`; fatal startup/configuration errors exit `1`.
+
+On Unix, Ctrl-C or SIGINT interrupts binary inventory with exit `130`; SIGTERM
+exits `143`. Inventory cancels its workers and restores the terminal before
+returning. This signal policy is scoped to the binary inventory invocation;
+`lager::cli::run()` retains the embedding process's signal policy.
+
+Use the [isolated inventory walkthrough](../how-to/verify-inventory.md) for
+acceptance testing without your normal repositories or configuration.
 
 ## Non-interactive use
 
