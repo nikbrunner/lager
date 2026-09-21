@@ -7,8 +7,9 @@
   native Git/hook child reported as interrupted by SIGINT or exiting with
   status `130`.
 
-For `inventory` / `inv`, `q` and Esc perform a normal quit: `1` if discovery,
-observation or another operational failure occurred in the session, including
+For `inventory` / `inv`, normal-mode `q`/Esc or popup Ctrl-Q perform a normal
+quit: `1` if discovery, observation or another operational failure occurred in
+the session, including
 failures followed by successful refresh; otherwise `0`. Informational exclusions
 and deliberate background-work cancellation do not count as failures. Non-TTY
 use, invalid flags and unavailable remote discovery exit `2` before raw mode;

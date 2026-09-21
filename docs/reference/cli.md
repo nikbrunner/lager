@@ -100,6 +100,8 @@ retain the filter and normal-mode Backspace clears it. Ordinary search letters
 remain text; F1 opens search help. Help describes the mode it was opened from.
 The menu includes Inspect, Search, Clear search, local Refresh, Help and Quit.
 Popup content scrolls independently of its title and effective action hints.
+In Menu, Inspect and Help, q or Esc closes the current popup; Ctrl-Q quits the
+app. Normal-mode q and Esc quit.
 Configure shortcuts through [inventory key maps](config.md#inventory-key-maps).
 
 These actions are read-only. Repository mutations and remote

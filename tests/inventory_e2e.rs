@@ -2134,7 +2134,7 @@ fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
                 ],
                 Vec::new(),
             ),
-            (vec!["HELP / inventory", "k/Up up"], b"q".to_vec()),
+            (vec!["HELP / inventory", "k/Up up"], vec![17]),
         ],
         8,
         100,
@@ -2639,15 +2639,20 @@ fn inventory_compact_hints_keep_actions_and_popup_exit_routes_visible() {
                 b"m".to_vec(),
             ),
             (
-                vec!["MENU / actions", "Enter accept", "Esc cancel", "q quit"],
+                vec![
+                    "MENU / actions",
+                    "Enter accept",
+                    "Esc/q cancel",
+                    "Ctrl+q quit",
+                ],
                 b"\r".to_vec(),
             ),
             (
                 vec![
                     "INSPECT / github.com/org/alpha",
                     "Enter accept",
-                    "Esc cancel",
-                    "q quit",
+                    "Esc/q cancel",
+                    "Ctrl+q quit",
                 ],
                 b"\x1b".to_vec(),
             ),
@@ -2685,7 +2690,7 @@ fn inventory_help_uses_the_invoking_mode_and_returns_to_it() {
                 vec!["HELP / inventory", "j/Down/Tab down", "PageDown page_down"],
                 b"\x1b".to_vec(),
             ),
-            (vec!["INSPECT / github.com/org/alpha"], b"q".to_vec()),
+            (vec!["INSPECT / github.com/org/alpha"], vec![17]),
         ],
         24,
         80,
@@ -2800,7 +2805,7 @@ fn inventory_menu_scrolls_with_visible_title_and_hints_after_resize() {
             (vec!["MENU / actions", "inspect"], b"\x1b[6~?".to_vec()),
             (vec!["HELP / inventory"], b"\x1b".to_vec()),
             (
-                vec!["MENU / actions", "Enter accept", "Esc cancel"],
+                vec!["MENU / actions", "Enter accept", "Esc/q cancel"],
                 b"\x1b[5~\x1b".to_vec(),
             ),
             (vec!["NORMAL", "absent: MENU / actions"], b"q".to_vec()),
@@ -2974,7 +2979,7 @@ fn inventory_inspect_keeps_originless_conflict_and_unreadable_facts_distinct() {
             support::lager(&home, &config).arg("inventory"),
             &[
                 (vec![ready], b"\r".to_vec()),
-                (vec!["INSPECT /", fact], b"q".to_vec()),
+                (vec!["INSPECT /", fact], vec![17]),
             ],
             24,
             80,
@@ -3011,7 +3016,7 @@ fn inventory_no_color_applies_to_rows_and_popups() {
             ),
             (vec!["MENU / actions"], b"\r".to_vec()),
             (vec!["INSPECT / github.com/org/alpha"], b"?".to_vec()),
-            (vec!["HELP / inventory"], b"q".to_vec()),
+            (vec!["HELP / inventory"], vec![17]),
         ],
         24,
         80,
@@ -3048,7 +3053,7 @@ down = ["Ctrl+a", "Ctrl+b", "Ctrl+d", "Ctrl+e", "Ctrl+f", "Ctrl+g", "Ctrl+h", "C
         support::lager(&home, &config).arg("inventory"),
         &[
             (vec!["local scan complete"], b"?".to_vec()),
-            (vec!["HELP / inventory", "Ctrl+x/Ctrl+y"], b"q".to_vec()),
+            (vec!["HELP / inventory", "Ctrl+x/Ctrl+y"], vec![17]),
         ],
         24,
         80,
@@ -3114,6 +3119,116 @@ fn inventory_event_reader_preserves_input_ready_with_resize() {
             _ => unreachable!(),
         },
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_popup_q_returns_to_the_previous_view() {
+    let temp = tempfile::Builder::new().prefix("beta-").tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(&config, "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n[[repositories]]\nurl = \"github.com/org/beta\"\n").unwrap();
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["local scan complete"],
+                b"/github.com/org/beta\r".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL / github.com/org/beta",
+                    "selected: github.com/org/beta",
+                ],
+                b"m".to_vec(),
+            ),
+            (vec!["MENU / actions"], b"?".to_vec()),
+            (vec!["HELP / inventory"], b"q".to_vec()),
+            (vec!["MENU / actions", "absent: HELP"], b"q".to_vec()),
+            (
+                vec![
+                    "NORMAL / github.com/org/beta",
+                    "selected: github.com/org/beta",
+                    "absent: MENU",
+                ],
+                b"\r".to_vec(),
+            ),
+            (vec!["INSPECT / github.com/org/beta"], b"?".to_vec()),
+            (vec!["HELP / inventory"], b"q".to_vec()),
+            (
+                vec!["INSPECT / github.com/org/beta", "absent: HELP"],
+                b"q".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL / github.com/org/beta",
+                    "selected: github.com/org/beta",
+                    "absent: INSPECT",
+                ],
+                b"?".to_vec(),
+            ),
+            (vec!["HELP / inventory"], b"q".to_vec()),
+            (
+                vec![
+                    "NORMAL / github.com/org/beta",
+                    "selected: github.com/org/beta",
+                    "absent: HELP",
+                ],
+                b"/\x1bOP".to_vec(),
+            ),
+            (vec!["HELP / inventory"], b"q".to_vec()),
+            (
+                vec!["SEARCH / github.com/org/beta", "absent: HELP"],
+                b"q".to_vec(),
+            ),
+            (vec!["SEARCH / github.com/org/betaq"], b"\x1b".to_vec()),
+            (vec!["NORMAL / github.com/org/betaq"], vec![127]),
+            (vec!["NORMAL /  · 2 rows"], b"q".to_vec()),
+        ],
+        24,
+        80,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_popup_quit_routes_and_explicit_overrides_remain_effective() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    for (overrides, quit) in [
+        ("", vec![17]),
+        (
+            "[inventory.keys.menu]\ncancel = [\"Esc\"]\nquit = [\"q\"]\n[inventory.keys.inspection]\ncancel = [\"Esc\"]\nquit = [\"q\"]\n",
+            b"q".to_vec(),
+        ),
+    ] {
+        fs::write(
+            &config,
+            format!(
+                "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n{overrides}"
+            ),
+        )
+        .unwrap();
+        for (open, title) in [
+            (b"m", "MENU / actions"),
+            (b"\r", "INSPECT / github.com/org/alpha"),
+            (b"?", "HELP / inventory"),
+        ] {
+            let transcript = run_inventory_pty_actions(
+                support::lager(&home, &config).arg("inventory"),
+                &[
+                    (vec!["local scan complete"], open.to_vec()),
+                    (vec![title], quit.clone()),
+                ],
+                24,
+                80,
+            );
+            assert!(transcript.contains("\x1b[?1049l") && transcript.contains("\x1b[?25h"));
+        }
+    }
 }
 
 fn output(command: &mut Command) -> std::process::Output {

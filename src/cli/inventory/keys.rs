@@ -144,9 +144,10 @@ impl Bindings {
         let mut maps: BTreeMap<Mode, BTreeMap<Action, Vec<(KeyEvent, String)>>> = BTreeMap::new();
         for (name, mode) in modes {
             let typing = matches!(mode, Mode::Search | Mode::Input);
+            let popup = matches!(mode, Mode::Menu | Mode::Inspection);
             let mut defaults: Vec<(Action, Vec<&str>)> = vec![
                 (Help, vec![if typing { "F1" } else { "?" }]),
-                (Quit, vec![if typing { "Ctrl+q" } else { "q" }]),
+                (Quit, vec![if typing || popup { "Ctrl+q" } else { "q" }]),
             ];
             if mode == Mode::Normal {
                 defaults.extend([
@@ -173,7 +174,10 @@ impl Bindings {
                     (Archives, vec![]),
                 ]);
             } else {
-                defaults.extend([(Accept, vec!["Enter"]), (Cancel, vec!["Esc"])]);
+                defaults.extend([
+                    (Accept, vec!["Enter"]),
+                    (Cancel, if popup { vec!["Esc", "q"] } else { vec!["Esc"] }),
+                ]);
                 if !typing {
                     defaults.extend([
                         (Up, vec!["k", "Up", "Shift+Tab"]),
