@@ -51,7 +51,7 @@ fn inventory_inspect_shows_current_declaration_and_action_reason_after_resize_an
                 vec!["INSPECT", "excludes escape-\\n\\t\\x1b"],
                 b"\x1b".to_vec(),
             ),
-            (vec!["NORMAL", selected], b"q".to_vec()),
+            (vec!["NORMAL", selected, "absent: INSPECT"], b"q".to_vec()),
         ],
         24,
         80,
@@ -3055,6 +3055,67 @@ down = ["Ctrl+a", "Ctrl+b", "Ctrl+d", "Ctrl+e", "Ctrl+f", "Ctrl+g", "Ctrl+h", "C
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn inventory_event_reader_preserves_input_ready_with_resize() {
+    use crossterm::{event, terminal};
+
+    let name = "inventory_event_reader_preserves_input_ready_with_resize";
+    if let Some(release) = std::env::var_os("LAGER_TEST_EVENT_RELEASE") {
+        terminal::enable_raw_mode().unwrap();
+        assert!(!event::poll(Duration::from_millis(1)).unwrap());
+        println!("\r\nREADY\x1b[0m\r");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while terminal::size().unwrap() != (80, 16) {
+            assert!(Instant::now() < deadline, "resize was not delivered");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        println!("\r\nRESIZED\x1b[0m\r");
+        while !std::path::Path::new(&release).exists() {
+            assert!(Instant::now() < deadline, "input was not released");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let mut resized = false;
+        let mut escaped = false;
+        for _ in 0..2 {
+            if event::poll(Duration::from_millis(200)).unwrap() {
+                match event::read().unwrap() {
+                    event::Event::Resize(80, 16) => resized = true,
+                    event::Event::Key(key) if key.code == event::KeyCode::Esc => escaped = true,
+                    _ => {}
+                }
+            }
+        }
+        terminal::disable_raw_mode().unwrap();
+        assert!(
+            resized && escaped,
+            "lost ready event: resize={resized}, escape={escaped}"
+        );
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let release = temp.path().join("release");
+    run_inventory_pty_with_exit_observing(
+        Command::new(std::env::current_exe().unwrap())
+            .args([name, "--exact", "--nocapture"])
+            .env("LAGER_TEST_EVENT_RELEASE", &release),
+        &[(vec!["READY"], vec![]), (vec!["RESIZED"], vec![])],
+        24,
+        80,
+        0,
+        |action, writer, _| match action {
+            0 => resize_pty(writer, 16, 80),
+            1 => {
+                writer.write_all(b"\x1b").unwrap();
+                writer.flush().unwrap();
+                fs::write(&release, "ready").unwrap();
+            }
+            _ => unreachable!(),
+        },
+    );
+}
+
 fn output(command: &mut Command) -> std::process::Output {
     command.output().unwrap()
 }
@@ -3155,6 +3216,8 @@ fn run_inventory_pty_with_exit_observing(
     let mut transcript = String::new();
     let mut action_index = 0;
     loop {
+        let size = rustix_openpty::rustix::termios::tcgetwinsize(&writer).unwrap();
+        let (rows, cols) = (size.ws_row, size.ws_col);
         if Instant::now() >= deadline {
             let _ = child.0.kill();
             let _ = child.0.wait();

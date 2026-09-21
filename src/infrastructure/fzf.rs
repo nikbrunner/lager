@@ -155,7 +155,6 @@ impl RepositorySelector for Fzf {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     use super::*;
     use crate::domain::repository::RepositoryRef;
@@ -169,22 +168,35 @@ mod tests {
         }
     }
 
-    fn script(contents: &str) -> (tempfile::TempDir, PathBuf) {
+    fn script(contents: &str) -> (tempfile::TempDir, Fzf) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("fzf-shim");
         fs::write(&path, format!("#!/bin/sh\n{contents}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        (directory, path)
+        // Forked test children can retain writable script descriptors until exec.
+        let mut selector = Fzf::new("/bin/sh");
+        selector.arguments.push(path.into_os_string());
+        (directory, selector)
     }
 
     #[test]
     fn maps_one_newline_selection_without_parsing_display_as_identity() {
-        let (_directory, path) = script("read line; printf '%s\\n' \"$line\"");
-        let selector = Fzf::new(path);
+        let (_directory, selector) = script("read line; printf '%s\\n' \"$line\"");
         let selected = selector
             .select(&[candidate("git@host:team/repo.git", "team/repo label")])
             .unwrap();
         assert_eq!(selected[0].reference.clone_url, "git@host:team/repo.git");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fixture_selection_works_while_a_script_writer_is_open() {
+        let (directory, selector) = script("read line; printf '%s\\n' \"$line\"");
+        let _writer = fs::OpenOptions::new()
+            .write(true)
+            .open(directory.path().join("fzf-shim"))
+            .unwrap();
+        let selected = selector.select(&[candidate("org/repo", "repo")]).unwrap();
+        assert_eq!(selected[0].reference.identity(), "github.com/org/repo");
     }
 
     #[test]
@@ -210,13 +222,13 @@ mod tests {
 
     #[test]
     fn selecting_only_second_identical_label_preserves_identity() {
-        let (_directory, path) = script("sed -n '2p'");
+        let (_directory, selector) = script("sed -n '2p'");
         let candidates = [
             candidate("org/first", "duplicate"),
             candidate("org/second", "duplicate"),
         ];
         assert_eq!(
-            Fzf::new(path).select(&candidates).unwrap(),
+            selector.select(&candidates).unwrap(),
             [candidates[1].clone()]
         );
     }
@@ -236,8 +248,7 @@ mod tests {
 
     #[test]
     fn maps_exit_130_to_cancellation() {
-        let (_directory, path) = script("exit 130");
-        let selector = Fzf::new(path);
+        let (_directory, selector) = script("exit 130");
         assert_eq!(
             selector.select(&[candidate("org/repo", "repo")]),
             Err(SelectionError::Cancelled)
@@ -246,8 +257,7 @@ mod tests {
 
     #[test]
     fn maps_exit_130_to_cancellation_when_fzf_closes_a_full_input_pipe() {
-        let (_directory, path) = script("exec 0<&-; exit 130");
-        let selector = Fzf::new(path);
+        let (_directory, selector) = script("exec 0<&-; exit 130");
         let display = "x".repeat(16 * 1024);
         let candidates = (0..256)
             .map(|index| candidate(&format!("org/repo-{index}"), &display))
