@@ -46,7 +46,7 @@ fn inventory_inspect_shows_current_declaration_and_action_reason_after_resize_an
                     "Mark: unavailable",
                     "declaration patterns cannot be marked",
                 ],
-                b"xxx".to_vec(),
+                vec![b'x'; 32],
             ),
             (
                 vec!["INSPECT", "excludes escape-\\n\\t\\x1b"],
