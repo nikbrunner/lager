@@ -761,11 +761,9 @@ fn inspection_scroll_limit(row: &model::InventoryRow, area: Rect) -> u16 {
         horizontal: 1,
         vertical: 1,
     });
-    let width = usize::from(content.width.max(1));
-    let required = inspection_lines(row)
-        .iter()
-        .map(|line| line.width().max(1).div_ceil(width))
-        .sum::<usize>();
+    let required = Paragraph::new(inspection_lines(row))
+        .wrap(Wrap { trim: false })
+        .line_count(content.width);
     let viewport = usize::from(content.height.saturating_sub(1).max(1));
     required.saturating_sub(viewport).min(usize::from(u16::MAX)) as u16
 }

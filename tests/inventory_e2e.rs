@@ -22,7 +22,6 @@ fn inventory_inspect_shows_current_declaration_and_action_reason_after_resize_an
     let padding = (0..3)
         .map(|index| format!("\"padding-{index}-{}\"", "a ".repeat(70)))
         .chain(std::iter::once("\"escape-\\n\\t\\u001b\"".to_owned()))
-        .chain((3..10).map(|index| format!("\"padding-{index}-{}\"", "a ".repeat(70))))
         .collect::<Vec<_>>()
         .join(", ");
     fs::write(
@@ -2346,8 +2345,18 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
                 b"j/cloned\r".to_vec(),
             ),
             (vec!["NORMAL / cloned · 3 rows"], b"R".to_vec()),
-            (vec!["generation 2", "explicit"], b"R".to_vec()),
-            (vec!["generation 3", "unregistered"], b"q".to_vec()),
+            (
+                vec!["generation 2", "explicit", "selected: github.com/org/same"],
+                b"R".to_vec(),
+            ),
+            (
+                vec![
+                    "generation 3",
+                    "unregistered",
+                    "selected: github.com/org/same",
+                ],
+                b"q".to_vec(),
+            ),
         ],
         24,
         500,
