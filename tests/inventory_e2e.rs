@@ -1598,6 +1598,7 @@ exclude = ["skip"]
         &[
             "8 rows",
             "ignored repositories: bare.git: bare repository ignored",
+            "local scan complete",
         ],
         b"q",
         80,
