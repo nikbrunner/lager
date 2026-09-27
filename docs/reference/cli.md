@@ -52,7 +52,7 @@ of embedding credentials. See [configuration](config.md) for loaded-config behav
 | `init` without a root-creation choice | Prompts to create the root, default yes. |
 | `init` without a GitHub choice | Prompts to configure GitHub, default yes. |
 | `register`, `unregister`, `add`, or `hook` without repositories | Uses `fzf --multi` to select candidates. |
-| `remove` without repositories | Uses `fzf` to select standalone local checkouts. |
+| `remove` without repositories | Uses `fzf` to select local checkouts that have an `origin`; guards run after selection. |
 | Interactive `register` without `--post-clone` | Asks whether to add a hook for each repository, default no. |
 | Interactive `add` without a registration choice | Asks whether to register each successful checkout, default yes, then offers its hook. |
 | Interactive `remove` without `--yes` | Asks to remove each existing checkout, default no. |

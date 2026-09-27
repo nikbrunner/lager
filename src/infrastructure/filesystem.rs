@@ -57,19 +57,24 @@ impl RemovalFilesystem for Filesystem {
         std::fs::remove_dir_all(path)
     }
 
-    fn discover_directories(&self, root: &Path) -> Result<Vec<PathBuf>, Self::Error> {
-        let mut directories = Vec::new();
-        for entry in WalkDir::new(root).min_depth(1).follow_links(false) {
+    fn discover_checkouts(&self, root: &Path) -> Result<Vec<PathBuf>, Self::Error> {
+        let mut checkouts = Vec::new();
+        let mut entries = WalkDir::new(root)
+            .min_depth(1)
+            .follow_links(false)
+            .into_iter();
+        while let Some(entry) = entries.next() {
             let entry = entry.map_err(|error| {
                 let message = error.to_string();
                 error
                     .into_io_error()
                     .unwrap_or_else(|| std::io::Error::other(message))
             })?;
-            if entry.file_type().is_dir() {
-                directories.push(entry.into_path());
+            if entry.file_type().is_dir() && entry.path().join(".git").exists() {
+                checkouts.push(entry.into_path());
+                entries.skip_current_dir();
             }
         }
-        Ok(directories)
+        Ok(checkouts)
     }
 }

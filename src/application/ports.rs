@@ -131,7 +131,7 @@ pub trait RemovalFilesystem {
     }
     fn contains_symlink(&self, path: &Path) -> Result<bool, Self::Error>;
     fn remove_dir_all(&self, path: &Path) -> Result<(), Self::Error>;
-    fn discover_directories(&self, root: &Path) -> Result<Vec<PathBuf>, Self::Error>;
+    fn discover_checkouts(&self, root: &Path) -> Result<Vec<PathBuf>, Self::Error>;
 }
 
 pub trait HookRunner {

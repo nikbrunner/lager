@@ -23,7 +23,7 @@ A removal confirmation defaults to no. After a successful removal, the unregiste
 
 ## Remove from the picker
 
-With no repository argument, Lager lists standalone local checkouts and passes the selected canonical path through deletion. It revalidates that exact path and its origin immediately before deleting it.
+With no repository argument, Lager lists every checkout under the root that has an `origin`, without descending into checkouts. The guards run only on the checkout you select, so a blocked checkout still appears in the list and fails with its reason. Lager passes the selected canonical path through deletion and revalidates that exact path and its origin immediately before deleting it.
 
 If the selected checkout vanishes, removal fails and leaves registration
 unchanged. Lager does not fall back to another clone of the same origin, including

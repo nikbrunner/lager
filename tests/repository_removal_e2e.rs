@@ -376,3 +376,42 @@ fn picker_selection_revalidates_worktree_dependencies() {
     fixture.assert_blocked(output, &before);
     git(&dependent, &["status", "--porcelain"]);
 }
+
+#[cfg(unix)]
+#[test]
+fn picker_lists_checkout_roots_without_inspecting_them() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.primary.join("src/a/b/c")).unwrap();
+    let nested = fixture.primary.join("vendor/nested");
+    fs::create_dir_all(&nested).unwrap();
+    git(&nested, &["init", "-q"]);
+    git(&nested, &["remote", "add", "origin", "file:///nested"]);
+    let bin = fixture.temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    script(
+        &bin.join("git"),
+        "#!/bin/sh\nprintf '%s %s %s\\n' \"$2\" \"$3\" \"$4\" >> \"$CALLS\"\nexec \"$REAL_GIT\" \"$@\"\n",
+    );
+    script(&bin.join("fzf"), "#!/bin/sh\ncat > \"$LABELS\"\n");
+    let calls = fixture.temp.path().join("calls");
+    let labels = fixture.temp.path().join("labels");
+    let before = fs::read(&fixture.config).unwrap();
+    let output = support::lager_with_path(&fixture.home, &fixture.config, Some(&bin))
+        .args(["remove", "--yes", "--force", "--unregister"])
+        .env("REAL_GIT", support::real_tool("git"))
+        .env("CALLS", &calls)
+        .env("LABELS", &labels)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let primary = fs::canonicalize(&fixture.primary).unwrap();
+    assert_eq!(
+        fs::read_to_string(&calls).unwrap(),
+        format!("{} remote get-url\n", primary.display())
+    );
+    let labels = fs::read_to_string(&labels).unwrap();
+    assert_eq!(labels.lines().count(), 1, "{labels}");
+    assert!(labels.contains("primary"), "{labels}");
+    assert_eq!(fs::read(&fixture.config).unwrap(), before);
+    assert!(nested.join(".git").is_dir());
+}

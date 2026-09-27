@@ -189,13 +189,11 @@ where
         .canonicalize(&root)
         .map_err(|error| error.to_string())?;
     let directories = filesystem
-        .discover_directories(&root)
+        .discover_checkouts(&root)
         .map_err(|error| error.to_string())?;
     let mut candidates = Vec::new();
     for directory in directories {
-        if filesystem.is_symlink(&directory).unwrap_or(true)
-            || filesystem.contains_symlink(&directory).unwrap_or(true)
-        {
+        if filesystem.is_symlink(&directory).unwrap_or(true) {
             continue;
         }
         let Ok(canonical) = filesystem.canonicalize(&directory) else {
@@ -207,9 +205,6 @@ where
         let Ok(identity) = git.origin_identity(&canonical) else {
             continue;
         };
-        if git.inspect_removal(&canonical, &identity).is_err() {
-            continue;
-        }
         let Ok(reference) = RepositoryRef::parse(&identity) else {
             continue;
         };
@@ -1820,7 +1815,7 @@ mod tests {
         fn remove_dir_all(&self, _path: &Path) -> Result<(), Self::Error> {
             panic!("unreadable paths must not be removed")
         }
-        fn discover_directories(&self, _root: &Path) -> Result<Vec<PathBuf>, Self::Error> {
+        fn discover_checkouts(&self, _root: &Path) -> Result<Vec<PathBuf>, Self::Error> {
             Ok(Vec::new())
         }
     }
@@ -1846,7 +1841,7 @@ mod tests {
             std::fs::remove_file(path.join("sentinel"))?;
             Err(std::io::Error::other("simulated partial removal"))
         }
-        fn discover_directories(&self, _root: &Path) -> Result<Vec<PathBuf>, Self::Error> {
+        fn discover_checkouts(&self, _root: &Path) -> Result<Vec<PathBuf>, Self::Error> {
             Ok(Vec::new())
         }
     }
