@@ -307,12 +307,11 @@ impl Bindings {
             .unwrap_or_default()
     }
 
-    pub(super) fn help(&self, mode: Mode) -> Vec<String> {
+    pub(super) fn keys(&self, mode: Mode, action: Action) -> Vec<&str> {
         self.0[&mode]
-            .iter()
-            .filter(|(action, keys)| action.available(mode) && !keys.is_empty())
-            .map(|(action, _)| format!("{} {}", self.hint(mode, *action), action.name()))
-            .collect()
+            .get(&action)
+            .map(|keys| keys.iter().map(|(_, label)| label.as_str()).collect())
+            .unwrap_or_default()
     }
 }
 

@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::io::{self, IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -9,10 +10,12 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, HighlightSpacing, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{
+    Block, Cell, Clear, HighlightSpacing, Paragraph, Row, Table, TableState, Wrap,
+};
 
 use crate::application::inventory::{
     self as model, InventoryFilesystem, InventoryReport, LocalScan,
@@ -138,14 +141,13 @@ impl InventorySession {
     /// for every terminal frame. Refreshing and receiving an event invalidate this cache.
     fn report(&mut self) -> Result<InventoryReport, String> {
         if self.cached_report.is_none() {
-            let mut report = model::build_inventory(
+            let report = model::build_inventory(
                 &LocalInventoryFilesystem,
                 &self.config,
                 &self.config_path,
                 &self.home,
                 self.scan.clone(),
             )?;
-            report.observation_generation = self.generation;
             self.cached_report = Some(report);
         }
         Ok(self
@@ -376,11 +378,20 @@ impl TerminalSession {
     }
 
     fn draw_loading(&mut self) -> Result<(), String> {
-        self.terminal.draw(|frame| {
-            let area = frame.area();
-            frame.render_widget(Paragraph::new("Scanning repository roots…\nGit status appears as observations complete. Remote discovery is unavailable.")
-                .block(Block::default().title("LAGER / inventory").borders(Borders::ALL)).wrap(Wrap { trim: false }), area);
-        }).map(|_| ()).map_err(|error| error.to_string())
+        self.terminal
+            .draw(|frame| {
+                let [header, body] =
+                    Layout::vertical([Constraint::Length(1), Constraint::Min(0)])
+                        .areas(frame.area());
+                frame.render_widget(bar("LAGER / inventory", "", header.width), header);
+                frame.render_widget(
+                    Paragraph::new("Scanning repository roots…\nGit status appears as observations complete. Remote discovery is unavailable.")
+                        .wrap(Wrap { trim: false }),
+                    body.inner(Margin { horizontal: 2, vertical: 1 }),
+                );
+            })
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     fn run(
@@ -514,7 +525,13 @@ impl TerminalSession {
                             Some(Action::Down) if selection.inspection => {
                                 let limit = selection
                                     .inspected_row(&visible_rows)
-                                    .map(|row| self.inspection_scroll_limit(row, &session.bindings))
+                                    .map(|row| {
+                                        self.inspection_scroll_limit(
+                                            row,
+                                            &report.rows,
+                                            &session.home,
+                                        )
+                                    })
                                     .unwrap_or(0);
                                 selection.inspection_scroll =
                                     selection.inspection_scroll.saturating_add(1).min(limit);
@@ -526,7 +543,13 @@ impl TerminalSession {
                             Some(Action::PageDown) if selection.inspection => {
                                 let limit = selection
                                     .inspected_row(&visible_rows)
-                                    .map(|row| self.inspection_scroll_limit(row, &session.bindings))
+                                    .map(|row| {
+                                        self.inspection_scroll_limit(
+                                            row,
+                                            &report.rows,
+                                            &session.home,
+                                        )
+                                    })
                                     .unwrap_or(0);
                                 selection.inspection_scroll =
                                     selection.inspection_scroll.saturating_add(10).min(limit);
@@ -556,48 +579,48 @@ impl TerminalSession {
         }
     }
 
-    fn help_scroll_limit(&self, session: &InventorySession, mode: Mode) -> u16 {
+    fn area(&self) -> Rect {
         self.terminal
             .size()
-            .map(|size| {
-                let width = size.width.saturating_sub(2);
-                let hints = hint_widget(&session.bindings, Mode::Inspection, width);
-                let viewport = size
-                    .height
-                    .saturating_sub(3 + hints.line_count(width) as u16)
-                    .max(1);
-                help_widget(&session.bindings, mode)
-                    .line_count(width)
-                    .saturating_sub(usize::from(viewport))
-                    .min(usize::from(u16::MAX)) as u16
-            })
-            .unwrap_or(0)
-    }
-
-    fn inspection_scroll_limit(&self, row: &model::InventoryRow, bindings: &Bindings) -> u16 {
-        let area = self
-            .terminal
-            .size()
             .map(|size| Rect::new(0, 0, size.width, size.height))
             .unwrap_or_default()
-            .inner(Margin {
-                horizontal: 1,
-                vertical: 1,
-            });
-        inspection_scroll_limit(row, inspection_popup_area(area), bindings)
     }
 
-    fn menu_scroll_metrics(&self, bindings: &Bindings) -> (u16, u16) {
-        let area = self
-            .terminal
-            .size()
-            .map(|size| Rect::new(0, 0, size.width, size.height))
-            .unwrap_or_default()
-            .inner(Margin {
-                horizontal: 1,
-                vertical: 1,
-            });
-        menu_scroll_metrics(inspection_popup_area(area), bindings)
+    fn help_scroll_limit(&self, session: &InventorySession, mode: Mode) -> u16 {
+        popup_scroll_limit(
+            self.area(),
+            WIDE_POPUP,
+            &help_widget(&session.bindings, mode),
+        )
+    }
+
+    fn inspection_scroll_limit(
+        &self,
+        row: &model::InventoryRow,
+        rows: &[model::InventoryRow],
+        home: &Path,
+    ) -> u16 {
+        let area = self.area();
+        popup_scroll_limit(
+            area,
+            WIDE_POPUP,
+            &inspection_widget(
+                row,
+                short_names(rows).remove(&row.key).unwrap_or_default(),
+                rows,
+                home,
+                popup_body_width(area, WIDE_POPUP),
+            ),
+        )
+    }
+
+    fn menu_scroll_metrics(&self, session: &InventorySession, selection: &Selection) -> (u16, u16) {
+        let [_, _, body, _] = popup_regions(self.area(), POPUP, &menu_widget(selection, session));
+        let viewport = body.height.max(1);
+        (
+            (root_menu_actions().len() as u16).saturating_sub(viewport),
+            viewport,
+        )
     }
 
     fn draw_report(
@@ -614,58 +637,92 @@ impl TerminalSession {
         if let Some(row) = selection.inspected_row(visible_rows) {
             selection.inspection_scroll = selection
                 .inspection_scroll
-                .min(self.inspection_scroll_limit(row, &session.bindings));
+                .min(self.inspection_scroll_limit(row, &report.rows, &session.home));
         }
-        let (menu_limit, menu_viewport) = self.menu_scroll_metrics(&session.bindings);
+        let (menu_limit, menu_viewport) = self.menu_scroll_metrics(session, selection);
         selection.clamp_menu_scroll(menu_limit, menu_viewport);
-        let (mut header, mut summary) = report_lines(
+        let bindings = &session.bindings;
+        let view = if selection.help {
+            View::Help
+        } else if selection.inspection {
+            View::Inspect
+        } else if selection.menu {
+            View::Menu
+        } else if selection.search {
+            View::Search
+        } else {
+            View::Normal
+        };
+        let compact = self.area().width < WIDE_TABLE;
+        let status = status_lines(
             report,
             complete,
-            visible_rows.len(),
-            selection.search,
-            &selection.query,
+            session.notice.as_deref(),
+            view,
+            compact,
+            bindings,
         );
-        header.truncate(1);
-        summary.pop();
-        if let Some(notice) = &session.notice {
-            summary.push(Line::raw(notice.clone()));
-        }
-        let mode = if selection.search {
-            Mode::Search
-        } else {
-            Mode::Normal
-        };
-        summary.push(Line::raw("remote unavailable"));
-        self.terminal
+        let home = session.home.as_path();
+        let names = short_names(&report.rows);
+        let shown = &*selection;
+        let mut table_state = shown.table.clone();
+        let result = self
+            .terminal
             .draw(|frame| {
                 let area = frame.area();
-                frame.render_widget(
-                    Block::default()
-                        .title("LAGER / inventory")
-                        .borders(Borders::ALL),
-                    area,
-                );
-                let inner = area.inner(Margin {
-                    horizontal: 1,
-                    vertical: 1,
-                });
-                let hints = hint_widget(&session.bindings, mode, inner.width);
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
+                let footer = footer_widget(bindings, view);
+                let footer_height = footer.line_count(area.width.saturating_sub(4)) as u16;
+                let [header, source, search, _, table, status_area, footer_area] =
+                    Layout::vertical([
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
                         Constraint::Length(1),
                         Constraint::Min(1),
-                        Constraint::Length(summary.len() as u16),
-                        Constraint::Length(hints.line_count(inner.width) as u16),
+                        Constraint::Length(status.len() as u16),
+                        Constraint::Length(footer_height),
                     ])
-                    .split(inner);
+                    .areas(area);
                 frame.render_widget(
-                    Paragraph::new(header).style(Style::default().fg(Color::Reset)),
-                    chunks[0],
+                    bar(
+                        "LAGER / inventory",
+                        &format!(
+                            "{} · {} {}",
+                            view.label(),
+                            visible_rows.len(),
+                            if visible_rows.len() == 1 { "row" } else { "rows" }
+                        ),
+                        header.width,
+                    ),
+                    header,
+                );
+                frame.render_widget(
+                    Paragraph::new("Local + declarations · remote off").style(dim()),
+                    padded(source),
+                );
+                let query = escape(&shown.query);
+                let editing = view == View::Search;
+                let mut query_line = vec![Span::raw("/ ")];
+                if editing {
+                    query_line.extend([Span::raw(query), Span::raw("█")]);
+                } else if query.is_empty() {
+                    query_line.push(Span::styled("Search repositories, paths, origins…", dim()));
+                } else {
+                    query_line.push(Span::raw(query));
+                }
+                let search_style = match (editing, no_color()) {
+                    (false, _) => Style::default(),
+                    (true, true) => Style::default().add_modifier(Modifier::BOLD),
+                    (true, false) => Style::default().add_modifier(Modifier::REVERSED),
+                };
+                frame.render_widget(Paragraph::new("").style(search_style), search);
+                frame.render_widget(
+                    Paragraph::new(Line::from(query_line)).style(search_style),
+                    padded(search),
                 );
                 if visible_rows.is_empty() {
                     frame.render_widget(
-                        Paragraph::new(if !report.rows.is_empty() && !selection.query.is_empty() {
+                        Paragraph::new(if !report.rows.is_empty() && !shown.query.is_empty() {
                             "No matching repositories."
                         } else if !complete {
                             "Discovering local repositories…"
@@ -674,314 +731,285 @@ impl TerminalSession {
                         } else {
                             "No repositories found."
                         }),
-                        chunks[1],
+                        padded(table),
                     );
                 } else {
                     frame.render_stateful_widget(
-                        repository_table(visible_rows, chunks[1].width),
-                        chunks[1],
-                        &mut selection.table,
+                        repository_table(
+                            visible_rows,
+                            &names,
+                            home,
+                            table.width,
+                            table_state.selected(),
+                        ),
+                        table,
+                        &mut table_state,
                     );
                 }
-                frame.render_widget(
-                    Paragraph::new(summary).style(Style::default().fg(Color::Reset)),
-                    chunks[2],
-                );
-                frame.render_widget(hints, chunks[3]);
-                if selection.help {
-                    let help = help_widget(&session.bindings, selection.help_mode);
-                    let hints = hint_widget(&session.bindings, Mode::Inspection, inner.width);
-                    frame.render_widget(ratatui::widgets::Clear, inner);
-                    let help_chunks = Layout::vertical([
-                        Constraint::Length(1),
-                        Constraint::Min(1),
-                        Constraint::Length(hints.line_count(inner.width) as u16),
-                    ])
-                    .split(inner);
-                    frame.render_widget(Paragraph::new("HELP / inventory"), help_chunks[0]);
-                    frame.render_widget(help.scroll((selection.help_scroll, 0)), help_chunks[1]);
-                    frame.render_widget(hints, help_chunks[2]);
-                } else if selection.inspection {
-                    if let Some(row) = selection.inspected_row(visible_rows) {
-                        draw_inspection(frame, inner, row, selection.inspection_scroll, session);
-                    } else {
-                        draw_unavailable_inspection(frame, inner, session);
+                frame.render_widget(Paragraph::new(status.clone()), padded(status_area));
+                frame.render_widget(Paragraph::new("").style(footer_style()), footer_area);
+                frame.render_widget(footer.style(footer_style()), padded(footer_area));
+                match view {
+                    View::Help => draw_popup(
+                        frame,
+                        WIDE_POPUP,
+                        "Keyboard / effective bindings",
+                        help_widget(bindings, shown.help_mode).scroll((shown.help_scroll, 0)),
+                        bindings
+                            .keys(Mode::Inspection, Action::Cancel)
+                            .first()
+                            .map(|key| format!("{key} close"))
+                            .unwrap_or_default(),
+                    ),
+                    View::Inspect => {
+                        let footer = format!(
+                            "{} scroll · {}",
+                            rows_hint(bindings, Mode::Inspection, true),
+                            first_key_hint(bindings, Mode::Inspection, Action::Cancel, "close")
+                        );
+                        match shown.inspected_row(visible_rows) {
+                            Some(row) => draw_popup(
+                                frame,
+                                WIDE_POPUP,
+                                &format!("Inspect / {}", names[&row.key]),
+                                inspection_widget(
+                                    row,
+                                    names[&row.key].clone(),
+                                    &report.rows,
+                                    home,
+                                    popup_body_width(area, WIDE_POPUP),
+                                )
+                                .scroll((shown.inspection_scroll, 0)),
+                                footer,
+                            ),
+                            None => draw_popup(
+                                frame,
+                                WIDE_POPUP,
+                                "Inspect / unavailable",
+                                Paragraph::new(
+                                    "Inspected target is unavailable or stale. Close this popup and inspect a current row.",
+                                )
+                                .wrap(Wrap { trim: false }),
+                                footer,
+                            ),
+                        }
                     }
-                } else if selection.menu {
-                    draw_root_menu(frame, inner, selection, session);
+                    View::Menu => draw_popup(
+                        frame,
+                        POPUP,
+                        "Menu / actions",
+                        menu_widget(shown, session).scroll((shown.menu_scroll, 0)),
+                        format!(
+                            "{} select · {} · {}",
+                            rows_hint(bindings, Mode::Menu, true),
+                            first_key_hint(bindings, Mode::Menu, Action::Accept, "choose"),
+                            first_key_hint(bindings, Mode::Menu, Action::Cancel, "back")
+                        ),
+                    ),
+                    View::Normal | View::Search => {}
                 }
             })
             .map(|_| ())
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string());
+        selection.table = table_state;
+        result
     }
 }
 
-fn inspection_popup_area(area: Rect) -> Rect {
-    let width = area.width.saturating_sub(4).clamp(1, 100);
-    let height = area.height.saturating_sub(4).clamp(1, 20);
-    Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    )
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    Normal,
+    Search,
+    Inspect,
+    Menu,
+    Help,
 }
 
-fn inspection_lines(row: &model::InventoryRow) -> Vec<Line<'static>> {
-    let mut lines = [
-        ("Repository", escape(&row.repository)),
-        ("Path", escape(&row.path)),
-        ("Registration", escape(row.registration.label())),
-        ("Checkout", escape(row.checkout.label())),
-        ("Origin", escape(&row.origin)),
-        ("Branch", escape(row.branch.label())),
-        ("Changes", escape(row.changes.label())),
-    ]
-    .into_iter()
-    .map(|(name, value)| Line::raw(format!("{name}: {value}")))
-    .collect::<Vec<_>>();
-    if let Some(declaration) = &row.declaration {
-        lines.push(Line::raw(format!("Declaration: {}", escape(declaration))));
+impl View {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "NORMAL",
+            Self::Search => "SEARCH",
+            Self::Inspect => "INSPECT",
+            Self::Menu => "MENU",
+            Self::Help => "HELP",
+        }
     }
-    if let Some(path) = &row.configured_destination {
-        lines.push(Line::raw(format!(
-            "Configured path: {}",
-            escape(path.to_string_lossy())
-        )));
-    }
-    if let Some(path) = &row.observed_path {
-        lines.push(Line::raw(format!(
-            "Found path: {}",
-            escape(path.to_string_lossy())
-        )));
-    }
-    lines.push(Line::raw(if row.markable {
-        "Mark: unavailable (marking is not implemented)".to_owned()
+}
+
+const POPUP: u16 = 66;
+const WIDE_POPUP: u16 = 100;
+/// Terminal width at which the table shows all seven columns of the wide grid.
+const WIDE_TABLE: u16 = 132;
+/// Reserved for the mark column; the repository text starts after it on every row.
+const MARK_SLOT: usize = 4;
+const INSPECT_KEY_COLUMN: usize = 19;
+
+fn no_color() -> bool {
+    std::env::var_os("NO_COLOR").is_some()
+}
+
+/// Colors are terminal-relative ANSI colors so the terminal theme decides light or dark.
+fn tint(color: Color) -> Style {
+    if no_color() {
+        Style::default()
     } else {
-        "Mark: unavailable (declaration patterns cannot be marked)".to_owned()
-    }));
-    lines.extend([
-        Line::raw("Add/register/unregister/clone/remove: unavailable (read-only inventory)"),
-        Line::raw("Copy/open: unavailable (desktop actions are not implemented)"),
-        Line::raw("Remote discovery: unavailable (offline inventory)"),
-    ]);
-    if !row.warnings.is_empty() {
-        lines.push(Line::raw("Warnings:"));
-        lines.extend(
-            row.warnings
-                .iter()
-                .map(|warning| Line::raw(format!("- {}", escape(warning)))),
-        );
+        Style::default().fg(color)
     }
-    lines
 }
 
-fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
-    Paragraph::new(bindings.help(mode).join("\n")).wrap(Wrap { trim: false })
+fn dim() -> Style {
+    Style::default().add_modifier(Modifier::DIM)
 }
 
-fn hint_widget(bindings: &Bindings, mode: Mode, width: u16) -> Paragraph<'static> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for hint in bindings.help(mode) {
-        if !line.is_empty() && Line::raw(format!("{line} · {hint}")).width() > usize::from(width) {
-            lines.push(Line::raw(std::mem::take(&mut line)));
-        }
-        if !line.is_empty() {
-            line.push_str(" · ");
-        }
-        line.push_str(&hint);
+fn warn() -> Style {
+    tint(Color::Yellow)
+}
+
+fn focus() -> Style {
+    tint(Color::Green)
+}
+
+/// Bars take reverse video only with color; without color reverse video marks the selection alone.
+fn bar_style() -> Style {
+    if no_color() {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
     }
-    if !line.is_empty() {
-        lines.push(Line::raw(line));
+}
+
+fn footer_style() -> Style {
+    if no_color() {
+        Style::default()
+    } else {
+        Style::default().add_modifier(Modifier::REVERSED)
     }
-    Paragraph::new(lines)
-        .style(Style::default().fg(Color::Reset))
-        .wrap(Wrap { trim: false })
 }
 
-fn popup_regions(content: Rect, bindings: &Bindings, mode: Mode) -> [Rect; 2] {
-    let height = hint_widget(bindings, mode, content.width).line_count(content.width) as u16;
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(height)]).split(content);
-    [chunks[0], chunks[1]]
+fn padded(area: Rect) -> Rect {
+    area.inner(Margin {
+        horizontal: 2,
+        vertical: 0,
+    })
 }
 
-fn inspection_scroll_limit(row: &model::InventoryRow, area: Rect, bindings: &Bindings) -> u16 {
-    let [content, _] = popup_regions(
-        area.inner(Margin {
-            horizontal: 1,
-            vertical: 1,
-        }),
-        bindings,
-        Mode::Inspection,
-    );
-    let required = Paragraph::new(inspection_lines(row))
-        .wrap(Wrap { trim: false })
-        .line_count(content.width);
-    let viewport = usize::from(content.height.max(1));
-    required.saturating_sub(viewport).min(usize::from(u16::MAX)) as u16
+fn bar(left: &str, right: &str, width: u16) -> Paragraph<'static> {
+    let gap = usize::from(width)
+        .saturating_sub(4 + Line::raw(left).width() + Line::raw(right).width())
+        .max(1);
+    Paragraph::new(format!("  {left}{}{right}  ", " ".repeat(gap))).style(bar_style())
 }
 
-fn root_menu_actions() -> &'static [Action] {
-    &[
-        Action::Inspect,
-        Action::Search,
-        Action::ClearSearch,
-        Action::Refresh,
-        Action::Help,
-        Action::Quit,
-    ]
-}
-
-fn menu_scroll_metrics(popup: Rect, bindings: &Bindings) -> (u16, u16) {
-    let [content, _] = popup_regions(
-        popup.inner(Margin {
-            horizontal: 1,
-            vertical: 1,
-        }),
-        bindings,
-        Mode::Menu,
-    );
-    let viewport = content.height.max(1);
-    (
-        (root_menu_actions().len() as u16).saturating_sub(viewport),
-        viewport,
-    )
-}
-
-fn draw_root_menu(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    selection: &Selection,
-    session: &InventorySession,
-) {
-    let popup = inspection_popup_area(area);
-    let block = Block::default()
-        .title("MENU / actions")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-    let content = block.inner(popup);
-    let chunks = popup_regions(content, &session.bindings, Mode::Menu);
-    let items = root_menu_actions()
-        .iter()
-        .enumerate()
-        .map(|(index, action)| {
-            let style = if index == selection.menu_index {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            let hint = session.bindings.hint(Mode::Menu, *action);
-            Line::from(Span::styled(
-                if hint.is_empty() {
-                    action.name().to_owned()
-                } else {
-                    format!("{hint} {}", action.name())
-                },
-                style,
-            ))
+/// Pairs the n-th key of `first` with the n-th key of `second`, as in `j/k ↑/↓`.
+fn paired_keys(first: &[&str], second: &[&str]) -> String {
+    (0..first.len().max(second.len()))
+        .map(|index| match (first.get(index), second.get(index)) {
+            (Some(&"Down"), Some(&"Up")) => "↑/↓".to_owned(),
+            (Some(a), Some(b)) => format!("{a}/{b}"),
+            (Some(key), None) | (None, Some(key)) => (*key).to_owned(),
+            (None, None) => String::new(),
         })
-        .collect::<Vec<_>>();
-    frame.render_widget(ratatui::widgets::Clear, popup);
-    frame.render_widget(block, popup);
-    frame.render_widget(
-        Paragraph::new(items).scroll((selection.menu_scroll, 0)),
-        chunks[0],
-    );
-    frame.render_widget(
-        hint_widget(&session.bindings, Mode::Menu, chunks[1].width),
-        chunks[1],
-    );
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-fn draw_unavailable_inspection(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    session: &InventorySession,
-) {
-    let popup = inspection_popup_area(area);
-    let block = Block::default()
-        .title("INSPECT / unavailable")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
-    let content = block.inner(popup);
-    let chunks = popup_regions(content, &session.bindings, Mode::Inspection);
-    frame.render_widget(ratatui::widgets::Clear, popup);
-    frame.render_widget(block, popup);
-    frame.render_widget(
-        Paragraph::new(
-            "Inspected target is unavailable or stale. Close this popup and inspect a current row.",
-        )
-        .wrap(Wrap { trim: false }),
-        chunks[0],
-    );
-    frame.render_widget(
-        hint_widget(&session.bindings, Mode::Inspection, chunks[1].width),
-        chunks[1],
-    );
-}
-
-fn draw_inspection(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    row: &model::InventoryRow,
-    scroll: u16,
-    session: &InventorySession,
-) {
-    let popup = inspection_popup_area(area);
-    let block = Block::default()
-        .title(format!("INSPECT / {}", escape(&row.repository)))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-    let content = block.inner(popup);
-    let chunks = popup_regions(content, &session.bindings, Mode::Inspection);
-    frame.render_widget(ratatui::widgets::Clear, popup);
-    frame.render_widget(block, popup);
-    frame.render_widget(
-        Paragraph::new(inspection_lines(row))
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
-        chunks[0],
-    );
-    frame.render_widget(
-        hint_widget(&session.bindings, Mode::Inspection, chunks[1].width),
-        chunks[1],
-    );
-}
-
-impl Drop for TerminalSession {
-    fn drop(&mut self) {
-        let _ = self.terminal.show_cursor();
-        self.restore.restore();
+fn rows_hint(bindings: &Bindings, mode: Mode, arrows: bool) -> String {
+    let down = bindings.keys(mode, Action::Down);
+    let up = bindings.keys(mode, Action::Up);
+    let mut hint = [down.first(), up.first()]
+        .into_iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>()
+        .join("/");
+    if arrows && down.contains(&"Down") && up.contains(&"Up") && down.first() != Some(&"Down") {
+        hint.push_str(" ↑/↓");
     }
+    hint
 }
 
-fn report_lines(
+fn first_key_hint(bindings: &Bindings, mode: Mode, action: Action, label: &str) -> String {
+    bindings
+        .keys(mode, action)
+        .first()
+        .map(|key| format!("{key} {label}"))
+        .unwrap_or_default()
+}
+
+fn footer_widget(bindings: &Bindings, view: View) -> Paragraph<'static> {
+    let first = |mode: Mode, action: Action| {
+        bindings
+            .keys(mode, action)
+            .first()
+            .map(|key| (*key).to_owned())
+            .unwrap_or_default()
+    };
+    let items = match view {
+        View::Search => vec![
+            (first(Mode::Search, Action::Accept), "accept"),
+            (first(Mode::Search, Action::Cancel), "cancel"),
+            ("Backspace".to_owned(), "delete"),
+        ],
+        View::Menu => vec![
+            (rows_hint(bindings, Mode::Menu, false), "select"),
+            (first(Mode::Menu, Action::Accept), "choose"),
+            (first(Mode::Menu, Action::Cancel), "back"),
+        ],
+        View::Help => vec![
+            (rows_hint(bindings, Mode::Inspection, false), "scroll"),
+            (first(Mode::Inspection, Action::Cancel), "close"),
+        ],
+        View::Normal | View::Inspect => {
+            let mut items = vec![(rows_hint(bindings, Mode::Normal, false), "rows")];
+            items.extend(
+                [
+                    (Action::Search, "search"),
+                    (Action::Inspect, "inspect"),
+                    (Action::Refresh, "refresh"),
+                    (Action::Menu, "menu"),
+                    (Action::Help, "help"),
+                    (Action::Quit, "quit"),
+                ]
+                .map(|(action, label)| (first(Mode::Normal, action), label)),
+            );
+            items
+        }
+    };
+    let mut spans = Vec::new();
+    for (keys, label) in items.into_iter().filter(|(keys, _)| !keys.is_empty()) {
+        if !spans.is_empty() {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            keys,
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(format!(" {label}")));
+    }
+    Paragraph::new(Line::from(spans)).wrap(Wrap { trim: true })
+}
+
+fn status_lines(
     report: &InventoryReport,
     complete: bool,
-    visible_count: usize,
-    search: bool,
-    query: &str,
-) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
-    let header = vec![Line::from(vec![
-        Span::styled(
-            if search { "SEARCH" } else { "NORMAL" },
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(
-            " / {} · {} rows · generation {} · {}",
-            escape(query),
-            visible_count,
-            report.observation_generation,
-            escape(&report.config_revision)
-        )),
-    ])];
-    let mut summary = Vec::new();
+    notice: Option<&str>,
+    view: View,
+    compact: bool,
+    bindings: &Bindings,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if let Some(notice) = notice {
+        lines.push(Line::styled(format!("! {notice}"), warn()));
+    }
     if report.incomplete {
-        summary.push(Line::raw(format!(
-            "partial scan: {} diagnostics; one or more paths could not be read",
-            report.diagnostics.len()
-        )));
+        lines.push(Line::styled(
+            format!(
+                "! partial scan: {} diagnostics; one or more paths could not be read",
+                report.diagnostics.len()
+            ),
+            warn(),
+        ));
     }
     let excluded = report
         .diagnostics
@@ -1002,26 +1030,522 @@ fn report_lines(
         })
         .collect::<Vec<_>>();
     if !excluded.is_empty() {
-        summary.push(Line::raw(format!(
-            "ignored repositories: {}",
-            excluded.join(", ")
-        )));
+        lines.push(Line::styled(
+            format!("ignored repositories: {}", excluded.join(", ")),
+            dim(),
+        ));
     } else if let Some(diagnostic) = report.diagnostics.first() {
-        summary.push(Line::raw(format!(
-            "diagnostic: {}: {}",
-            escape(diagnostic.path.to_string_lossy()),
-            escape(&diagnostic.message)
-        )));
+        lines.push(Line::styled(
+            format!(
+                "diagnostic: {}: {}",
+                escape(diagnostic.path.to_string_lossy()),
+                escape(&diagnostic.message)
+            ),
+            dim(),
+        ));
     }
-    if !complete {
-        summary.push(Line::raw("loading local discovery and observations…"));
-    } else if !report.incomplete {
-        summary.push(Line::raw("local scan complete"));
+    let state = if complete {
+        "No active operation"
+    } else {
+        "Scanning local repositories…"
+    };
+    let refresh = first_key_hint(
+        bindings,
+        Mode::Normal,
+        Action::Refresh,
+        "refreshes local/config state only",
+    );
+    let inspect = bindings.keys(Mode::Normal, Action::Inspect);
+    let operation = match view {
+        View::Search => format!(
+            "{} / {} retain filter · action letters are text",
+            bindings.hint(Mode::Search, Action::Accept),
+            bindings.hint(Mode::Search, Action::Cancel)
+        ),
+        View::Menu | View::Help => state.to_owned(),
+        View::Normal | View::Inspect if compact && complete && !inspect.is_empty() => {
+            format!("Path and origin: {} inspects the full value", inspect[0])
+        }
+        View::Normal | View::Inspect if refresh.is_empty() => state.to_owned(),
+        View::Normal | View::Inspect => format!("{state} · {refresh}"),
+    };
+    lines.push(Line::styled(operation, dim()));
+    lines
+}
+
+/// Returns the popup, its title row, body and footer row. The popup fits its body up to the
+/// screen height, so scroll limits and drawing share this one calculation.
+fn popup_regions(area: Rect, cap: u16, body: &Paragraph) -> [Rect; 4] {
+    let width = area.width.saturating_sub(2).min(cap);
+    let lines = body
+        .line_count(width.saturating_sub(6))
+        .min(usize::from(u16::MAX)) as u16;
+    let height = lines.saturating_add(5).min(area.height.saturating_sub(2));
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let [title, _, content, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(popup.inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    }));
+    [popup, title, padded(content), padded(footer)]
+}
+
+fn popup_body_width(area: Rect, cap: u16) -> u16 {
+    area.width.saturating_sub(2).min(cap).saturating_sub(6)
+}
+
+fn popup_scroll_limit(area: Rect, cap: u16, body: &Paragraph) -> u16 {
+    let [_, _, content, _] = popup_regions(area, cap, body);
+    body.line_count(content.width)
+        .saturating_sub(usize::from(content.height.max(1)))
+        .min(usize::from(u16::MAX)) as u16
+}
+
+fn draw_popup(
+    frame: &mut ratatui::Frame<'_>,
+    cap: u16,
+    title: &str,
+    body: Paragraph<'static>,
+    footer: String,
+) {
+    let [popup, title_area, content, footer_area] = popup_regions(frame.area(), cap, &body);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(Block::bordered().border_style(focus()), popup);
+    frame.render_widget(bar(title, "lager", title_area.width), title_area);
+    frame.render_widget(body, content);
+    frame.render_widget(Paragraph::new(footer).style(dim()), footer_area);
+}
+
+fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
+    use Action::*;
+    let keys = |action| bindings.keys(mode, action);
+    let pair = |first, second| paired_keys(&keys(first), &keys(second));
+    let single = |action| keys(action).join("/");
+    let help_quit = || {
+        [single(Help), single(Quit)]
+            .into_iter()
+            .filter(|keys| !keys.is_empty())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    };
+    let entries: Vec<(String, &str)> = match mode {
+        Mode::Normal => vec![
+            (pair(Down, Up), "previous / next row"),
+            (single(Search), "live fuzzy search"),
+            (single(ClearSearch), "clear filter"),
+            (single(Inspect), "Inspect repository"),
+            (single(Refresh), "refresh local/config state"),
+            (single(Menu), "all actions"),
+            (help_quit(), "help / quit"),
+        ],
+        Mode::Menu => vec![
+            (pair(Down, Up), "previous / next entry"),
+            (pair(PageUp, PageDown), "page up / down"),
+            (single(Accept), "choose"),
+            (single(Cancel), "back"),
+            (single(Search), "live fuzzy search"),
+            (single(ClearSearch), "clear filter"),
+            (single(Inspect), "Inspect repository"),
+            (single(Refresh), "refresh local/config state"),
+            (help_quit(), "help / quit"),
+        ],
+        Mode::Search => vec![
+            (pair(Accept, Cancel).replace('/', " / "), "keep the filter"),
+            (help_quit(), "help / quit"),
+        ],
+        Mode::Inspection | Mode::Input | Mode::Confirmation => vec![
+            (pair(Down, Up), "scroll"),
+            (pair(PageUp, PageDown), "page up / down"),
+            (single(Accept), "close"),
+            (single(Cancel), "close"),
+            (help_quit(), "help / quit"),
+        ],
+    };
+    let entries = entries
+        .into_iter()
+        .filter(|(keys, _)| !keys.is_empty())
+        .collect::<Vec<_>>();
+    let column = entries
+        .iter()
+        .map(|(keys, _)| Line::raw(keys.clone()).width())
+        .max()
+        .unwrap_or(0)
+        .clamp(12, 24)
+        + 2;
+    let title = match mode {
+        Mode::Normal => "Normal mode",
+        Mode::Menu => "Menu mode",
+        Mode::Search => "Search mode",
+        Mode::Input => "Input mode",
+        Mode::Confirmation => "Confirmation mode",
+        Mode::Inspection => "Inspect mode",
+    };
+    let mut lines = vec![Line::styled(title, dim())];
+    lines.extend(entries.into_iter().map(|(keys, description)| {
+        let padding = column
+            .saturating_sub(Line::raw(keys.clone()).width())
+            .max(1);
+        Line::from(vec![
+            Span::styled(keys, focus()),
+            Span::raw(format!("{}{description}", " ".repeat(padding))),
+        ])
+    }));
+    Paragraph::new(lines).wrap(Wrap { trim: false })
+}
+
+fn identity(row: &model::InventoryRow) -> Option<&str> {
+    match &row.key {
+        model::RowKey::Checkout { identity, .. }
+        | model::RowKey::Declaration { identity, .. }
+        | model::RowKey::Pattern(identity) => Some(identity),
+        model::RowKey::Path(_) => None,
     }
-    summary.push(Line::raw(
-        "q quit · Esc quit · R refresh local/config · remote unavailable",
-    ));
-    (header, summary)
+}
+
+/// The last `depth` segments of `group`, or all of it when it has no more.
+fn trailing(group: &str, separator: char, depth: usize) -> &str {
+    group
+        .rmatch_indices(separator)
+        .nth(depth - 1)
+        .map(|(index, _)| &group[index + 1..])
+        .filter(|name| !name.is_empty())
+        .unwrap_or(group)
+}
+
+/// Names every row for the table: the last identity segment (`owner/*` for patterns, the
+/// directory for path-identified checkouts), widened to `owner/name` when another repository
+/// shares that last segment, then one leading segment at a time while another repository of
+/// the same kind (identity, pattern or path) still shares the name. A checkout reads
+/// `name (copy)`, `name (copy 2)`, … when its identity already has a cloned declaration or a
+/// checkout at an earlier path.
+fn short_names(rows: &[model::InventoryRow]) -> HashMap<model::RowKey, String> {
+    let groups = rows
+        .iter()
+        .map(|row| match &row.key {
+            model::RowKey::Checkout { identity, .. }
+            | model::RowKey::Declaration { identity, .. } => (0, identity.clone(), '/'),
+            model::RowKey::Pattern(pattern) => (1, pattern.clone(), '/'),
+            model::RowKey::Path(path) => (
+                2,
+                path.to_string_lossy().into_owned(),
+                std::path::MAIN_SEPARATOR,
+            ),
+        })
+        .collect::<Vec<_>>();
+    let mut depths = groups
+        .iter()
+        .map(|(kind, ..)| if *kind == 1 { 2 } else { 1 })
+        .collect::<Vec<usize>>();
+    loop {
+        let name = |index: usize| {
+            let (kind, group, separator) = &groups[index];
+            let depth = depths[index];
+            (
+                (depth > 1).then_some(*kind),
+                trailing(group, *separator, depth),
+            )
+        };
+        let mut sharing: HashMap<_, HashSet<&str>> = HashMap::new();
+        for (index, (_, group, _)) in groups.iter().enumerate() {
+            sharing.entry(name(index)).or_default().insert(group);
+        }
+        let shared = (0..groups.len())
+            .filter(|index| name(*index).1 != groups[*index].1 && sharing[&name(*index)].len() > 1)
+            .collect::<Vec<_>>();
+        if shared.is_empty() {
+            break;
+        }
+        for index in shared {
+            depths[index] += 1;
+        }
+    }
+    rows.iter()
+        .zip(groups.iter().zip(&depths))
+        .map(|(row, ((_, group, separator), depth))| {
+            let mut name = trailing(group, *separator, *depth).to_owned();
+            if let model::RowKey::Checkout { identity, path } = &row.key {
+                let earlier = rows
+                    .iter()
+                    .filter(|other| match &other.key {
+                        model::RowKey::Declaration {
+                            identity: other_identity,
+                            ..
+                        } => {
+                            other_identity == identity
+                                && other.checkout == model::CheckoutState::Cloned
+                        }
+                        model::RowKey::Checkout {
+                            identity: other_identity,
+                            path: other_path,
+                        } => other_identity == identity && other_path < path,
+                        _ => false,
+                    })
+                    .count();
+                match earlier {
+                    0 => {}
+                    1 => name.push_str(" (copy)"),
+                    count => name.push_str(&format!(" (copy {count})")),
+                }
+            }
+            (row.key.clone(), escape(name))
+        })
+        .collect()
+}
+
+fn home_relative(path: &Path, home: &Path) -> String {
+    match path.strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Ok(rest) => escape(format!("~/{}", rest.to_string_lossy())),
+        Err(_) => escape(path.to_string_lossy()),
+    }
+}
+
+fn origin_text(row: &model::InventoryRow) -> String {
+    escape(identity(row).unwrap_or(&row.origin))
+}
+
+fn registration_text(state: &model::RegistrationState) -> &'static str {
+    match state {
+        model::RegistrationState::Pattern => "wildcard",
+        other => other.label(),
+    }
+}
+
+fn checkout_text(state: &model::CheckoutState) -> &'static str {
+    match state {
+        model::CheckoutState::Pattern => "—",
+        other => other.label(),
+    }
+}
+
+fn observation_text(field: &model::ObservationField) -> String {
+    match field {
+        model::ObservationField::Clean => "clean".to_owned(),
+        model::ObservationField::NotApplicable => "—".to_owned(),
+        other => escape(other.label()),
+    }
+}
+
+/// Lays out `name value` with the value in its own column; long values wrap inside it.
+fn field_lines(name: &str, value: &str, style: Style, width: u16) -> Vec<Line<'static>> {
+    let room = usize::from(width).saturating_sub(INSPECT_KEY_COLUMN).max(1);
+    let mut chunks = vec![String::new()];
+    let mut used = 0;
+    for character in value.chars() {
+        let size = Span::raw(character.to_string()).width();
+        if used + size > room && used > 0 {
+            chunks.push(String::new());
+            used = 0;
+        }
+        chunks.last_mut().expect("one chunk").push(character);
+        used += size;
+    }
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let label = if index == 0 { name } else { "" };
+            Line::from(vec![
+                Span::styled(format!("{label:<INSPECT_KEY_COLUMN$}"), dim()),
+                Span::styled(chunk, style),
+            ])
+        })
+        .collect()
+}
+
+fn inspection_widget(
+    row: &model::InventoryRow,
+    name: String,
+    rows: &[model::InventoryRow],
+    home: &Path,
+    width: u16,
+) -> Paragraph<'static> {
+    let mut lines = Vec::new();
+    let mut field = |name: &str, value: String, style: Style| {
+        lines.extend(field_lines(name, &value, style, width));
+    };
+    field("Repository", name, Style::default());
+    if let Some(identity) = identity(row) {
+        field("Identity", escape(identity), Style::default());
+    }
+    if let Some(path) = &row.observed_path {
+        field("Found path", home_relative(path, home), Style::default());
+    }
+    if let Some(path) = &row.configured_destination {
+        field(
+            "Configured path",
+            home_relative(path, home),
+            Style::default(),
+        );
+    }
+    if row.observed_path.is_none() && row.configured_destination.is_none() {
+        field(
+            "Path",
+            home_relative(Path::new(&row.path), home),
+            Style::default(),
+        );
+    }
+    let registration = match &row.registration {
+        model::RegistrationState::Explicit => "explicit".to_owned(),
+        model::RegistrationState::Wildcard { pattern } => {
+            format!("wildcard · matches {}", escape(pattern))
+        }
+        model::RegistrationState::Excluded { pattern } => {
+            format!("excluded · by {}", escape(pattern))
+        }
+        model::RegistrationState::Unregistered => {
+            "unregistered · this path satisfies no declaration".to_owned()
+        }
+        model::RegistrationState::Pattern => "wildcard · declaration pattern".to_owned(),
+    };
+    field(
+        "Registration",
+        registration,
+        registration_style(&row.registration),
+    );
+    if let Some(declaration) = &row.declaration {
+        let kind = if declaration.contains('*') {
+            "wildcard"
+        } else {
+            "explicit"
+        };
+        let target = rows
+            .iter()
+            .find(|other| {
+                matches!(&other.key, model::RowKey::Declaration { .. })
+                    && identity(other) == identity(row)
+            })
+            .map(|declared| match declared.checkout {
+                model::CheckoutState::Cloned => format!(
+                    ", satisfied by {}",
+                    home_relative(Path::new(&declared.path), home)
+                ),
+                ref state => format!(", configured path {}", state.label()),
+            })
+            .unwrap_or_default();
+        field(
+            "Declaration",
+            format!("{} ({kind}){target}", escape(declaration)),
+            Style::default(),
+        );
+    }
+    field(
+        "Checkout",
+        checkout_text(&row.checkout).to_owned(),
+        checkout_style(&row.checkout),
+    );
+    field("Origin", escape(&row.origin), Style::default());
+    for (name, observation, gloss) in [
+        ("Branch", &row.branch, "not observed yet"),
+        ("Changes", &row.changes, "status not observed yet"),
+    ] {
+        let value = match observation {
+            model::ObservationField::Pending => format!("pending · {gloss}"),
+            other => observation_text(other),
+        };
+        field(name, value, observation_style(observation));
+    }
+    if !row.warnings.is_empty() {
+        lines.push(Line::default());
+        lines.extend(
+            row.warnings
+                .iter()
+                .map(|warning| Line::styled(escape(warning), warn())),
+        );
+    }
+    lines.push(Line::default());
+    let reason = if row.markable {
+        "unavailable · read-only inventory"
+    } else {
+        "unavailable · patterns are inspect-only"
+    };
+    for action in ["Register", "Clone", "Remove"] {
+        lines.extend(field_lines(action, reason, dim(), width));
+    }
+    Paragraph::new(lines).wrap(Wrap { trim: false })
+}
+
+fn menu_widget(selection: &Selection, session: &InventorySession) -> Paragraph<'static> {
+    Paragraph::new(
+        root_menu_actions()
+            .iter()
+            .enumerate()
+            .map(|(index, action)| {
+                let style = if index == selection.menu_index {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                let hint = session.bindings.hint(Mode::Menu, *action);
+                Line::from(Span::styled(
+                    if hint.is_empty() {
+                        action.name().to_owned()
+                    } else {
+                        format!("{hint} {}", action.name())
+                    },
+                    style,
+                ))
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn root_menu_actions() -> &'static [Action] {
+    &[
+        Action::Inspect,
+        Action::Search,
+        Action::ClearSearch,
+        Action::Refresh,
+        Action::Help,
+        Action::Quit,
+    ]
+}
+
+fn registration_style(state: &model::RegistrationState) -> Style {
+    match state {
+        model::RegistrationState::Explicit => tint(Color::Green),
+        model::RegistrationState::Wildcard { .. } | model::RegistrationState::Pattern => {
+            tint(Color::Blue)
+        }
+        model::RegistrationState::Excluded { .. } => warn(),
+        model::RegistrationState::Unregistered => dim(),
+    }
+}
+
+fn checkout_style(state: &model::CheckoutState) -> Style {
+    match state {
+        model::CheckoutState::Cloned | model::CheckoutState::Pattern => Style::default(),
+        model::CheckoutState::Missing | model::CheckoutState::Unknown => warn(),
+        model::CheckoutState::Conflict | model::CheckoutState::Unreadable => tint(Color::Red),
+    }
+}
+
+fn observation_style(field: &model::ObservationField) -> Style {
+    match field {
+        model::ObservationField::Clean => tint(Color::Green),
+        model::ObservationField::Pending | model::ObservationField::Stale(_) => warn(),
+        model::ObservationField::Error(_) => tint(Color::Red),
+        model::ObservationField::Known(_)
+        | model::ObservationField::Dirty(_)
+        | model::ObservationField::NotApplicable => Style::default(),
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        let _ = self.terminal.show_cursor();
+        self.restore.restore();
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1217,6 +1741,10 @@ fn row_matches_query(row: &model::InventoryRow, query: &str) -> bool {
         || fuzzy_subsequence(row.checkout.label(), query)
         || fuzzy_subsequence(&row.branch.label(), query)
         || fuzzy_subsequence(&row.changes.label(), query)
+        || fuzzy_subsequence(registration_text(&row.registration), query)
+        || fuzzy_subsequence(checkout_text(&row.checkout), query)
+        || fuzzy_subsequence(&observation_text(&row.branch), query)
+        || fuzzy_subsequence(&observation_text(&row.changes), query)
 }
 
 fn fuzzy_subsequence(value: &str, query: &str) -> bool {
@@ -1233,178 +1761,210 @@ fn fuzzy_subsequence(value: &str, query: &str) -> bool {
     wanted.is_none()
 }
 
-fn repository_table(rows: &[&model::InventoryRow], width: u16) -> Table<'static> {
-    let compact = width < 120;
-    let headings = if compact {
-        vec![
-            "repository",
-            "registration",
-            "checkout",
-            "branch",
-            "changes",
-        ]
+fn repository_table(
+    rows: &[&model::InventoryRow],
+    names: &HashMap<model::RowKey, String>,
+    home: &Path,
+    width: u16,
+    selected: Option<usize>,
+) -> Table<'static> {
+    let compact = width < WIDE_TABLE;
+    // Column widths from the canvas grid (term.css `g7` and `g5`), padding included.
+    let (headings, mut widths, flexible): (&[&str], Vec<u16>, &[usize]) = if compact {
+        (
+            &[
+                "repository",
+                "registration",
+                "checkout",
+                "branch",
+                "changes",
+            ],
+            vec![23, 15, 13, 13, 14],
+            &[0],
+        )
     } else {
-        vec![
-            "repository",
-            "path",
-            "registration",
-            "checkout",
-            "origin",
-            "branch",
-            "changes",
-        ]
+        (
+            &[
+                "repository",
+                "path",
+                "registration",
+                "checkout",
+                "origin",
+                "branch",
+                "changes",
+            ],
+            vec![25, 27, 15, 13, 24, 13, 13],
+            &[1, 4],
+        )
     };
-    let values = rows
+    let slot = |column: usize| if column == 0 { MARK_SLOT } else { 0 };
+    let cells = rows
         .iter()
         .map(|row| {
-            let mut values = vec![escape(&row.repository)];
+            let pattern = matches!(row.key, model::RowKey::Pattern(_));
+            let mut cells = vec![(names[&row.key].clone(), Style::default())];
             if !compact {
-                values.push(escape(&row.path));
+                cells.push((
+                    if pattern {
+                        "—".to_owned()
+                    } else {
+                        home_relative(Path::new(&row.path), home)
+                    },
+                    Style::default(),
+                ));
             }
-            values.extend([
-                row.registration.label().to_owned(),
-                row.checkout.label().to_owned(),
+            cells.extend([
+                (
+                    registration_text(&row.registration).to_owned(),
+                    registration_style(&row.registration),
+                ),
+                (
+                    checkout_text(&row.checkout).to_owned(),
+                    checkout_style(&row.checkout),
+                ),
             ]);
             if !compact {
-                values.push(escape(&row.origin));
+                cells.push((origin_text(row), Style::default()));
             }
-            values.extend([escape(row.branch.label()), escape(row.changes.label())]);
-            values
+            cells.extend([
+                (
+                    observation_text(&row.branch),
+                    observation_style(&row.branch),
+                ),
+                (
+                    observation_text(&row.changes),
+                    observation_style(&row.changes),
+                ),
+            ]);
+            cells
         })
         .collect::<Vec<_>>();
-    let mut widths = headings
-        .iter()
-        .enumerate()
-        .map(|(column, heading)| {
-            values
-                .iter()
-                .map(|row| Line::raw(row[column].clone()).width())
-                .max()
-                .unwrap_or(0)
-                .max(heading.len()) as u16
-        })
-        .collect::<Vec<_>>();
-    let available = width.saturating_sub(2 + 3 * (headings.len() as u16 - 1));
+    // Width beyond the grid first lets truncated cells grow, then goes to the flexible columns.
+    let mut spare = width
+        .saturating_sub(2)
+        .saturating_sub(widths.iter().sum::<u16>());
+    for column in 0..widths.len() {
+        let need = cells
+            .iter()
+            .map(|row| Line::raw(row[column].0.clone()).width() + slot(column) + 2)
+            .max()
+            .unwrap_or(0) as u16;
+        let grow = need.saturating_sub(widths[column]).min(spare);
+        widths[column] += grow;
+        spare -= grow;
+    }
+    for (position, column) in flexible.iter().enumerate() {
+        let share = spare / flexible.len() as u16;
+        widths[*column] += if position == 0 {
+            spare - share * (flexible.len() as u16 - 1)
+        } else {
+            share
+        };
+    }
+    let available = width.saturating_sub(2);
     while widths.iter().map(|width| u32::from(*width)).sum::<u32>() > u32::from(available) {
         let Some((index, _)) = widths
             .iter()
             .enumerate()
-            .filter(|(index, value)| **value > headings[*index].len() as u16)
+            .filter(|(index, value)| **value > headings[*index].len() as u16 + 2)
             .max_by_key(|(_, width)| **width)
         else {
             break;
         };
         widths[index] -= 1;
     }
-    let columns = |values: Vec<String>| {
-        values
-            .into_iter()
-            .zip(&widths)
-            .map(|(value, width)| {
-                let padding = usize::from(*width).saturating_sub(Line::raw(value.clone()).width());
-                format!("{value}{}", " ".repeat(padding))
-            })
-            .collect::<Vec<_>>()
-            .join(" | ")
-    };
-    let rows = values
+    let table_rows = cells
         .into_iter()
-        .zip(rows.iter().copied())
-        .map(|(values, row)| {
-            let color = if std::env::var_os("NO_COLOR").is_some() {
-                Color::Reset
-            } else {
-                match row.registration {
-                    model::RegistrationState::Explicit => Color::Green,
-                    model::RegistrationState::Wildcard { .. }
-                    | model::RegistrationState::Pattern => Color::Blue,
-                    model::RegistrationState::Excluded { .. } => Color::Yellow,
-                    model::RegistrationState::Unregistered => Color::Reset,
-                }
-            };
-            let values = values
-                .into_iter()
-                .enumerate()
-                .map(|(index, value)| {
-                    let tail = (!compact && index == 1)
-                        || (index == 0
-                            && row.observed_path.is_some()
-                            && row.repository == row.path);
-                    abbreviate(&value, usize::from(widths[index]), tail)
-                })
-                .collect();
-            let mut lines = vec![Line::raw(columns(values))];
-            if !compact {
-                if let Some(destination) = &row.configured_destination
-                    && row
-                        .observed_path
-                        .as_ref()
-                        .is_some_and(|path| path != destination)
-                {
-                    lines.push(Line::raw(format!(
-                        "  configured: {}",
-                        escape(destination.to_string_lossy())
-                    )));
-                }
-                lines.extend(
-                    row.warnings
-                        .iter()
-                        .map(|warning| Line::raw(format!("  warning: {}", escape(warning)))),
-                );
-            }
-            for (name, fact) in [("branch", &row.branch), ("changes", &row.changes)] {
-                if matches!(
-                    fact,
-                    model::ObservationField::Error(_) | model::ObservationField::Stale(_)
-                ) {
-                    lines.push(Line::raw(format!("  {name}: {}", escape(fact.label()))));
-                }
-            }
-            let height = lines.len() as u16;
-            Row::new([ratatui::text::Text::from(lines)])
-                .height(height)
-                .style(Style::default().fg(color))
+        .enumerate()
+        .map(|(index, cells)| {
+            Row::new(
+                cells
+                    .into_iter()
+                    .enumerate()
+                    .map(|(column, (value, style))| {
+                        // Path cells keep their tail: it is what tells duplicate checkouts apart.
+                        let room = usize::from(widths[column]).saturating_sub(2 + slot(column));
+                        let text = if column == 0 {
+                            abbreviate_name(&value, room)
+                        } else {
+                            abbreviate(&value, room, !compact && column == 1)
+                        };
+                        // Reverse video carries the selection, so the selected row drops its tints.
+                        let style = if selected == Some(index) {
+                            Style::default()
+                        } else {
+                            style
+                        };
+                        Cell::from(Span::styled(
+                            format!(" {}{text}", " ".repeat(slot(column))),
+                            style,
+                        ))
+                    })
+                    .collect::<Vec<_>>(),
+            )
         })
         .collect::<Vec<_>>();
-    Table::new(rows, [Constraint::Min(0)])
-        .header(Row::new([columns(
-            headings.into_iter().map(str::to_owned).collect(),
-        )]))
+    Table::new(table_rows, widths)
+        .header(
+            Row::new(
+                headings
+                    .iter()
+                    .map(|heading| Cell::from(format!(" {heading}")))
+                    .collect::<Vec<_>>(),
+            )
+            .style(dim()),
+        )
         .column_spacing(0)
-        .highlight_symbol("  ")
+        .highlight_symbol(" ")
         .highlight_spacing(HighlightSpacing::Always)
         .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
 }
 
-fn abbreviate(value: &str, width: usize, tail: bool) -> String {
+/// The longest run of `characters` that fits `width` cells.
+fn fitting(characters: impl Iterator<Item = char>, width: usize) -> String {
+    let mut used = 0;
+    characters
+        .take_while(|character| {
+            used += Span::raw(character.to_string()).width();
+            used <= width
+        })
+        .collect()
+}
+
+fn fitting_tail(value: &str, width: usize) -> String {
+    let tail = fitting(value.chars().rev(), width);
+    tail.chars().rev().collect()
+}
+
+fn abbreviate(value: &str, width: usize, keep_tail: bool) -> String {
     if Line::raw(value).width() <= width {
-        return value.to_owned();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    let characters = value.chars().collect::<Vec<_>>();
-    let iter: Box<dyn Iterator<Item = &char>> = if tail {
-        Box::new(characters.iter().rev())
+        value.to_owned()
+    } else if width == 0 {
+        String::new()
+    } else if keep_tail {
+        format!("…{}", fitting_tail(value, width - 1))
     } else {
-        Box::new(characters.iter())
+        format!("{}…", fitting(value.chars(), width - 1))
+    }
+}
+
+/// Repository names keep both ends and the whole copy suffix: either can be the only part
+/// that tells two rows apart.
+fn abbreviate_name(name: &str, width: usize) -> String {
+    if Line::raw(name).width() <= width {
+        return name.to_owned();
+    }
+    let (base, suffix) = match name.rfind(" (copy") {
+        Some(index) if name.ends_with(')') => name.split_at(index),
+        _ => (name, ""),
     };
-    let mut result = Vec::new();
-    let mut used = 1;
-    for character in iter {
-        used += Span::raw(character.to_string()).width();
-        if used > width {
-            break;
-        }
-        result.push(*character);
+    let room = width.saturating_sub(Line::raw(suffix).width());
+    if room == 0 {
+        return abbreviate(name, width, false);
     }
-    if tail {
-        result.reverse();
-        result.insert(0, '…');
-    } else {
-        result.push('…');
-    }
-    result.into_iter().collect()
+    let head = fitting(base.chars(), room / 2);
+    let tail = fitting_tail(base, room - 1 - Line::raw(head.as_str()).width());
+    format!("{head}…{tail}{suffix}")
 }
 
 #[cfg(test)]
@@ -1582,6 +2142,200 @@ mod tests {
         selection.move_by(&[&alpha], 1);
         selection.reconcile(&[&beta, &alpha], true);
         assert_eq!(selection.selected_row(&[&beta, &alpha]), Some(&alpha));
+    }
+
+    fn display_row(key: RowKey, checkout: CheckoutState) -> InventoryRow {
+        InventoryRow {
+            key,
+            repository: String::new(),
+            path: String::new(),
+            registration: RegistrationState::Explicit,
+            checkout,
+            origin: String::new(),
+            branch: ObservationField::NotApplicable,
+            changes: ObservationField::NotApplicable,
+            configured_destination: None,
+            observed_path: None,
+            declaration: None,
+            warnings: Vec::new(),
+            markable: true,
+        }
+    }
+
+    #[test]
+    fn only_a_known_clean_observation_reads_clean() {
+        assert_eq!(super::observation_text(&ObservationField::Clean), "clean");
+        for field in [
+            ObservationField::Pending,
+            ObservationField::Error("status failed".to_owned()),
+            ObservationField::Stale("main".to_owned()),
+            super::stale_observation(ObservationField::Clean),
+            super::stale_observation(ObservationField::Pending),
+            ObservationField::Known("main".to_owned()),
+            ObservationField::Dirty("1 modified".to_owned()),
+            ObservationField::NotApplicable,
+        ] {
+            assert_ne!(super::observation_text(&field), "clean", "{field:?}");
+        }
+        assert_eq!(
+            super::observation_text(&super::stale_observation(ObservationField::Clean)),
+            "stale: known clean"
+        );
+        assert_eq!(super::checkout_text(&CheckoutState::Unknown), "unknown");
+    }
+
+    #[test]
+    fn search_matches_the_labels_the_table_shows() {
+        let mut pattern = display_row(
+            RowKey::Pattern("github.com/org/*".to_owned()),
+            CheckoutState::Pattern,
+        );
+        pattern.registration = RegistrationState::Pattern;
+        assert!(super::row_matches_query(&pattern, "wildcard"));
+        assert!(super::row_matches_query(&pattern, "pattern"));
+        let mut clean = display_row(RowKey::Path("/repos/clean".into()), CheckoutState::Cloned);
+        clean.changes = ObservationField::Clean;
+        assert!(super::row_matches_query(&clean, "known clean"));
+    }
+
+    #[test]
+    fn short_names_number_copies_and_qualify_shared_last_segments() {
+        let checkout = |identity: &str, path: &str| {
+            display_row(
+                RowKey::Checkout {
+                    identity: identity.to_owned(),
+                    path: path.into(),
+                },
+                CheckoutState::Cloned,
+            )
+        };
+        let declaration = |identity: &str, path: &str, state| {
+            display_row(
+                RowKey::Declaration {
+                    identity: identity.to_owned(),
+                    destination: path.into(),
+                },
+                state,
+            )
+        };
+        let rows = vec![
+            declaration(
+                "github.com/org/alpha",
+                "/r/org/alpha",
+                CheckoutState::Cloned,
+            ),
+            checkout("github.com/org/alpha", "/r/a/alpha"),
+            checkout("github.com/org/alpha", "/r/b/alpha"),
+            declaration(
+                "github.com/org/wrong",
+                "/r/org/wrong",
+                CheckoutState::Conflict,
+            ),
+            checkout("github.com/other/wrong", "/r/org/wrong"),
+            declaration("github.com/org/lone", "/r/org/lone", CheckoutState::Missing),
+            checkout("github.com/org/lone", "/r/elsewhere/lone"),
+            display_row(RowKey::Path("/r/local/beta".into()), CheckoutState::Cloned),
+            declaration("github.com/org/beta", "/r/org/beta", CheckoutState::Missing),
+            checkout("github.com/org/x", "/r/hub/x"),
+            checkout("gitlab.com/org/x", "/r/lab/x"),
+            checkout("gitlab.com/org/x", "/r/lab-backup/x"),
+            checkout("gitlab.com/a/sub/y", "/r/a/y"),
+            checkout("gitlab.com/b/sub/y", "/r/b/y"),
+            display_row(
+                RowKey::Pattern("github.com/org/*".to_owned()),
+                CheckoutState::Pattern,
+            ),
+            display_row(
+                RowKey::Pattern("codeberg.org/org/*".to_owned()),
+                CheckoutState::Pattern,
+            ),
+            display_row(
+                RowKey::Path("/r/one/work/proj".into()),
+                CheckoutState::Cloned,
+            ),
+            display_row(
+                RowKey::Path("/r/two/work/proj".into()),
+                CheckoutState::Cloned,
+            ),
+            display_row(
+                RowKey::Path("/r/org/pending".into()),
+                CheckoutState::Unknown,
+            ),
+            declaration(
+                "github.com/org/pending",
+                "/r/org/pending",
+                CheckoutState::Missing,
+            ),
+        ];
+        let names = super::short_names(&rows);
+        let name = |row: &InventoryRow| names[&row.key].as_str();
+        assert_eq!(
+            rows.iter().map(name).collect::<Vec<_>>(),
+            [
+                "alpha",
+                "alpha (copy)",
+                "alpha (copy 2)",
+                "org/wrong",
+                "other/wrong",
+                "lone",
+                "lone",
+                "local/beta",
+                "org/beta",
+                "github.com/org/x",
+                "gitlab.com/org/x",
+                "gitlab.com/org/x (copy)",
+                "a/sub/y",
+                "b/sub/y",
+                "github.com/org/*",
+                "codeberg.org/org/*",
+                "one/work/proj",
+                "two/work/proj",
+                "org/pending",
+                "org/pending",
+            ]
+        );
+    }
+
+    #[test]
+    fn name_cells_stay_distinct_when_truncated() {
+        let names = [
+            "obsidian-theme",
+            "obsidian-theme (copy)",
+            "obsidian-theme (copy 2)",
+            "black-atom-core-extras",
+            "black-atom-core-extras (copy)",
+            "black-atom-core-extras (copy 12)",
+            "github.com/org/shared-tooling",
+            "gitlab.com/org/shared-tooling",
+            "gitlab.com/org/shared-tooling (copy)",
+            "one/work/a-long-project-name",
+            "two/work/a-long-project-name",
+            "very-long-prefix-service-a",
+            "very-long-prefix-service-b",
+        ];
+        for width in [6, 17, 19] {
+            let cells = names
+                .iter()
+                .map(|name| super::abbreviate_name(name, width))
+                .collect::<Vec<_>>();
+            for (index, cell) in cells.iter().enumerate() {
+                assert!(cell.chars().count() <= width, "{cell}");
+                if width > 6 {
+                    assert!(!cells[..index].contains(cell), "{width}: {cells:?}");
+                    if let Some(at) = names[index].rfind(" (copy") {
+                        assert!(cell.ends_with(&names[index][at..]), "{cell}");
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            super::abbreviate_name("github.com/org/shared-tooling", 17),
+            "github.c…-tooling"
+        );
+        assert_eq!(
+            super::abbreviate_name("alpha (copy 2)", 17),
+            "alpha (copy 2)"
+        );
     }
 
     #[test]

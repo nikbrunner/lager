@@ -32,23 +32,27 @@ fn inventory_inspect_shows_current_declaration_and_action_reason_after_resize_an
     )
     .unwrap();
 
-    let selected = "selected: github.com/org/*";
+    let selected = "selected: org/*";
     let mut scrolled_frames = Vec::new();
     run_inventory_pty_with_exit_observing(
         support::lager(&home, &config).arg("inventory"),
         &[
-            (vec!["selected: github.com/org/alpha"], b"j\r".to_vec()),
+            (vec!["selected: alpha"], b"j\r".to_vec()),
             (
                 vec![
-                    "INSPECT / github.com/org/*",
-                    "Declaration: github.com/org/*",
-                    "Mark: unavailable",
-                    "declaration patterns cannot be marked",
+                    "Inspect / org/*",
+                    "pair: Declaration github.com/org/*",
+                    "pair: Registration wildcard",
                 ],
                 vec![b'x'; 32],
             ),
             (
-                vec!["INSPECT", "excludes escape-\\n\\t\\x1b"],
+                vec![
+                    "INSPECT",
+                    "excludes escape-\\n\\t\\x1b",
+                    "pair: Register unavailable",
+                    "patterns are inspect-only",
+                ],
                 b"\x1b".to_vec(),
             ),
             (vec!["NORMAL", selected, "absent: INSPECT"], b"q".to_vec()),
@@ -74,6 +78,563 @@ fn inventory_inspect_shows_current_declaration_and_action_reason_after_resize_an
 
 #[cfg(unix)]
 #[test]
+fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        &config,
+        "root = \"repos\"\n\n[providers.\"github.com\"]\npreset = \"github\"\n\n[[repositories]]\nurl = \"github.com/org/alpha\"\n\n[[repositories]]\nurl = \"github.com/org/beta\"\n\n[[repositories]]\nurl = \"github.com/team/*\"\n",
+    )
+    .unwrap();
+    init_repo(
+        &root.join("org/alpha"),
+        "git@github.com:org/alpha.git",
+        false,
+    );
+    init_repo(
+        &root.join("archive/alpha"),
+        "git@github.com:org/alpha.git",
+        true,
+    );
+    init_repo(
+        &root.join("team/dots"),
+        "git@github.com:team/dots.git",
+        true,
+    );
+    init_repo_without_origin(&root.join("experiments/scratch"));
+
+    for (rows, cols, no_color) in [
+        (32, 132, true),
+        (32, 132, false),
+        (24, 80, true),
+        (24, 80, false),
+    ] {
+        let mut frames = Vec::new();
+        let mut command = support::lager(&home, &config);
+        command.arg("inventory");
+        if no_color {
+            command.env("NO_COLOR", "1");
+        }
+        let transcript = run_inventory_pty_with_exit_observing(
+            &mut command,
+            &[
+                (
+                    vec!["absent: Scanning", "NORMAL · 6 rows", "1 modified"],
+                    b"/org/alpha".to_vec(),
+                ),
+                (vec!["SEARCH · 2 rows", "/ org/alpha"], b"\r".to_vec()),
+                (vec!["NORMAL · 2 rows"], b"\r".to_vec()),
+                (vec!["INSPECT · 2 rows", "Inspect / alpha"], b"?".to_vec()),
+                (
+                    vec!["HELP · 2 rows", "Keyboard / effective bindings"],
+                    b"\x1b".to_vec(),
+                ),
+                (
+                    vec!["INSPECT · 2 rows", "absent: Keyboard"],
+                    b"\x1b".to_vec(),
+                ),
+                (vec!["NORMAL · 2 rows", "absent: Inspect / "], b"q".to_vec()),
+            ],
+            rows,
+            cols,
+            0,
+            |action, _, frame| {
+                if matches!(action, 0 | 1 | 3 | 4) {
+                    frames.push(frame.to_owned());
+                }
+            },
+        );
+        let [main, search, inspect, help] = frames.as_slice() else {
+            panic!("expected four frames: {frames:?}");
+        };
+        let (rows, cols) = (rows as usize, cols as usize);
+        let compact = cols < 132;
+        // Column starts of the canvas grid: term.css g7 at 132 columns, g5 at 80.
+        let (headings, starts): (&[&str], &[usize]) = if compact {
+            (
+                &[
+                    "repository",
+                    "registration",
+                    "checkout",
+                    "branch",
+                    "changes",
+                ],
+                &[2, 25, 40, 53, 66],
+            )
+        } else {
+            (
+                &[
+                    "repository",
+                    "path",
+                    "registration",
+                    "checkout",
+                    "origin",
+                    "branch",
+                    "changes",
+                ],
+                &[2, 27, 54, 69, 82, 106, 119],
+            )
+        };
+        let shown = |cells: [&str; 7]| -> Vec<String> {
+            let picked: &[usize] = if compact {
+                &[0, 2, 3, 5, 6]
+            } else {
+                &[0, 1, 2, 3, 4, 5, 6]
+            };
+            picked
+                .iter()
+                .map(|index| cells[*index].to_owned())
+                .collect()
+        };
+
+        let screen = screen_text(main, rows, cols);
+        let lines = screen.lines().collect::<Vec<_>>();
+        assert!(
+            lines[0].starts_with("  LAGER / inventory") && lines[0].ends_with("NORMAL · 6 rows"),
+            "{screen}"
+        );
+        assert_eq!(lines[1], "  Local + declarations · remote off", "{screen}");
+        assert_eq!(
+            lines[2], "  / Search repositories, paths, origins…",
+            "{screen}"
+        );
+        assert_eq!(lines[3], "", "{screen}");
+        assert_eq!(
+            lines[4].split_whitespace().collect::<Vec<_>>(),
+            headings,
+            "{screen}"
+        );
+        let heading_starts = headings
+            .iter()
+            .map(|heading| lines[4].find(heading).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(heading_starts, starts, "{screen}");
+        assert!(
+            !screen.contains(" | ") && !screen.contains('│') && !screen.contains("generation"),
+            "{screen}"
+        );
+        let table = inventory_rows(&screen);
+        assert_eq!(table.len(), 6, "{table:?}\n{screen}");
+        for expected in [
+            [
+                "alpha",
+                "~/repos/org/alpha",
+                "explicit",
+                "cloned",
+                "github.com/org/alpha",
+                "main",
+                "1 modified",
+            ],
+            [
+                "alpha (copy)",
+                "~/repos/archive/alpha",
+                "explicit",
+                "cloned",
+                "github.com/org/alpha",
+                "main",
+                "clean",
+            ],
+            [
+                "beta",
+                "~/repos/org/beta",
+                "explicit",
+                "missing",
+                "github.com/org/beta",
+                "—",
+                "—",
+            ],
+            [
+                "dots",
+                "~/repos/team/dots",
+                "wildcard",
+                "cloned",
+                "github.com/team/dots",
+                "main",
+                "clean",
+            ],
+            [
+                "scratch",
+                "…epos/experiments/scratch",
+                "unregistered",
+                "cloned",
+                "No origin",
+                "main",
+                "clean",
+            ],
+            [
+                "team/*",
+                "—",
+                "wildcard",
+                "—",
+                "github.com/team/*",
+                "—",
+                "—",
+            ],
+        ] {
+            assert!(
+                table.contains(&shown(expected)),
+                "missing {expected:?} in {table:?}\n{screen}"
+            );
+        }
+        for line in &lines[5..11] {
+            let characters = line.chars().collect::<Vec<_>>();
+            assert!(
+                characters[..6].iter().all(|character| *character == ' ') && characters[6] != ' ',
+                "repository text must start after the row padding and mark slot:\n{screen}"
+            );
+            for start in &starts[1..] {
+                assert_eq!(
+                    characters[start - 1],
+                    ' ',
+                    "cell padding before column {start}:\n{screen}"
+                );
+            }
+        }
+        assert!(
+            lines[11..rows - 2].iter().all(|line| line.is_empty()),
+            "{screen}"
+        );
+        assert_eq!(
+            lines[rows - 2],
+            if compact {
+                "  Path and origin: Enter inspects the full value"
+            } else {
+                "  No active operation · R refreshes local/config state only"
+            },
+            "{screen}"
+        );
+        assert_eq!(
+            lines[rows - 1],
+            "  j/k rows  / search  Enter inspect  R refresh  m menu  ? help  q quit",
+            "{screen}"
+        );
+        let styled = styled_screen(main, rows, cols);
+        assert_eq!(
+            styled[0].iter().all(|(_, reversed)| *reversed),
+            !no_color,
+            "the header bar is reverse video only with color:\n{screen}"
+        );
+        assert_eq!(
+            styled[rows - 1].iter().all(|(_, reversed)| *reversed),
+            !no_color,
+            "the hint footer is a bar only with color:\n{screen}"
+        );
+        let selected = table[0][0].clone();
+        assert!(
+            highlighted_inventory_row(main, rows, cols, &selected).is_some(),
+            "{screen}"
+        );
+
+        let screen = screen_text(search, rows, cols);
+        let lines = screen.lines().collect::<Vec<_>>();
+        assert!(lines[0].ends_with("SEARCH · 2 rows"), "{screen}");
+        assert_eq!(lines[2], "  / org/alpha█", "{screen}");
+        assert_eq!(inventory_rows(&screen).len(), 2, "{screen}");
+        assert_eq!(
+            lines[rows - 2],
+            "  Enter / Esc retain filter · action letters are text",
+            "{screen}"
+        );
+        assert_eq!(
+            lines[rows - 1],
+            "  Enter accept  Esc cancel  Backspace delete",
+            "{screen}"
+        );
+
+        let screen = screen_text(inspect, rows, cols);
+        let lines = screen.lines().collect::<Vec<_>>();
+        assert!(lines[0].ends_with("INSPECT · 2 rows"), "{screen}");
+        assert_eq!(
+            lines[rows - 1],
+            "  j/k rows  / search  Enter inspect  R refresh  m menu  ? help  q quit",
+            "{screen}"
+        );
+        let title = lines
+            .iter()
+            .position(|line| line.contains("│  Inspect / alpha  "))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(lines[title].contains("lager  │"), "{screen}");
+        assert!(lines[title - 1].contains('┌'), "{screen}");
+        let body = lines[title + 2..]
+            .iter()
+            .map(|line| {
+                let inner = line.split('│').nth(1).unwrap_or_default();
+                inner.strip_prefix("  ").unwrap_or(inner).trim_end()
+            })
+            .collect::<Vec<_>>();
+        // A long value wraps inside its value column; rejoin it to compare whole fields.
+        let body = body.iter().fold(Vec::<String>::new(), |mut joined, line| {
+            match joined.last_mut() {
+                Some(previous) if line.starts_with(&" ".repeat(19)) && !line.trim().is_empty() => {
+                    previous.push_str(line.trim())
+                }
+                _ => joined.push((*line).to_owned()),
+            }
+            joined
+        });
+        let body = body.iter().map(String::as_str).collect::<Vec<_>>();
+        let field = |name: &str, value: &str| format!("{name:<19}{value}");
+        let expected = [
+            field("Repository", "alpha"),
+            field("Identity", "github.com/org/alpha"),
+            field("Found path", "~/repos/org/alpha"),
+            field("Configured path", "~/repos/org/alpha"),
+            field("Registration", "explicit"),
+            field(
+                "Declaration",
+                "github.com/org/alpha (explicit), satisfied by ~/repos/org/alpha",
+            ),
+            field("Checkout", "cloned"),
+            field("Origin", "git@github.com:org/alpha.git"),
+            field("Branch", "main"),
+            field("Changes", "1 modified"),
+            String::new(),
+            field("Register", "unavailable · read-only inventory"),
+        ];
+        let visible = expected
+            .iter()
+            .take_while(|line| body.contains(&line.as_str()))
+            .count();
+        assert!(
+            visible >= 8,
+            "Inspect fields missing or out of board order:\n{screen}"
+        );
+        assert_eq!(
+            &body[..visible],
+            &expected[..visible]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()[..],
+            "{screen}"
+        );
+        assert!(body.contains(&"j/k ↑/↓ scroll · Esc close"), "{screen}");
+
+        let screen = screen_text(help, rows, cols);
+        let lines = screen.lines().collect::<Vec<_>>();
+        assert!(lines[0].ends_with("HELP · 2 rows"), "{screen}");
+        assert_eq!(lines[rows - 2], "  No active operation", "{screen}");
+        assert_eq!(lines[rows - 1], "  j/k scroll  Esc close", "{screen}");
+        let title = lines
+            .iter()
+            .position(|line| line.contains("Keyboard / effective bindings"))
+            .unwrap();
+        let body = lines[title + 2..]
+            .iter()
+            .map(|line| {
+                let inner = line.split('│').nth(1).unwrap_or_default();
+                inner.strip_prefix("  ").unwrap_or(inner).trim_end()
+            })
+            .collect::<Vec<_>>();
+        let descriptions = body
+            .iter()
+            .skip(1)
+            .take_while(|line| !line.is_empty() && !line.starts_with("Esc close"))
+            .map(|line| {
+                line.split("  ")
+                    .filter(|part| !part.is_empty())
+                    .last()
+                    .unwrap()
+                    .trim()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(body[0], "Inspect mode", "{screen}");
+        assert_eq!(
+            descriptions,
+            ["scroll", "page up / down", "close", "close", "help / quit"],
+            "{screen}"
+        );
+        assert!(
+            screen_has_pair(&screen, "j/k ↑/↓ Tab/Shift+Tab scroll")
+                || body[1].starts_with("j/k ↑/↓ Tab/Shift+Tab"),
+            "{screen}"
+        );
+        assert!(body.contains(&"Esc close"), "{screen}");
+
+        let colored = transcript.contains("\x1b[38;5;2;");
+        assert_eq!(colored, !no_color, "explicit registration tint");
+        assert!(
+            !transcript.contains("38;2;")
+                && !transcript.contains("48;2;")
+                && !transcript.contains("48;5;"),
+            "palette must stay terminal-relative so light and dark themes both read"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_keeps_duplicate_and_same_named_rows_distinct_at_both_sizes() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        &config,
+        "root = \"repos\"\n\n[[repositories]]\nurl = \"github.com/org/alpha\"\n\n[[repositories]]\nurl = \"github.com/org/wrong\"\n\n[[repositories]]\nurl = \"github.com/org/lone\"\n",
+    )
+    .unwrap();
+    for path in [
+        "org/alpha",
+        "archive/alpha",
+        "a-very-long-backup-directory-name/alpha",
+        "a-very-long-backup-directory-name/older/alpha",
+    ] {
+        init_repo(&root.join(path), "git@github.com:org/alpha.git", true);
+    }
+    init_repo(
+        &root.join("org/wrong"),
+        "git@github.com:other/wrong.git",
+        true,
+    );
+    init_repo(
+        &root.join("elsewhere/lone"),
+        "git@github.com:org/lone.git",
+        true,
+    );
+
+    for (cols, no_color) in [(80, true), (132, false)] {
+        let mut command = support::lager(&home, &config);
+        command.arg("inventory");
+        if no_color {
+            command.env("NO_COLOR", "1");
+        }
+        let transcript = run_inventory_pty_with_size(
+            &mut command,
+            &["NORMAL · 8 rows", "alpha (copy 3)", "absent: Scanning"],
+            b"q",
+            24,
+            cols,
+        );
+        let screen = screen_text(&transcript, 24, cols as usize);
+        let rows = inventory_rows(&screen);
+        let mut names = rows.iter().map(|row| row[0].as_str()).collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "alpha",
+                "alpha (copy 2)",
+                "alpha (copy 3)",
+                "alpha (copy)",
+                "lone",
+                "lone",
+                "org/wrong",
+                "other/wrong"
+            ],
+            "{screen}"
+        );
+        for (index, row) in rows.iter().enumerate() {
+            assert!(
+                !rows[..index].contains(row),
+                "two rows render identically:\n{screen}"
+            );
+        }
+        let lone = rows
+            .iter()
+            .filter(|row| row[0] == "lone")
+            .map(|row| row[if cols < 132 { 2 } else { 3 }].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(lone.len(), 2, "{screen}");
+        assert!(
+            lone.contains(&"missing") && lone.contains(&"cloned"),
+            "{screen}"
+        );
+        if cols >= 132 {
+            let path = |name: &str| {
+                rows.iter()
+                    .find(|row| row[0] == name)
+                    .map(|row| row[1].clone())
+                    .unwrap()
+            };
+            let (first, second) = (path("alpha (copy)"), path("alpha (copy 2)"));
+            assert!(
+                first.starts_with('…') && first.ends_with("directory-name/alpha"),
+                "{screen}"
+            );
+            assert!(
+                second.starts_with('…') && second.ends_with("/older/alpha"),
+                "{screen}"
+            );
+            assert_eq!(path("alpha (copy 3)"), "~/repos/archive/alpha", "{screen}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_keeps_long_named_copies_and_cross_host_rows_distinct_at_80_columns() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        &config,
+        "root = \"repos\"\n\n[[repositories]]\nurl = \"github.com/org/a-long-repository-name\"\n",
+    )
+    .unwrap();
+    for path in [
+        "org/a-long-repository-name",
+        "archive/a-long-repository-name",
+        "backup/a-long-repository-name",
+    ] {
+        init_repo(
+            &root.join(path),
+            "git@github.com:org/a-long-repository-name.git",
+            true,
+        );
+    }
+    init_repo(
+        &root.join("hub/shared-tooling"),
+        "git@github.com:org/shared-tooling.git",
+        true,
+    );
+    init_repo(
+        &root.join("lab/shared-tooling"),
+        "git@gitlab.com:org/shared-tooling.git",
+        true,
+    );
+
+    let mut command = support::lager(&home, &config);
+    command.arg("inventory").env("NO_COLOR", "1");
+    let transcript = run_inventory_pty_with_size(
+        &mut command,
+        &["NORMAL · 5 rows", "(copy 2)", "absent: Scanning"],
+        b"q",
+        24,
+        80,
+    );
+    let screen = screen_text(&transcript, 24, 80);
+    let rows = inventory_rows(&screen);
+    assert_eq!(rows.len(), 5, "{screen}");
+    for (index, row) in rows.iter().enumerate() {
+        assert!(
+            !rows[..index].contains(row),
+            "two rows render identically:\n{screen}"
+        );
+    }
+    let names = rows.iter().map(|row| row[0].as_str()).collect::<Vec<_>>();
+    let copies = |suffix: &str| {
+        names
+            .iter()
+            .filter(|name| name.starts_with("a-lo") && name.ends_with(suffix))
+            .count()
+    };
+    assert_eq!(
+        (copies("name"), copies(" (copy)"), copies(" (copy 2)")),
+        (1, 1, 1),
+        "{screen}"
+    );
+    assert!(names.contains(&"github.c…-tooling"), "{screen}");
+    assert!(names.contains(&"gitlab.c…-tooling"), "{screen}");
+}
+
+#[cfg(unix)]
+#[test]
 fn inventory_root_menu_uses_effective_hints_and_preserves_search_and_selection() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
@@ -89,39 +650,31 @@ fn inventory_root_menu_uses_effective_hints_and_preserves_search_and_selection()
         support::lager(&home, &config).arg("inventory"),
         &[
             (
-                vec!["local scan complete", "selected: github.com/org/alpha"],
+                vec!["Path and origin:", "selected: alpha"],
                 b"jsbeta\rM".to_vec(),
             ),
             (
                 vec![
-                    "MENU / actions",
-                    "i inspect",
-                    "s search",
-                    "? help",
-                    "q quit",
-                    "NORMAL / beta",
+                    "Menu / actions",
+                    "pair: i inspect",
+                    "pair: s search",
+                    "pair: ? help",
+                    "pair: Ctrl+q quit",
+                    "MENU ·",
+                    "/ beta",
                 ],
                 b"i".to_vec(),
             ),
-            (vec!["INSPECT / github.com/org/beta"], b"\x1b".to_vec()),
+            (vec!["Inspect / beta"], b"\x1b".to_vec()),
+            (vec!["NORMAL ·", "/ beta", "selected: beta"], b"M".to_vec()),
+            (vec!["Menu / actions", "pair: s search"], b"s".to_vec()),
             (
-                vec!["NORMAL / beta", "selected: github.com/org/beta"],
-                b"M".to_vec(),
-            ),
-            (vec!["MENU / actions", "s search"], b"s".to_vec()),
-            (
-                vec!["SEARCH / beta", "github.com/org/beta"],
+                vec!["SEARCH ·", "/ beta", "selected: beta"],
                 b"\x1b".to_vec(),
             ),
-            (
-                vec!["NORMAL / beta", "selected: github.com/org/beta"],
-                b"M".to_vec(),
-            ),
-            (vec!["MENU / actions"], b"\x1b".to_vec()),
-            (
-                vec!["NORMAL / beta", "selected: github.com/org/beta"],
-                b"q".to_vec(),
-            ),
+            (vec!["NORMAL ·", "/ beta", "selected: beta"], b"M".to_vec()),
+            (vec!["Menu / actions"], b"\x1b".to_vec()),
+            (vec!["NORMAL ·", "/ beta", "selected: beta"], b"q".to_vec()),
         ],
         24,
         80,
@@ -150,33 +703,30 @@ fn inventory_search_matches_full_origins_and_keeps_text_and_filters_safe() {
     run_inventory_pty_actions(
         support::lager(&home, &config).arg("inventory"),
         &[
+            (vec!["alpha", "beta"], b"/gto/rgap".to_vec()),
             (
-                vec!["github.com/org/alpha", "github.com/org/beta"],
-                b"/gto/rgap".to_vec(),
-            ),
-            (
-                vec!["SEARCH / gto/rgap", "github.com/org/alpha", "excluded"],
+                vec!["SEARCH ·", "/ gto/rgap", "alpha", "excluded"],
                 b"raRq".to_vec(),
             ),
             (
-                vec!["SEARCH / gto/rgapraRq", "No matching repositories"],
+                vec!["SEARCH ·", "/ gto/rgapraRq", "No matching repositories"],
                 b"\x7f\x7f\x7f\x7f".to_vec(),
             ),
             (
-                vec!["SEARCH / gto/rgap", "github.com/org/alpha"],
+                vec!["SEARCH ·", "/ gto/rgap", "selected: alpha"],
                 b"\r".to_vec(),
             ),
             (
-                vec!["NORMAL / gto/rgap", "github.com/org/alpha"],
+                vec!["NORMAL ·", "/ gto/rgap", "selected: alpha"],
                 b"/".to_vec(),
             ),
             (
-                vec!["SEARCH / gto/rgap", "github.com/org/alpha"],
+                vec!["SEARCH ·", "/ gto/rgap", "selected: alpha"],
                 b"\x1b".to_vec(),
             ),
-            (vec!["NORMAL / gto/rgap"], b"\x7f".to_vec()),
+            (vec!["NORMAL ·", "/ gto/rgap"], b"\x7f".to_vec()),
             (
-                vec!["NORMAL /  · 3 rows", "github.com/org/beta"],
+                vec!["NORMAL · 3 rows", "/ Search repositories", "beta"],
                 b"q".to_vec(),
             ),
         ],
@@ -203,10 +753,11 @@ fn inventory_search_matches_checkout_state_without_matching_contrasting_rows() {
     let transcript = run_inventory_pty_actions(
         support::lager(&home, &config).arg("inventory"),
         &[
-            (vec!["local scan complete"], b"/missing\r".to_vec()),
+            (vec!["No active operation"], b"/missing\r".to_vec()),
             (
                 vec![
-                    "NORMAL / missing · 1 rows",
+                    "NORMAL · 1 row",
+                    "/ missing",
                     "github.com/aid/alpha",
                     "missing",
                 ],
@@ -384,7 +935,7 @@ fn inventory_pending_checkout_does_not_assert_a_conflicting_origin() {
     let rows = inventory_rows(&screen_text(&transcript, 24, 300));
     let declared = rows
         .iter()
-        .find(|row| row[0] == "github.com/org/checkout")
+        .find(|row| row[4] == "github.com/org/checkout")
         .unwrap();
     assert_eq!(declared[3], "unknown", "{rows:?}");
 }
@@ -408,17 +959,14 @@ fn inventory_refresh_reconciles_deleted_checkouts_without_turning_incomplete_int
         let transcript = run_inventory_pty_with_exit(
             support::lager(&home, &config).arg("inv"),
             &[
-                (
-                    vec!["main", "known clean", "local scan complete"],
-                    b"R".to_vec(),
-                ),
+                (vec!["main", "clean", "No active operation"], b"R".to_vec()),
                 (
                     vec![
-                        "generation 2",
+                        if incomplete { "unreadable" } else { "missing" },
                         if incomplete {
                             "partial scan:"
                         } else {
-                            "local scan complete"
+                            "No active operation"
                         },
                     ],
                     b"q".to_vec(),
@@ -439,10 +987,7 @@ fn inventory_refresh_reconciles_deleted_checkouts_without_turning_incomplete_int
         );
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
         let rows = inventory_rows(&screen_text(&transcript, 24, 300));
-        let row = rows
-            .iter()
-            .find(|row| row[0] == "github.com/org/checkout")
-            .unwrap();
+        let row = rows.iter().find(|row| row[0] == "checkout").unwrap();
         assert_eq!(
             row[3],
             if incomplete { "unreadable" } else { "missing" },
@@ -499,7 +1044,7 @@ fn inventory_detached_head_is_a_successful_observation() {
     run_git(&checkout, &["checkout", "--detach", "-q"]);
     run_inventory_pty_with_size(
         support::lager(&home, &config).arg("inv"),
-        &["detached HEAD", "known clean", "local scan complete"],
+        &["detached HEAD", "clean", "No active operation"],
         b"q",
         24,
         220,
@@ -623,7 +1168,12 @@ fn inventory_observation_failures_set_exit_status_even_after_successful_refresh(
                 vec![
                     (vec!["injected probe failure"], b"R".to_vec()),
                     (
-                        vec!["generation 2", "local scan complete", "known clean", "main"],
+                        vec![
+                            "absent: injected probe failure",
+                            "No active operation",
+                            "clean",
+                            "main",
+                        ],
                         b"q".to_vec(),
                     ),
                 ]
@@ -661,7 +1211,10 @@ fn inventory_discovery_failure_sets_exit_status_even_after_successful_refresh() 
         let actions = if refresh {
             vec![
                 (vec!["partial scan:", "scan is incomplete"], b"R".to_vec()),
-                (vec!["generation 2", "local scan complete"], b"q".to_vec()),
+                (
+                    vec!["absent: partial scan:", "No active operation"],
+                    b"q".to_vec(),
+                ),
             ]
         } else {
             vec![(vec!["partial scan:", "scan is incomplete"], b"q".to_vec())]
@@ -698,18 +1251,18 @@ fn inventory_advertises_only_offline_capabilities_and_rejects_remote_before_raw_
         support::clear_outbound_requests();
         let transcript = run_inventory_pty_with_size(
             support::lager(&home, &config).arg(name),
-            &["local scan complete", "No repositories found"],
+            &["No active operation", "No repositories found"],
             b"q",
             24,
             132,
         );
         let plain = screen_text(&transcript, 24, 132);
-        assert!(plain.contains("remote unavailable"), "{plain}");
+        assert!(plain.contains("remote off"), "{plain}");
         assert!(
-            plain.contains("q/Esc quit") && plain.contains("R refresh"),
+            screen_has_pair(&plain, "q quit") && screen_has_pair(&plain, "R refresh"),
             "{plain}"
         );
-        assert!(plain.contains("/ search"), "{plain}");
+        assert!(screen_has_pair(&plain, "/ search"), "{plain}");
         for unavailable in ["all actions", "Add to", "Navigation is ready"] {
             assert!(!plain.contains(unavailable), "{plain}");
         }
@@ -779,20 +1332,35 @@ exclude = ["repo"]
     );
     init_repo(&root.join("local/relative"), "../relative-origin", true);
 
-    let transcript = run_inventory_pty_with_size(
+    let mut frames = Vec::new();
+    run_inventory_pty_with_exit_observing(
         support::lager(&home, &config).arg("inventory"),
-        &["7 rows", "local scan complete"],
-        b"q",
+        &[
+            (
+                vec!["7 rows", "No active operation"],
+                b"/elsewhere\r\r".to_vec(),
+            ),
+            (
+                vec!["Inspect / managed", "misplaced checkout; found:"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL ·", "absent: Inspect /"], b"q".to_vec()),
+        ],
         80,
         220,
+        0,
+        |action, _, frame| {
+            if action == 0 {
+                frames.push(frame.to_owned());
+            }
+        },
     );
-    let plain = screen_text(&transcript, 80, 220);
+    let plain = screen_text(&frames[0], 80, 220);
 
     for expected in [
         "github.com/group/managed",
         "explicit",
         "elsewhere/managed",
-        "misplaced checkout; found:",
         "github.com/group/missing",
         "unknown",
         "github.com/group/sub/repo",
@@ -801,8 +1369,13 @@ exclude = ["repo"]
     ] {
         assert!(plain.contains(expected), "missing {expected}:\n{plain}");
     }
-    assert!(
-        !plain.contains("github.com/group/missing | missing"),
+    let rows = inventory_rows(&plain);
+    let missing = rows
+        .iter()
+        .find(|row| row[4] == "github.com/group/missing")
+        .unwrap_or_else(|| panic!("{rows:?}"));
+    assert_ne!(
+        missing[3], "missing",
         "a present non-checkout destination was marked missing:\n{plain}"
     );
 }
@@ -839,28 +1412,35 @@ fn inventory_unions_nested_wildcards_with_exclusions_in_each_declaration_order()
             true,
         );
 
-        let transcript = run_inventory_pty_with_size(
+        let transcript = run_inventory_pty_actions(
             support::lager(&home, &config).arg("inventory"),
             &[
-                "github.com/group/sub/repo",
-                "covered by github.com/group/*",
-                "excluded by github.com/group/sub/*",
+                (
+                    vec!["No active operation", "github.com/group/sub/repo"],
+                    b"/sub/repo\r\r".to_vec(),
+                ),
+                (
+                    vec![
+                        "Inspect / repo",
+                        "covered by github.com/group/*",
+                        "excluded by github.com/group/sub/*",
+                    ],
+                    b"\x1b".to_vec(),
+                ),
+                (vec!["NORMAL ·", "absent: Inspect /"], b"\x7fq".to_vec()),
             ],
-            b"q",
             24,
             220,
         );
         let rows = inventory_rows(&screen_text(&transcript, 24, 220));
         let row = rows
             .iter()
-            .find(|row| {
-                row[0] == "github.com/group/sub/repo" && row[1].ends_with("/group/sub/repo")
-            })
+            .find(|row| row[0] == "repo" && row[1] == "~/repos/group/sub/repo")
             .expect("nested wildcard checkout row");
         assert_eq!(row[2], "wildcard");
         assert_eq!(row[3], "cloned");
         assert_eq!(row[5], "main");
-        assert_eq!(row[6], "known clean");
+        assert_eq!(row[6], "clean");
     }
 }
 
@@ -940,7 +1520,7 @@ fn inventory_refresh_cancels_delayed_probes_and_quit_remains_responsive() {
         support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
         &[
             (vec!["pending"], b"R".to_vec()),
-            (vec!["generation 2", "github.com/org/fresh"], b"q".to_vec()),
+            (vec!["github.com/org/fresh"], b"q".to_vec()),
         ],
         32,
         132,
@@ -961,8 +1541,8 @@ fn inventory_refresh_cancels_delayed_probes_and_quit_remains_responsive() {
     );
     let plain = screen_text(&transcript, 32, 132);
     assert!(
-        plain.contains("generation 2"),
-        "refresh did not start a new generation:\n{plain}"
+        plain.contains("github.com/org/fresh"),
+        "refresh did not install the new config:\n{plain}"
     );
     assert!(
         plain.contains("github.com/org/fresh") && !plain.contains("github.com/org/delayed"),
@@ -1004,24 +1584,18 @@ fn inventory_refresh_keeps_completed_observations_stale_until_reprobed() {
     let transcript = run_inventory_pty_actions_with_hook(
         support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
         &[
-            (
-                vec!["github.com/org/stale", "main", "known clean"],
-                b"R".to_vec(),
-            ),
-            (
-                vec!["generation 2", "stale: main", "stale: known clean"],
-                b"q".to_vec(),
-            ),
+            (vec!["github.com/org/stale", "main", "clean"], b"R".to_vec()),
+            (vec!["stale: main", "stale: known clean"], b"q".to_vec()),
         ],
         24,
-        132,
+        160,
         |action| {
             if action == 0 {
                 fs::write(&slow_marker, "slow").unwrap();
             }
         },
     );
-    let plain = screen_text(&transcript, 24, 132);
+    let plain = screen_text(&transcript, 24, 160);
     assert!(plain.contains("stale: main") && plain.contains("stale: known clean"));
 }
 
@@ -1099,10 +1673,7 @@ fn inventory_quit_reaps_a_traversal_child_while_traversal_is_active() {
     let mut cancelled_at = None;
     let transcript = run_inventory_pty_actions_with_hook(
         support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
-        &[(
-            vec!["generation 1", "loading local discovery"],
-            b"q".to_vec(),
-        )],
+        &[(vec!["Scanning local repositories"], b"q".to_vec())],
         24,
         132,
         |_| {
@@ -1142,18 +1713,25 @@ fn inventory_rejects_a_probe_result_after_same_path_checkout_replacement() {
     .unwrap();
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
 
-    let transcript = run_inventory_pty_actions_with_hook(
+    let mut inspected = Vec::new();
+    let transcript = run_inventory_pty_with_exit_observing(
         support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
         &[
             (vec!["changed-target", "pending"], b" ".to_vec()),
+            (vec!["changed-target", "stale observation"], b"\r".to_vec()),
             (
-                vec!["changed-target", "stale: target changed during observation"],
-                b"q".to_vec(),
+                vec!["Inspect /", "stale: target changed during observation"],
+                b"\x1b".to_vec(),
             ),
+            (vec!["NORMAL ·", "absent: Inspect /"], b"q".to_vec()),
         ],
         24,
         132,
-        |action| {
+        0,
+        |action, _, frame| {
+            if action == 2 {
+                inspected.push(frame.to_owned());
+            }
             if action == 0 {
                 wait_for_file(&marker);
                 let old = temp.path().join("old-checkout");
@@ -1162,11 +1740,13 @@ fn inventory_rejects_a_probe_result_after_same_path_checkout_replacement() {
             }
         },
     );
-    let plain = screen_text(&transcript, 24, 132);
+    let inspect = screen_text(&inspected[0], 24, 132);
     assert!(
-        plain.contains("stale: target changed during observation"),
-        "changed target remained forever pending instead of becoming stale:\n{plain}"
+        inspect.contains("stale: target changed during observation")
+            && !inspect.contains("github.com/org/old-origin"),
+        "changed target remained forever pending instead of becoming stale:\n{inspect}"
     );
+    let plain = screen_text(&transcript, 24, 132);
     assert!(
         !plain.contains("github.com/org/old-origin"),
         "stale probe result was accepted after target replacement:\n{plain}"
@@ -1200,18 +1780,25 @@ fn inventory_rejects_a_probe_result_after_in_place_origin_config_change() {
     .unwrap();
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
 
-    let transcript = run_inventory_pty_actions_with_hook(
+    let mut inspected = Vec::new();
+    let transcript = run_inventory_pty_with_exit_observing(
         support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
         &[
             (vec!["origin-changed", "pending"], b" ".to_vec()),
+            (vec!["origin-changed", "stale observation"], b"\r".to_vec()),
             (
-                vec!["origin-changed", "stale: target changed during observation"],
-                b"q".to_vec(),
+                vec!["Inspect /", "stale: target changed during observation"],
+                b"\x1b".to_vec(),
             ),
+            (vec!["NORMAL ·", "absent: Inspect /"], b"q".to_vec()),
         ],
         24,
         132,
-        |action| {
+        0,
+        |action, _, frame| {
+            if action == 2 {
+                inspected.push(frame.to_owned());
+            }
             if action == 0 {
                 wait_for_file(&marker);
                 run_git(
@@ -1225,6 +1812,11 @@ fn inventory_rejects_a_probe_result_after_in_place_origin_config_change() {
                 );
             }
         },
+    );
+    let inspect = screen_text(&inspected[0], 24, 132);
+    assert!(
+        !inspect.contains("github.com/org/old-origin"),
+        "stale probe result was accepted after origin config changed:\n{inspect}"
     );
     let plain = screen_text(&transcript, 24, 132);
     assert!(
@@ -1270,24 +1862,25 @@ fn inventory_declared_rows_keep_wrong_corrupt_and_unreadable_facts_distinct() {
     let rows = inventory_rows(&screen_text(&transcript, 24, 500));
     let wrong_row = rows
         .iter()
-        .find(|row| row[0] == "github.com/other/wrong")
+        .find(|row| row[4] == "github.com/other/wrong")
         .expect("wrong-origin checkout row");
-    assert!(wrong_row[1].ends_with("/org/wrong"));
+    assert_eq!(wrong_row[0], "other/wrong");
+    assert_eq!(wrong_row[1], "~/repos/org/wrong");
     assert_eq!(wrong_row[2], "unregistered");
-    assert_eq!(wrong_row[4], "git@github.com:other/wrong.git");
     let declared_wrong = rows
         .iter()
-        .find(|row| row[0] == "github.com/org/wrong")
+        .find(|row| row[4] == "github.com/org/wrong")
         .expect("declared wrong-origin row");
     assert_eq!(declared_wrong[3], "conflict");
+    assert_eq!(declared_wrong[0], "org/wrong");
     let corrupt_row = rows
         .iter()
-        .find(|row| row[1].ends_with("/org/corrupt") && row[0].starts_with("origin error:"))
+        .find(|row| row[0] == "org/corrupt" && row[4].starts_with("origin error:"))
         .unwrap_or_else(|| panic!("corrupt-origin checkout row; parsed rows: {rows:?}"));
     assert!(corrupt_row[4].starts_with("origin error:"));
     let unreadable_row = rows
         .iter()
-        .find(|row| row[0] == "github.com/org/unreadable")
+        .find(|row| row[4] == "github.com/org/unreadable")
         .expect("declared unreadable row");
     assert_eq!(unreadable_row[3], "unreadable");
 }
@@ -1598,7 +2191,7 @@ exclude = ["skip"]
         &[
             "8 rows",
             "ignored repositories: bare.git: bare repository ignored",
-            "local scan complete",
+            "No active operation",
         ],
         b"q",
         80,
@@ -1619,8 +2212,7 @@ exclude = ["skip"]
     }
     for expected in [
         "github.com/org/*",
-        "pattern",
-        "configured:",
+        "org/*",
         "ignored repositories: bare.git: bare repository ignored",
     ] {
         assert!(plain.contains(expected), "missing {expected}:\n{plain}");
@@ -1632,63 +2224,62 @@ exclude = ["skip"]
             "missing exact {label} row {expected:?}; parsed rows: {rows:?}"
         );
     };
-    let root = root.to_string_lossy();
     assert_row(
         "pattern",
         [
+            "org/*".to_owned(),
+            "—".to_owned(),
+            "wildcard".to_owned(),
+            "—".to_owned(),
             "github.com/org/*".to_owned(),
-            format!("{root}/org"),
-            "pattern".to_owned(),
-            "pattern".to_owned(),
-            "git@github.com:org/*.git".to_owned(),
-            "-".to_owned(),
-            "-".to_owned(),
+            "—".to_owned(),
+            "—".to_owned(),
         ],
     );
     assert_row(
         "missing declaration",
         [
-            "github.com/org/missing".to_owned(),
-            format!("{root}/org/missing"),
+            "missing".to_owned(),
+            "~/repos/org/missing".to_owned(),
             "explicit".to_owned(),
             "missing".to_owned(),
-            "git@github.com:org/missing.git".to_owned(),
-            "-".to_owned(),
-            "-".to_owned(),
+            "github.com/org/missing".to_owned(),
+            "—".to_owned(),
+            "—".to_owned(),
         ],
     );
     assert_row(
         "exact managed checkout",
         [
-            "github.com/org/managed".to_owned(),
-            format!("{root}/org/managed"),
+            "managed".to_owned(),
+            "~/repos/org/managed".to_owned(),
             "explicit".to_owned(),
             "cloned".to_owned(),
-            "git@github.com:org/managed.git".to_owned(),
+            "github.com/org/managed".to_owned(),
             "main".to_owned(),
-            "known clean".to_owned(),
+            "clean".to_owned(),
         ],
     );
     assert_row(
         "misplaced duplicate managed checkout",
         [
-            "github.com/org/managed".to_owned(),
-            format!("{root}/elsewhere/managed"),
+            "managed (copy)".to_owned(),
+            "~/repos/elsewhere/managed".to_owned(),
             "explicit".to_owned(),
             "cloned".to_owned(),
-            "git@github.com:org/managed.git".to_owned(),
+            "github.com/org/managed".to_owned(),
             "main".to_owned(),
-            "known clean".to_owned(),
+            "clean".to_owned(),
         ],
     );
     assert_row(
         "wildcard checkout",
         [
-            "github.com/org/extra".to_owned(),
-            format!("{root}/org/extra"),
+            "extra".to_owned(),
+            "~/repos/org/extra".to_owned(),
             "wildcard".to_owned(),
             "cloned".to_owned(),
-            "git@github.com:org/extra.git".to_owned(),
+            "github.com/org/extra".to_owned(),
             "main".to_owned(),
             "1 modified".to_owned(),
         ],
@@ -1696,25 +2287,25 @@ exclude = ["skip"]
     assert_row(
         "excluded checkout",
         [
-            "github.com/org/skip".to_owned(),
-            format!("{root}/org/skip"),
+            "skip".to_owned(),
+            "~/repos/org/skip".to_owned(),
             "excluded".to_owned(),
             "cloned".to_owned(),
-            "git@github.com:org/skip.git".to_owned(),
+            "github.com/org/skip".to_owned(),
             "main".to_owned(),
-            "known clean".to_owned(),
+            "clean".to_owned(),
         ],
     );
     assert_row(
         "originless checkout",
         [
-            "No origin".to_owned(),
-            format!("{root}/local/no-origin"),
+            "no-origin".to_owned(),
+            "~/repos/local/no-origin".to_owned(),
             "unregistered".to_owned(),
             "cloned".to_owned(),
             "No origin".to_owned(),
             "main".to_owned(),
-            "known clean".to_owned(),
+            "clean".to_owned(),
         ],
     );
     assert!(
@@ -1752,13 +2343,13 @@ fn inventory_navigates_every_row_without_shifting_columns() {
                 .env("NO_COLOR", "1"),
             &[
                 (
-                    vec!["selected: github.com/org/repo-00", "local scan complete"],
+                    vec!["selected: repo-00", "Path and origin:"],
                     vec![b'j'; 29],
                 ),
-                (vec!["selected: github.com/org/repo-29"], b"\x1b[A".to_vec()),
-                (vec!["selected: github.com/org/repo-28"], b"k".to_vec()),
-                (vec!["selected: github.com/org/repo-27"], b"\x1b[B".to_vec()),
-                (vec!["selected: github.com/org/repo-28"], b"q".to_vec()),
+                (vec!["selected: repo-29"], b"\x1b[A".to_vec()),
+                (vec!["selected: repo-28"], b"k".to_vec()),
+                (vec!["selected: repo-27"], b"\x1b[B".to_vec()),
+                (vec!["selected: repo-28"], b"q".to_vec()),
             ],
             24,
             80,
@@ -1778,11 +2369,10 @@ fn inventory_navigates_every_row_without_shifting_columns() {
             !screen.contains("repo-00"),
             "viewport failed to scroll:\n{screen}"
         );
-        let selected =
-            highlighted_inventory_row(&transcript, 24, 80, "github.com/org/repo-28").unwrap();
+        let selected = highlighted_inventory_row(&transcript, 24, 80, "repo-28").unwrap();
         let adjacent = screen
             .lines()
-            .find(|line| line.contains("github.com/org/repo-27"))
+            .find(|line| line.contains("repo-27"))
             .unwrap();
         assert_eq!(selected.find("explicit"), adjacent.find("explicit"));
         assert!(transcript.contains("\x1b[?1049l"));
@@ -1818,13 +2408,13 @@ fn inventory_resizes_from_wide_to_compact_without_losing_whole_row_selection() {
                     "origin",
                     "branch",
                     "changes",
-                    "selected: github.com/org/alpha",
-                    "local scan complete",
+                    "selected: alpha",
+                    "No active operation",
                 ],
                 b"j".to_vec(),
             ),
             (
-                vec!["selected: github.com/org/beta", "registration", "changes"],
+                vec!["selected: beta", "registration", "changes"],
                 b"q".to_vec(),
             ),
         ],
@@ -1846,13 +2436,29 @@ fn inventory_resizes_from_wide_to_compact_without_losing_whole_row_selection() {
     };
     let wide = screen_text(wide_frame, 24, 132);
     let compact = screen_text(compact_frame, 24, 80);
-    assert!(wide.contains("path") && wide.contains("origin"), "{wide}");
-    assert!(
-        highlighted_inventory_row(wide_frame, 24, 132, "github.com/org/alpha").is_some(),
+    let wide_header = wide
+        .lines()
+        .find(|line| line.trim_start().starts_with("repository"))
+        .unwrap();
+    assert_eq!(
+        wide_header.split_whitespace().collect::<Vec<_>>(),
+        [
+            "repository",
+            "path",
+            "registration",
+            "checkout",
+            "origin",
+            "branch",
+            "changes"
+        ],
         "{wide}"
     );
     assert!(
-        highlighted_inventory_row(compact_frame, 24, 80, "github.com/org/beta").is_some(),
+        highlighted_inventory_row(wide_frame, 24, 132, "alpha").is_some(),
+        "{wide}"
+    );
+    assert!(
+        highlighted_inventory_row(compact_frame, 24, 80, "beta").is_some(),
         "{compact}"
     );
     for column in [
@@ -1864,15 +2470,23 @@ fn inventory_resizes_from_wide_to_compact_without_losing_whole_row_selection() {
     ] {
         assert!(compact.contains(column), "missing {column}:\n{compact}");
     }
-    assert!(
-        !compact.contains("path") && !compact.contains("origin"),
+    let compact_header = compact
+        .lines()
+        .find(|line| line.trim_start().starts_with("repository"))
+        .unwrap();
+    assert_eq!(
+        compact_header.split_whitespace().collect::<Vec<_>>(),
+        [
+            "repository",
+            "registration",
+            "checkout",
+            "branch",
+            "changes"
+        ],
         "{compact}"
     );
-    let selected = highlighted_inventory_row(compact_frame, 24, 80, "github.com/org/beta").unwrap();
-    let adjacent = compact
-        .lines()
-        .find(|line| line.contains("github.com/org/alpha"))
-        .unwrap();
+    let selected = highlighted_inventory_row(compact_frame, 24, 80, "beta").unwrap();
+    let adjacent = compact.lines().find(|line| line.contains("alpha")).unwrap();
     assert_eq!(
         selected.find("explicit"),
         adjacent.find("explicit"),
@@ -1917,14 +2531,8 @@ fn inventory_navigation_remains_responsive_while_status_is_pending() {
     run_inventory_pty_actions_with_hook(
         support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
         &[
-            (
-                vec!["github.com/org/alpha", "github.com/org/beta", "pending"],
-                b"j".to_vec(),
-            ),
-            (
-                vec!["selected: github.com/org/beta", "pending"],
-                b"q".to_vec(),
-            ),
+            (vec!["alpha", "beta", "pending"], b"j".to_vec()),
+            (vec!["selected: org/beta", "pending"], b"q".to_vec()),
         ],
         24,
         132,
@@ -1950,12 +2558,12 @@ fn inventory_shows_unknown_config_warnings_without_corrupting_the_terminal() {
             (
                 vec![
                     "warning: unknown config key `future_key`",
-                    "local scan complete",
+                    "Path and origin:",
                 ],
                 b"R".to_vec(),
             ),
             (
-                vec!["generation 2", "warning: unknown config key `future_key`"],
+                vec!["warning: unknown config key `other_key`"],
                 b"q".to_vec(),
             ),
         ],
@@ -1963,7 +2571,7 @@ fn inventory_shows_unknown_config_warnings_without_corrupting_the_terminal() {
         120,
         |index| {
             if index == 0 {
-                fs::write(&config, "root = \"repos\"\nfuture_key = \"changed\"\n").unwrap();
+                fs::write(&config, "root = \"repos\"\nother_key = \"changed\"\n").unwrap();
             }
         },
     );
@@ -1987,27 +2595,18 @@ fn inventory_bindings_refresh_atomically_and_keep_failures_sticky() {
         support::lager(&home, &config).arg("inventory"),
         &[
             (
-                vec!["selected: github.com/org/alpha", "n down", "x refresh"],
+                vec!["selected: alpha", "pair: n/k rows", "pair: x refresh"],
                 b"j?".to_vec(),
             ),
-            (vec!["HELP", "n down", "x refresh"], b"\x1b".to_vec()),
+            (vec!["HELP", "n/k Up", "pair: x refresh"], b"\x1b".to_vec()),
+            (vec!["NORMAL", "selected: alpha"], b"n".to_vec()),
+            (vec!["selected: beta"], b"Rx".to_vec()),
+            (vec!["pair: y refresh", "selected: beta"], b"y".to_vec()),
             (
-                vec!["NORMAL", "selected: github.com/org/alpha"],
-                b"n".to_vec(),
-            ),
-            (vec!["selected: github.com/org/beta"], b"Rx".to_vec()),
-            (
-                vec!["generation 2", "y refresh", "selected: github.com/org/beta"],
+                vec!["refresh failed:", "collision", "pair: y refresh"],
                 b"y".to_vec(),
             ),
-            (
-                vec!["refresh failed:", "collision", "y refresh"],
-                b"y".to_vec(),
-            ),
-            (
-                vec!["generation 3", "z refresh", "selected: github.com/org/beta"],
-                b"q".to_vec(),
-            ),
+            (vec!["pair: z refresh", "selected: beta"], b"q".to_vec()),
         ],
         24,
         100,
@@ -2026,7 +2625,10 @@ fn inventory_bindings_refresh_atomically_and_keep_failures_sticky() {
             .unwrap();
         },
     );
-    assert!(screen_text(&transcript, 24, 100).contains("generation 3"));
+    assert!(screen_has_pair(
+        &screen_text(&transcript, 24, 100),
+        "z refresh"
+    ));
 }
 
 #[cfg(unix)]
@@ -2050,24 +2652,33 @@ fn inventory_search_bindings_override_accept_and_retain_the_previous_map_on_refr
         support::lager(&home, &config).arg("inventory"),
         &[
             (
-                vec!["NORMAL", "x refresh", "github.com/org/alpha"],
+                vec!["NORMAL", "pair: x refresh", "alpha"],
                 b"/alpha".to_vec(),
             ),
             (
-                vec!["SEARCH / alpha", "Ctrl+a accept", "Ctrl+e cancel"],
+                vec![
+                    "SEARCH ·",
+                    "/ alpha",
+                    "pair: Ctrl+a accept",
+                    "pair: Ctrl+e cancel",
+                ],
                 b"\r".to_vec(),
             ),
             (
-                vec!["SEARCH / alpha", "github.com/org/alpha"],
+                vec!["SEARCH ·", "/ alpha", "selected: alpha"],
                 b"\x01".to_vec(),
             ),
-            (vec!["NORMAL / alpha", "x refresh"], b"x".to_vec()),
+            (
+                vec!["NORMAL ·", "/ alpha", "pair: x refresh"],
+                b"x".to_vec(),
+            ),
             (
                 vec![
                     "refresh failed:",
                     "preserve ordinary input",
-                    "NORMAL / alpha",
-                    "x refresh",
+                    "NORMAL ·",
+                    "/ alpha",
+                    "pair: x refresh",
                 ],
                 b"q".to_vec(),
             ),
@@ -2107,36 +2718,37 @@ fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
     let transcript = run_inventory_pty_with_exit_observing(
         support::lager(&home, &config).arg("inventory"),
         &[
-            (vec!["local scan complete", "? help"], b"?".to_vec()),
+            (vec!["Path and origin:", "pair: ? help"], b"?".to_vec()),
             (
-                vec!["HELP / inventory", "k/Up up", "z page_up", "x page_down"],
+                vec!["Keyboard / effective bindings", "j/k ↑/↓", "absent: q/Esc"],
                 b"x".to_vec(),
             ),
             (
                 vec![
-                    "HELP / inventory",
-                    "Backspace clear_search",
-                    "Enter inspect",
-                    "m menu",
+                    "Keyboard / effective bindings",
+                    "? / q/Esc",
+                    "absent: j/k ↑/↓",
                 ],
                 b"z".to_vec(),
             ),
             (
-                vec!["HELP / inventory", "k/Up up", "z page_up", "x page_down"],
+                vec!["Keyboard / effective bindings", "j/k ↑/↓", "absent: q/Esc"],
                 b"x".to_vec(),
             ),
             (
                 vec![
-                    "HELP / inventory",
-                    "Backspace clear_search",
-                    "Enter inspect",
-                    "m menu",
+                    "Keyboard / effective bindings",
+                    "? / q/Esc",
+                    "absent: j/k ↑/↓",
                 ],
                 Vec::new(),
             ),
-            (vec!["HELP / inventory", "k/Up up"], vec![17]),
+            (
+                vec!["Keyboard / effective bindings", "j/k ↑/↓", "? / q/Esc"],
+                vec![17],
+            ),
         ],
-        8,
+        10,
         100,
         0,
         |action, writer, frame| match action {
@@ -2152,16 +2764,24 @@ fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
     let [scrolled_frame, resized_frame] = frames.as_slice() else {
         panic!("expected a scrolled and resized help frame: {frames:?}");
     };
-    let scrolled = screen_text(scrolled_frame, 8, 100);
-    assert!(scrolled.contains("Enter inspect"), "{scrolled}");
+    let scrolled = screen_text(scrolled_frame, 10, 100);
+    assert!(scrolled.contains("? / q/Esc"), "{scrolled}");
     assert!(
-        !scrolled.contains("k/Up up"),
+        !scrolled.contains("j/k ↑/↓"),
         "custom page-down did not scroll help: {scrolled}"
     );
 
     let resized = screen_text(resized_frame, 20, 100);
-    for text in ["HELP / inventory", "k/Up up", "x page_down"] {
-        assert!(resized.contains(text), "missing {text}:\n{resized}");
+    assert!(
+        resized.contains("Keyboard / effective bindings"),
+        "{resized}"
+    );
+    assert!(resized.contains("? / q/Esc"), "{resized}");
+    for pair in ["Backspace clear", "m all"] {
+        assert!(
+            screen_has_pair(&resized, pair),
+            "missing {pair}:\n{resized}"
+        );
     }
     assert!(
         transcript.contains("\x1b[?1049l") && transcript.contains("\x1b[?25h"),
@@ -2189,19 +2809,13 @@ fn inventory_selection_follows_a_pending_path_when_its_identity_arrives() {
         shell_word(&release), shell_word(&support::real_tool("git"))
     )).unwrap();
     fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
-    let selected_pending = format!("selected: {}", pending.display());
+    let selected_pending = "selected: z-pending".to_owned();
     run_inventory_pty_actions_with_hook(
         support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
         &[
-            (
-                vec!["selected: github.com/org/zzz", "pending", "z-pending"],
-                b"j".to_vec(),
-            ),
+            (vec!["selected: zzz", "pending", "z-pending"], b"j".to_vec()),
             (vec![&selected_pending], b" ".to_vec()),
-            (
-                vec!["selected: github.com/org/aaa", "local scan complete"],
-                b"q".to_vec(),
-            ),
+            (vec!["selected: aaa", "No active operation"], b"q".to_vec()),
         ],
         24,
         500,
@@ -2307,14 +2921,20 @@ fn inventory_bindings_survive_symlinked_registration_and_hide_planned_actions() 
     let transcript = run_inventory_pty_actions(
         support::lager(&home, &config).arg("inventory"),
         &[
-            (vec!["No repositories found", "x refresh"], b"g?".to_vec()),
-            (vec!["HELP", "Backspace cancel"], vec![127]),
-            (vec!["NORMAL", "x refresh"], b"q".to_vec()),
+            (
+                vec!["No repositories found", "pair: x refresh"],
+                b"g?".to_vec(),
+            ),
+            (vec!["HELP", "pair: Backspace close"], vec![127]),
+            (vec!["NORMAL", "pair: x refresh"], b"q".to_vec()),
         ],
         24,
         100,
     );
-    assert!(!screen_text(&transcript, 24, 100).contains("g register"));
+    assert!(!screen_has_pair(
+        &screen_text(&transcript, 24, 100),
+        "g register"
+    ));
     assert!(
         !fs::read_to_string(&target)
             .unwrap()
@@ -2356,44 +2976,31 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
         support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
         &[
             (
-                vec!["local scan complete", "3 rows"],
+                vec!["No active operation", "3 rows"],
                 b"kkj/cloned\r".to_vec(),
             ),
             (
-                vec!["NORMAL / cloned · 3 rows", "selected: github.com/org/same"],
+                vec!["NORMAL · 3 rows", "/ cloned", "selected: same"],
                 b"R".to_vec(),
             ),
             (
-                vec![
-                    "generation 2",
-                    "NORMAL / cloned · 1 rows",
-                    "github.com/org/alpha",
-                ],
+                vec!["NORMAL · 1 row", "/ cloned", "github.com/org/alpha"],
+                Vec::new(),
+            ),
+            (
+                vec!["No active operation", "explicit", "selected: same"],
+                b"R".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "/ cloned", "github.com/org/alpha"],
                 Vec::new(),
             ),
             (
                 vec![
-                    "generation 2",
-                    "local scan complete",
-                    "explicit",
-                    "selected: github.com/org/same",
-                ],
-                b"R".to_vec(),
-            ),
-            (
-                vec![
-                    "generation 3",
-                    "NORMAL / cloned · 1 rows",
-                    "github.com/org/alpha",
-                ],
-                Vec::new(),
-            ),
-            (
-                vec![
-                    "generation 3",
-                    "local scan complete",
+                    "No active operation",
                     "unregistered",
-                    "selected: github.com/org/same",
+                    "absent: explicit",
+                    "selected: same",
                 ],
                 b"q".to_vec(),
             ),
@@ -2430,17 +3037,14 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
     ] {
         let screen = screen_text(frame, 24, 500);
         assert!(
-            screen.contains("NORMAL / cloned · 3 rows"),
+            screen.contains("NORMAL · 3 rows") && screen.contains("  / cloned"),
             "filter did not survive refresh: {screen}"
         );
-        let highlighted = highlighted_inventory_row(frame, 24, 500, "github.com/org/same")
+        let highlighted = highlighted_inventory_row(frame, 24, 500, "same")
             .unwrap_or_else(|| panic!("{representation} row was not selected:\n{screen}"));
+        assert!(highlighted.contains("~/repos/org/same"), "{highlighted}");
         assert!(
-            highlighted.contains(configured.to_string_lossy().as_ref()),
-            "{highlighted}"
-        );
-        assert!(
-            !highlighted.contains(duplicate.to_string_lossy().as_ref()),
+            !highlighted.contains("~/repos/other"),
             "duplicate path took selection: {highlighted}"
         );
     }
@@ -2449,7 +3053,7 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
     let checkout_rows = inventory_rows(&screen_text(checkout_frame, 24, 500));
     let row_position = |rows: &[Vec<String>], path: &std::path::Path| {
         rows.iter()
-            .position(|row| row[1] == path.to_string_lossy())
+            .position(|row| row[1] == format!("~/{}", path.strip_prefix(&home).unwrap().display()))
             .unwrap_or_else(|| panic!("missing {} in {rows:?}", path.display()))
     };
     assert!(
@@ -2487,9 +3091,9 @@ fn inventory_terminal_equivalent_keys_share_reachability_and_collision_checks() 
         run_inventory_pty_actions(
             support::lager(&home, &config).arg("inventory"),
             &[
-                (vec!["local scan complete"], b"/alpha".to_vec()),
-                (vec!["SEARCH / alpha", binding], vec![input]),
-                (vec!["NORMAL / alpha"], b"q".to_vec()),
+                (vec!["No active operation"], b"/alpha".to_vec()),
+                (vec!["SEARCH ·", "/ alpha", binding], vec![input]),
+                (vec!["NORMAL ·", "/ alpha"], b"q".to_vec()),
             ],
             24,
             132,
@@ -2589,28 +3193,37 @@ fn inventory_menu_refresh_uses_effective_binding_and_preserves_filter() {
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
-    fs::write(&config, "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n[inventory.keys.normal]\nrefresh = [\"x\"]\n").unwrap();
-    run_inventory_pty_actions(
+    let settings = |key: &str| {
+        format!(
+            "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n[inventory.keys.normal]\nrefresh = [\"{key}\"]\n"
+        )
+    };
+    fs::write(&config, settings("x")).unwrap();
+    run_inventory_pty_actions_with_hook(
         support::lager(&home, &config).arg("inventory"),
         &[
-            (vec!["local scan complete"], b"/alpha\rm".to_vec()),
+            (vec!["No active operation"], b"/alpha\rm".to_vec()),
             (
-                vec!["MENU / actions", "x refresh", "clear_search"],
+                vec!["Menu / actions", "pair: x refresh", "clear_search"],
                 b"jjj\r".to_vec(),
             ),
             (
-                vec![
-                    "NORMAL / alpha",
-                    "generation 2",
-                    "selected: github.com/org/alpha",
-                ],
+                vec!["NORMAL ·", "/ alpha", "pair: y refresh", "selected: alpha"],
                 b"m".to_vec(),
             ),
-            (vec!["MENU / actions"], b"x".to_vec()),
-            (vec!["NORMAL / alpha", "generation 3"], b"q".to_vec()),
+            (vec!["Menu / actions"], b"y".to_vec()),
+            (
+                vec!["NORMAL ·", "/ alpha", "pair: z refresh"],
+                b"q".to_vec(),
+            ),
         ],
         24,
         132,
+        |action| match action {
+            1 => fs::write(&config, settings("y")).unwrap(),
+            3 => fs::write(&config, settings("z")).unwrap(),
+            _ => {}
+        },
     );
 }
 
@@ -2631,32 +3244,27 @@ fn inventory_compact_hints_keep_actions_and_popup_exit_routes_visible() {
         &[
             (
                 vec![
-                    "local scan complete",
-                    "Enter inspect",
-                    "m menu",
-                    "Backspace clear_search",
+                    "Path and origin:",
+                    "pair: Enter inspect",
+                    "pair: m menu",
+                    "pair: / search",
+                    "pair: ? help",
+                    "pair: q quit",
                 ],
                 b"m".to_vec(),
             ),
             (
-                vec![
-                    "MENU / actions",
-                    "Enter accept",
-                    "Esc/q cancel",
-                    "Ctrl+q quit",
-                ],
+                vec!["Menu / actions", "j/k ↑/↓ select · Enter choose · Esc back"],
                 b"\r".to_vec(),
             ),
             (
-                vec![
-                    "INSPECT / github.com/org/alpha",
-                    "Enter accept",
-                    "Esc/q cancel",
-                    "Ctrl+q quit",
-                ],
+                vec!["Inspect / alpha", "j/k ↑/↓ scroll · Esc close"],
                 b"\x1b".to_vec(),
             ),
-            (vec!["NORMAL", "Enter inspect", "m menu"], b"q".to_vec()),
+            (
+                vec!["NORMAL", "pair: Enter inspect", "pair: m menu"],
+                b"q".to_vec(),
+            ),
         ],
         24,
         80,
@@ -2674,23 +3282,37 @@ fn inventory_help_uses_the_invoking_mode_and_returns_to_it() {
     run_inventory_pty_actions(
         support::lager(&home, &config).arg("inventory"),
         &[
-            (vec!["local scan complete"], b"/alpha\x1bOP".to_vec()),
+            (vec!["Path and origin:"], b"/alpha\x1bOP".to_vec()),
             (
-                vec!["HELP / inventory", "Ctrl+a accept", "Ctrl+e cancel"],
+                vec![
+                    "Keyboard / effective bindings",
+                    "Search mode",
+                    "Ctrl+a / Ctrl+e",
+                ],
                 b"\x1b".to_vec(),
             ),
-            (vec!["SEARCH / alpha"], vec![5]),
-            (vec!["NORMAL / alpha"], b"m?".to_vec()),
+            (vec!["SEARCH ·", "/ alpha"], vec![5]),
+            (vec!["NORMAL ·", "/ alpha"], b"m?".to_vec()),
             (
-                vec!["HELP / inventory", "j/Down/Tab down", "R refresh"],
+                vec![
+                    "Keyboard / effective bindings",
+                    "Menu mode",
+                    "j/k ↑/↓ Tab/Shift+Tab",
+                    "pair: R refresh",
+                ],
                 b"\x1b".to_vec(),
             ),
-            (vec!["MENU / actions"], b"\r?".to_vec()),
+            (vec!["Menu / actions"], b"\r?".to_vec()),
             (
-                vec!["HELP / inventory", "j/Down/Tab down", "PageDown page_down"],
+                vec![
+                    "Keyboard / effective bindings",
+                    "Inspect mode",
+                    "j/k ↑/↓ Tab/Shift+Tab",
+                    "PageUp/PageDown",
+                ],
                 b"\x1b".to_vec(),
             ),
-            (vec!["INSPECT / github.com/org/alpha"], vec![17]),
+            (vec!["Inspect / alpha"], vec![17]),
         ],
         24,
         80,
@@ -2713,27 +3335,26 @@ fn inventory_inspect_explains_unavailable_actions_without_changing_the_checkout(
     let transcript = run_inventory_pty_actions(
         support::lager(&home, &config).arg("inventory"),
         &[
-            (vec!["local scan complete"], b"\r".to_vec()),
-            (vec!["INSPECT / github.com/org/alpha"], vec![b'j'; 40]),
+            (vec!["Path and origin:"], b"\r".to_vec()),
+            (vec!["Inspect / alpha"], vec![b'j'; 40]),
             (
                 vec![
-                    "Mark: unavailable",
-                    "marking is not implemented",
+                    "pair: Register unavailable",
+                    "pair: Clone unavailable",
+                    "pair: Remove unavailable",
                     "read-only inventory",
-                    "desktop actions",
-                    "offline inventory",
                 ],
                 b"ar \x1b".to_vec(),
             ),
-            (
-                vec!["NORMAL", "selected: github.com/org/alpha"],
-                b"q".to_vec(),
-            ),
+            (vec!["NORMAL", "selected: alpha"], b"q".to_vec()),
         ],
         24,
         80,
     );
-    assert!(!transcript.contains("Mark: available"));
+    assert!(!screen_has_pair(
+        &screen_text(&transcript, 24, 80),
+        "Remove available"
+    ));
     assert_eq!(fs::read_to_string(&config).unwrap(), settings);
     assert_eq!(fs::read(repository.join(".git/HEAD")).unwrap(), head);
     assert_eq!(
@@ -2763,12 +3384,9 @@ fn inventory_inspect_keeps_wildcard_relationships_on_exact_declarations() {
         run_inventory_pty_actions(
             support::lager(&home, &config).arg("inventory"),
             &[
-                (vec!["local scan complete"], b"\r".to_vec()),
+                (vec!["Path and origin:"], b"\r".to_vec()),
                 (
-                    vec![
-                        "INSPECT / github.com/org/team/alpha",
-                        "Registration: explicit",
-                    ],
+                    vec!["Inspect / alpha", "pair: Registration explicit"],
                     vec![b'j'; 60],
                 ),
                 (
@@ -2778,10 +3396,7 @@ fn inventory_inspect_keeps_wildcard_relationships_on_exact_declarations() {
                     ],
                     b"\x1b".to_vec(),
                 ),
-                (
-                    vec!["NORMAL", "selected: github.com/org/team/alpha"],
-                    b"q".to_vec(),
-                ),
+                (vec!["NORMAL", "selected: alpha"], b"q".to_vec()),
             ],
             24,
             80,
@@ -2801,14 +3416,14 @@ fn inventory_menu_scrolls_with_visible_title_and_hints_after_resize() {
     run_inventory_pty_with_exit_observing(
         support::lager(&home, &config).arg("inventory"),
         &[
-            (vec!["local scan complete"], b"m".to_vec()),
-            (vec!["MENU / actions", "inspect"], b"\x1b[6~?".to_vec()),
-            (vec!["HELP / inventory"], b"\x1b".to_vec()),
+            (vec!["Path and origin:"], b"m".to_vec()),
+            (vec!["Menu / actions", "inspect"], b"\x1b[6~?".to_vec()),
+            (vec!["Keyboard / effective bindings"], b"\x1b".to_vec()),
             (
-                vec!["MENU / actions", "Enter accept", "Esc/q cancel"],
+                vec!["Menu / actions", "pair: Enter choose", "pair: Esc back"],
                 b"\x1b[5~\x1b".to_vec(),
             ),
-            (vec!["NORMAL", "absent: MENU / actions"], b"q".to_vec()),
+            (vec!["NORMAL", "absent: Menu / actions"], b"q".to_vec()),
         ],
         12,
         80,
@@ -2821,12 +3436,17 @@ fn inventory_menu_scrolls_with_visible_title_and_hints_after_resize() {
         },
     );
     let small = screen_text(&frames[0], 12, 80);
-    let item = small.lines().nth(4).unwrap();
+    let popup = small
+        .lines()
+        .skip(1)
+        .take(10)
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        item.contains("q quit"),
+        screen_has_pair(&popup, "Ctrl+q quit"),
         "menu did not scroll to its final item:\n{small}"
     );
-    assert!(!item.contains("inspect"));
+    assert!(!popup.contains("inspect"), "{small}");
 }
 
 #[cfg(unix)]
@@ -2857,18 +3477,18 @@ fn inventory_search_and_inspection_remain_live_during_a_controlled_probe() {
         &[
             (vec!["pending"], b"/zphrtrgt".to_vec()),
             (
-                vec!["SEARCH / zphrtrgt", "1 rows", "pending"],
+                vec!["SEARCH ·", "/ zphrtrgt", "1 row", "pending"],
                 b"\x1b".to_vec(),
             ),
-            (vec!["NORMAL / zphrtrgt"], b"\r".to_vec()),
-            (vec!["INSPECT", "Origin: pending"], Vec::new()),
-            (vec!["INSPECT / unavailable"], b"\x1b".to_vec()),
+            (vec!["NORMAL ·", "/ zphrtrgt"], b"\r".to_vec()),
+            (vec!["INSPECT", "pair: Origin pending"], Vec::new()),
+            (vec!["Inspect / unavailable"], b"\x1b".to_vec()),
             (
-                vec!["local scan complete", "NORMAL / zphrtrgt"],
+                vec!["Path and origin:", "NORMAL ·", "/ zphrtrgt"],
                 b"\x7f/git@github.com:org/alpha.git\r".to_vec(),
             ),
             (
-                vec!["NORMAL / git@github.com:org/alpha.git", "1 rows"],
+                vec!["NORMAL ·", "/ git@github.com:org/alpha.git", "1 row"],
                 b"q".to_vec(),
             ),
         ],
@@ -2895,49 +3515,60 @@ fn inventory_dialog_overrides_refresh_atomically_and_keep_all_exit_routes_reacha
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
-    let settings = |accept: &str, menu_accept: &str| {
+    let settings = |accept: &str, menu_accept: &str, refresh: &str| {
         format!(
-            "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n[inventory.keys.menu]\naccept = [{menu_accept}]\ncancel = [\"Ctrl+e\"]\nhelp = [\"F1\"]\nquit = [\"Ctrl+q\"]\n[inventory.keys.inspection]\naccept = [\"{accept}\"]\ncancel = [\"Ctrl+e\"]\nhelp = [\"F1\"]\nquit = [\"Ctrl+q\"]\n"
+            "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n[inventory.keys.normal]\nrefresh = [\"{refresh}\"]\n[inventory.keys.menu]\naccept = [{menu_accept}]\ncancel = [\"Ctrl+e\"]\nhelp = [\"F1\"]\nquit = [\"Ctrl+q\"]\n[inventory.keys.inspection]\naccept = [\"{accept}\"]\ncancel = [\"Ctrl+e\"]\nhelp = [\"F1\"]\nquit = [\"Ctrl+q\"]\n"
         )
     };
-    fs::write(&config, settings("Ctrl+b", "\"Ctrl+a\"")).unwrap();
+    fs::write(&config, settings("Ctrl+b", "\"Ctrl+a\"", "R")).unwrap();
     run_inventory_pty_with_exit(
         support::lager(&home, &config).arg("inventory"),
         &[
-            (vec!["local scan complete"], b"m".to_vec()),
+            (vec!["Path and origin:"], b"m".to_vec()),
             (
-                vec!["MENU / actions", "Ctrl+a accept", "Ctrl+e cancel"],
+                vec!["Menu / actions", "pair: Ctrl+a choose", "pair: Ctrl+e back"],
                 vec![1],
             ),
-            (
-                vec!["INSPECT / github.com/org/alpha", "Ctrl+b accept"],
-                vec![2],
-            ),
+            (vec!["Inspect / alpha", "pair: Ctrl+e close"], vec![2]),
             (vec!["NORMAL", "absent: INSPECT"], b"R".to_vec()),
-            (vec!["generation 2"], b"m\x1bOP".to_vec()),
-            (vec!["HELP / inventory", "Ctrl+d accept"], vec![4]),
-            (vec!["MENU / actions", "absent: HELP"], vec![5]),
+            (vec!["NORMAL ·", "pair: y refresh"], b"m\x1bOP".to_vec()),
+            (
+                vec!["Keyboard / effective bindings", "pair: Ctrl+e close"],
+                vec![4],
+            ),
+            (vec!["Menu / actions", "absent: HELP"], vec![5]),
             (vec!["NORMAL", "absent: MENU"], b"\r".to_vec()),
             (
-                vec!["INSPECT / github.com/org/alpha", "Ctrl+d accept"],
+                vec!["Inspect / alpha", "pair: Ctrl+e close"],
                 b"\x1bOP".to_vec(),
             ),
-            (vec!["HELP / inventory", "Ctrl+d accept"], vec![4]),
-            (vec!["INSPECT", "absent: HELP"], vec![5]),
-            (vec!["NORMAL", "absent: INSPECT"], b"R".to_vec()),
             (
-                vec!["refresh failed:", "must remain reachable"],
+                vec!["Keyboard / effective bindings", "pair: Ctrl+d close"],
+                vec![4],
+            ),
+            (vec!["INSPECT", "absent: HELP"], vec![5]),
+            (vec!["NORMAL", "absent: INSPECT"], b"y".to_vec()),
+            (
+                vec![
+                    "refresh failed:",
+                    "must remain reachable",
+                    "pair: y refresh",
+                ],
                 b"m".to_vec(),
             ),
-            (vec!["MENU / actions", "Ctrl+a accept"], vec![1]),
-            (vec!["INSPECT", "Ctrl+d accept"], vec![17]),
+            (vec!["Menu / actions", "pair: Ctrl+a choose"], vec![1]),
+            (vec!["INSPECT", "pair: Ctrl+e close"], b"\x1bOP".to_vec()),
+            (
+                vec!["Keyboard / effective bindings", "pair: Ctrl+d close"],
+                vec![17],
+            ),
         ],
         24,
         100,
         1,
         |action| match action {
-            3 => fs::write(&config, settings("Ctrl+d", "\"Ctrl+a\"")).unwrap(),
-            11 => fs::write(&config, settings("Ctrl+b", "")).unwrap(),
+            3 => fs::write(&config, settings("Ctrl+d", "\"Ctrl+a\"", "y")).unwrap(),
+            11 => fs::write(&config, settings("Ctrl+b", "", "z")).unwrap(),
             _ => {}
         },
     );
@@ -2947,10 +3578,11 @@ fn inventory_dialog_overrides_refresh_atomically_and_keep_all_exit_routes_reacha
 #[test]
 fn inventory_inspect_keeps_originless_conflict_and_unreadable_facts_distinct() {
     for (case, fact, exit) in [
-        ("originless", "Origin: No origin", 0),
-        ("conflict", "Checkout: conflict", 0),
-        ("unreadable", "Checkout: unreadable", 1),
+        ("originless", ("Origin", "No origin"), 0),
+        ("conflict", ("Checkout", "conflict"), 0),
+        ("unreadable", ("Checkout", "unreadable"), 1),
     ] {
+        let fact = format!("{:<19}{}", fact.0, fact.1);
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         let config = temp.path().join("config.toml");
@@ -2973,13 +3605,13 @@ fn inventory_inspect_keeps_originless_conflict_and_unreadable_facts_distinct() {
         let ready = if case == "unreadable" {
             "partial scan:"
         } else {
-            "local scan complete"
+            "Path and origin:"
         };
         run_inventory_pty_with_exit(
             support::lager(&home, &config).arg("inventory"),
             &[
                 (vec![ready], b"\r".to_vec()),
-                (vec!["INSPECT /", fact], vec![17]),
+                (vec!["Inspect /", fact.as_str()], vec![17]),
             ],
             24,
             80,
@@ -3011,12 +3643,12 @@ fn inventory_no_color_applies_to_rows_and_popups() {
             .env("NO_COLOR", "1"),
         &[
             (
-                vec!["local scan complete", "explicit", "missing"],
+                vec!["Path and origin:", "explicit", "missing"],
                 b"m".to_vec(),
             ),
-            (vec!["MENU / actions"], b"\r".to_vec()),
-            (vec!["INSPECT / github.com/org/alpha"], b"?".to_vec()),
-            (vec!["HELP / inventory"], vec![17]),
+            (vec!["Menu / actions"], b"\r".to_vec()),
+            (vec!["Inspect / alpha"], b"?".to_vec()),
+            (vec!["Keyboard / effective bindings"], vec![17]),
         ],
         24,
         80,
@@ -3031,8 +3663,8 @@ fn inventory_no_color_applies_to_rows_and_popups() {
                 !parameters
                     .split(';')
                     .filter_map(|code| code.parse::<u16>().ok())
-                    .any(|code| matches!(code, 30..=38 | 90..=97)),
-                "NO_COLOR emitted foreground SGR {parameters}"
+                    .any(|code| matches!(code, 30..=38 | 40..=48 | 90..=97 | 100..=107)),
+                "NO_COLOR emitted color SGR {parameters}"
             );
         }
     }
@@ -3052,8 +3684,8 @@ down = ["Ctrl+a", "Ctrl+b", "Ctrl+d", "Ctrl+e", "Ctrl+f", "Ctrl+g", "Ctrl+h", "C
     run_inventory_pty_actions(
         support::lager(&home, &config).arg("inventory"),
         &[
-            (vec!["local scan complete"], b"?".to_vec()),
-            (vec!["HELP / inventory", "Ctrl+x/Ctrl+y"], vec![17]),
+            (vec!["Path and origin:"], b"?".to_vec()),
+            (vec!["Keyboard / effective bindings", "Ctrl+y"], vec![17]),
         ],
         24,
         80,
@@ -3132,59 +3764,56 @@ fn inventory_popup_q_returns_to_the_previous_view() {
     run_inventory_pty_actions(
         support::lager(&home, &config).arg("inventory"),
         &[
+            (vec!["Path and origin:"], b"/github.com/org/beta\r".to_vec()),
             (
-                vec!["local scan complete"],
-                b"/github.com/org/beta\r".to_vec(),
-            ),
-            (
-                vec![
-                    "NORMAL / github.com/org/beta",
-                    "selected: github.com/org/beta",
-                ],
+                vec!["NORMAL ·", "/ github.com/org/beta", "selected: beta"],
                 b"m".to_vec(),
             ),
-            (vec!["MENU / actions"], b"?".to_vec()),
-            (vec!["HELP / inventory"], b"q".to_vec()),
-            (vec!["MENU / actions", "absent: HELP"], b"q".to_vec()),
+            (vec!["Menu / actions"], b"?".to_vec()),
+            (vec!["Keyboard / effective bindings"], b"q".to_vec()),
+            (vec!["Menu / actions", "absent: HELP"], b"q".to_vec()),
             (
                 vec![
-                    "NORMAL / github.com/org/beta",
-                    "selected: github.com/org/beta",
+                    "NORMAL ·",
+                    "/ github.com/org/beta",
+                    "selected: beta",
                     "absent: MENU",
                 ],
                 b"\r".to_vec(),
             ),
-            (vec!["INSPECT / github.com/org/beta"], b"?".to_vec()),
-            (vec!["HELP / inventory"], b"q".to_vec()),
-            (
-                vec!["INSPECT / github.com/org/beta", "absent: HELP"],
-                b"q".to_vec(),
-            ),
+            (vec!["Inspect / beta"], b"?".to_vec()),
+            (vec!["Keyboard / effective bindings"], b"q".to_vec()),
+            (vec!["Inspect / beta", "absent: HELP"], b"q".to_vec()),
             (
                 vec![
-                    "NORMAL / github.com/org/beta",
-                    "selected: github.com/org/beta",
+                    "NORMAL ·",
+                    "/ github.com/org/beta",
+                    "selected: beta",
                     "absent: INSPECT",
                 ],
                 b"?".to_vec(),
             ),
-            (vec!["HELP / inventory"], b"q".to_vec()),
+            (vec!["Keyboard / effective bindings"], b"q".to_vec()),
             (
                 vec![
-                    "NORMAL / github.com/org/beta",
-                    "selected: github.com/org/beta",
+                    "NORMAL ·",
+                    "/ github.com/org/beta",
+                    "selected: beta",
                     "absent: HELP",
                 ],
                 b"/\x1bOP".to_vec(),
             ),
-            (vec!["HELP / inventory"], b"q".to_vec()),
+            (vec!["Keyboard / effective bindings"], b"q".to_vec()),
             (
-                vec!["SEARCH / github.com/org/beta", "absent: HELP"],
+                vec!["SEARCH ·", "/ github.com/org/beta", "absent: HELP"],
                 b"q".to_vec(),
             ),
-            (vec!["SEARCH / github.com/org/betaq"], b"\x1b".to_vec()),
-            (vec!["NORMAL / github.com/org/betaq"], vec![127]),
-            (vec!["NORMAL /  · 2 rows"], b"q".to_vec()),
+            (vec!["SEARCH ·", "/ github.com/org/betaq"], b"\x1b".to_vec()),
+            (vec!["NORMAL ·", "/ github.com/org/betaq"], vec![127]),
+            (
+                vec!["NORMAL · 2 rows", "/ Search repositories"],
+                b"q".to_vec(),
+            ),
         ],
         24,
         80,
@@ -3213,14 +3842,14 @@ fn inventory_popup_quit_routes_and_explicit_overrides_remain_effective() {
         )
         .unwrap();
         for (open, title) in [
-            (b"m", "MENU / actions"),
-            (b"\r", "INSPECT / github.com/org/alpha"),
-            (b"?", "HELP / inventory"),
+            (b"m", "Menu / actions"),
+            (b"\r", "Inspect / alpha"),
+            (b"?", "Keyboard / effective bindings"),
         ] {
             let transcript = run_inventory_pty_actions(
                 support::lager(&home, &config).arg("inventory"),
                 &[
-                    (vec!["local scan complete"], open.to_vec()),
+                    (vec!["Path and origin:"], open.to_vec()),
                     (vec![title], quit.clone()),
                 ],
                 24,
@@ -3357,6 +3986,11 @@ fn run_inventory_pty_with_exit_observing(
                         repository,
                     )
                     .is_some()
+                } else if let Some(pair) = text.strip_prefix("pair: ") {
+                    screen_has_pair(
+                        &screen_text(completed_frame, rows as usize, cols as usize),
+                        pair,
+                    )
                 } else if let Some(absent) = text.strip_prefix("absent: ") {
                     !screen_text(completed_frame, rows as usize, cols as usize).contains(absent)
                 } else {
@@ -3523,16 +4157,52 @@ impl Drop for FixtureProcesses {
     }
 }
 
+/// Splits table rows at the column header offsets; rows end at the first line whose
+/// registration cell holds no registration label.
 #[cfg(unix)]
 fn inventory_rows(screen: &str) -> Vec<Vec<String>> {
-    screen
-        .lines()
-        .map(|line| line.trim_matches('│').trim().trim_start_matches("> "))
-        .filter(|line| line.matches(" | ").count() >= 6)
+    let lines = screen.lines().collect::<Vec<_>>();
+    let Some(header) = lines.iter().position(|line| {
+        line.trim_start().starts_with("repository") && line.contains("registration")
+    }) else {
+        return Vec::new();
+    };
+    let mut offsets = Vec::new();
+    let mut from = 0;
+    for heading in lines[header].split_whitespace() {
+        let start = lines[header][from..].find(heading).unwrap() + from;
+        offsets.push(start);
+        from = start + heading.len();
+    }
+    let registration = lines[header]
+        .split_whitespace()
+        .position(|heading| heading == "registration")
+        .unwrap();
+    let cell = |line: &str, column: usize| {
+        let characters = line.chars().collect::<Vec<_>>();
+        let start = if column == 0 { 0 } else { offsets[column] };
+        let end = offsets.get(column + 1).copied().unwrap_or(characters.len());
+        characters[start.min(characters.len())..end.min(characters.len())]
+            .iter()
+            .collect::<String>()
+            .trim()
+            .to_owned()
+    };
+    lines[header + 1..]
+        .iter()
+        .take_while(|line| {
+            [
+                "explicit",
+                "wildcard",
+                "excluded",
+                "unregistered",
+                "pattern",
+            ]
+            .contains(&cell(line, registration).as_str())
+        })
         .map(|line| {
-            line.split(" | ")
-                .map(str::trim)
-                .map(str::to_owned)
+            (0..offsets.len())
+                .map(|column| cell(line, column))
                 .collect()
         })
         .collect()
@@ -3632,6 +4302,18 @@ fn highlighted_inventory_row(
                     .to_owned()
             })
         })
+}
+
+/// Matches a key/label or field/value pair as adjacent words on one screen line, whatever
+/// column padding separates them.
+fn screen_has_pair(screen: &str, pair: &str) -> bool {
+    let (first, second) = pair.rsplit_once(' ').expect("pair has two words");
+    screen.lines().any(|line| {
+        line.split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|words| words == [first, second])
+    })
 }
 
 fn screen_text(input: &str, rows: usize, cols: usize) -> String {
