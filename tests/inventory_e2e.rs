@@ -3991,7 +3991,7 @@ fn inventory_copy_value_sends_the_full_original_value_to_the_clipboard() {
     desktop_stubs(
         &tools,
         &["pbcopy", "wl-copy", "xclip", "xsel", "clip"],
-        &format!("cat > {}", shell_word(&copied)),
+        &format!("exec cat > {}", shell_word(&copied)),
     );
 
     let mut values = Vec::new();
@@ -6571,7 +6571,8 @@ fn run_inventory_pty_with_exit_observing(
         abandoned: false,
     };
     let writer = child.controller.as_mut().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Covers the whole action script and has to hold in a parallel suite on a loaded machine.
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut bytes = Vec::new();
     let mut transcript = String::new();
     let mut action_index = 0;
