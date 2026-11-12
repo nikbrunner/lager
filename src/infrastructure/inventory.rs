@@ -315,7 +315,11 @@ pub fn scan_local_repositories(root: &Path) -> LocalScan {
     let handle = start_local_scan(root.to_path_buf());
     while let Ok(event) = handle.receiver.recv() {
         match event {
-            ScanEvent::Failure { .. } => {}
+            ScanEvent::Failure { path, message } => scan.failures.push(ScanDiagnostic {
+                path,
+                message,
+                incomplete: false,
+            }),
             ScanEvent::Discovered { path, .. } => scan.pending_paths.push(path),
             ScanEvent::Checkout { checkout, .. } => scan.checkouts.push(checkout),
             ScanEvent::Diagnostic { diagnostic, .. } => {
@@ -329,6 +333,8 @@ pub fn scan_local_repositories(root: &Path) -> LocalScan {
     scan.checkouts
         .sort_by(|left, right| left.path.cmp(&right.path));
     scan.diagnostics
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    scan.failures
         .sort_by(|left, right| left.path.cmp(&right.path));
     scan
 }

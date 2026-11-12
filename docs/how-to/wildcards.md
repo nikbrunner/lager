@@ -8,7 +8,7 @@ url = "github.com/my-org/*"
 exclude = ["retired"]
 ```
 
-The provider expands this pattern for `ensure`, `list --remote`, and no-argument picker commands. `add` never clones a wildcard directly.
+The provider expands this pattern for `ensure`, `status --remote`, and no-argument picker commands. `add` never clones a wildcard directly.
 
 ## Exclude or restore one member
 
@@ -39,10 +39,10 @@ transaction. `unregister REPOSITORY` removes that explicit declaration and
 excludes the member from every matching wildcard. Repeating either operation
 without changing the hook is a no-op.
 
-Lager expands members in declaration order, applies exclusions and explicit precedence, then deduplicates them. Offline `list` preserves the wildcard rule and exclusions without contacting a provider. Use `--include-archived` to include archived members; with `list`, that requires `--remote`.
+Lager expands members in declaration order, applies exclusions and explicit precedence, then deduplicates them. Offline `status` shows the wildcard rule as its own row, with its exclusions, and lists only the members that have a checkout. `status --remote` adds the members that exist only on the provider, with checkout `remote only`. Use `--include-archived` to include archived members; with `status`, that requires `--remote`.
 
 See the [configuration reference](../reference/config.md) for the complete wildcard validation rules.
 
 Human rows and provider diagnostics use visible escapes for terminal controls;
 this does not alter matching, exclusions, or stored patterns. For automation,
-read `list --remote --json` rather than parsing escaped human rows.
+read `status --remote --json` rather than parsing escaped human rows.

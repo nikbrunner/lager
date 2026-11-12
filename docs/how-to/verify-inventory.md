@@ -51,8 +51,8 @@ configuration for the printed sandbox config.
 
 ## Regression and sign-off
 
-- [ ] Confirm standalone `list --json` remains declaration-only using a separate disposable config. Do not run mutation checks on real repositories as part of this walkthrough.
-  - Agent check: PASS — CLI, declaration JSON, public-library and safe config-persistence regression suites.
+- [ ] Run `lager status --json` against the same fixture and confirm its rows match the rows the inventory showed, in the same order. Do not run mutation checks on real repositories as part of this walkthrough.
+  - Agent check: PASS — `status_prints_the_rows_the_inventory_screen_shows` compares the PTY rows with `status`; CLI, public-library and safe config-persistence regression suites.
 
 | Tester/date | Build | Terminal/profile/size | Result or defect and capture |
 | --- | --- | --- | --- |

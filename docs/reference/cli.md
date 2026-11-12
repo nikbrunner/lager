@@ -23,10 +23,12 @@ Lager selects the configuration path in this order:
 | `remove` | `remove [REPOSITORY]... [--unregister\|--keep-registered] [--yes] [--force]` | Permanently deletes validated local checkouts. `--force` accepts local-state warnings only. |
 | `ensure` | `ensure [--include-archived]` | Creates missing effective declarations sequentially. |
 | `hook` | `hook [REPOSITORY]...` | Runs hooks for explicit declarations. Without repositories, it selects explicit declarations. |
-| `list`, `ls` | `list [--remote] [--include-archived] [--json]` | Reports declarations and local state. `--remote` expands wildcards through providers. |
+| `status`, `list`, `ls` | `status [--remote] [--include-archived] [--registered] [--json]` | Prints the rows `tui` shows, once its scan has finished: a table, or one JSON document with `--json`. `--remote` expands wildcards through providers; `--registered` keeps declared repositories and wildcard patterns. |
 | `tui` | `tui` | Opens the offline overview with registration actions; requires TTY stdin and stdout. |
 
-`ls` is a visible alias for `list`. Both names accept the same arguments, options, and configuration selection, and produce identical data output and exit statuses. Help and usage text reflect the invoked name.
+`list` and `ls` are visible aliases of `status`. All three names accept the same arguments, options, and configuration selection, and produce identical output and exit statuses.
+
+`status` needs no terminal. It scans the root the way `tui` does, through Git with optional locks off, and writes nothing to the configuration or to any repository. The table has the columns of the wide inventory grid (repository, path, registration, checkout, origin, branch, changes) with the same cell text, aligned with two spaces, never truncated. A repository the provider reports as archived reads `NAME [archived]` in the repository column. An empty inventory prints the header only. Each problem (an unreadable path, a failed Git observation, a failed provider) is one line on stderr, and the rows are still printed. See [status JSON](status-json.md) for the document.
 
 Repository arguments accept canonical IDs such as `github.com/org/project`, GitHub shorthand such as `org/project`, and full SCP, SSH, HTTP(S), or file clone URLs. GitHub shorthand becomes an SSH clone URL.
 
@@ -57,8 +59,8 @@ of embedding credentials. See [configuration](config.md) for loaded-config behav
 | Interactive `add` without a registration choice | Asks whether to register each successful checkout, default yes, then offers its hook. |
 | Interactive `remove` without `--yes` | Asks to remove each existing checkout, default no. |
 | Interactive `remove` without a registration choice | Asks whether to unregister after successful or absent disk removal, default yes. |
-| `list` without `--remote` | Reads configuration and disk only. Wildcards remain unexpanded. |
-| `list` without `--json` | Renders human-readable tab-separated rows. |
+| `status` without `--remote` | Reads configuration and disk only. Wildcard members appear only where a checkout exists. |
+| `status` without `--json` | Prints an aligned table with a header row. |
 
 `init` still writes the configuration when Git, `fzf`, or authenticated `gh` is missing. It reports those missing tools on stderr.
 
@@ -294,19 +296,19 @@ Outside a terminal, Lager never prompts:
 - `init` requires `--root`, one root-creation choice, and one GitHub choice.
 - `add` requires exactly one of `--register` or `--no-register`, unless `--post-clone` supplies registration.
 - `remove` requires exactly one of `--unregister` or `--keep-registered`, plus `--yes`.
-- `tui` requires TTY stdin and stdout; use `list --json` for automation.
+- `tui` requires TTY stdin and stdout; use `status --json` for automation.
 
-`--post-clone` conflicts with `--no-register`. `list --include-archived` requires `--remote`. Explicit repository arguments bypass the picker.
+`--post-clone` conflicts with `--no-register`. `status --include-archived` requires `--remote`. Explicit repository arguments bypass the picker.
 
 ## Output and exit status
 
-Flag-driven and JSON output contain no interactive styling. `list --json` writes one stable JSON document to stdout; warnings and provider failures use stderr. Git and hook processes retain their native streams. A selected repository without a post-clone hook reports that on stderr.
+Flag-driven and JSON output contain no interactive styling. `status --json` writes one stable JSON document to stdout; warnings and problems use stderr. Git and hook processes retain their native streams. A selected repository without a post-clone hook reports that on stderr.
 
 Lager-owned human fields escape C0, DEL, and C1 controls: newline, carriage
 return, and tab appear as `\n`, `\r`, and `\t`; other controls appear as
 `\x00` through `\x9f`. Literal backslashes appear as `\\`, so a literal
-`\x1b` cannot impersonate an escaped ESC. Human list columns and picker columns
-retain renderer-owned tabs; field values cannot inject extra rows or columns.
+`\x1b` cannot impersonate an escaped ESC. Status table columns and picker columns
+are separated by the renderer; field values cannot inject extra rows or columns.
 This applies to diagnostics, progress messages, prompt labels/default hints, and
 picker labels. It does not change references, paths, hook commands, prompt
 answers, JSON field values, or native Git/hook streams.
@@ -319,4 +321,4 @@ candidates by hidden row ID, in the order returned by the picker.
 
 A picker or repository interaction cancellation exits 130. Inventory's `q` and Esc use the session exit status described above. Invalid usage exits 2. Configuration, provider, Git, hook, filesystem, and aggregate failures exit 1. Success, no-op, empty selections, and explicitly skipped removals exit 0.
 
-See [JSON output](list-json.md), [exit codes](exit-codes.md), [automation](../how-to/automation.md), and [safe removal](../how-to/remove-safely.md) for the detailed contracts.
+See [status JSON](status-json.md), [exit codes](exit-codes.md), [automation](../how-to/automation.md), and [safe removal](../how-to/remove-safely.md) for the detailed contracts.

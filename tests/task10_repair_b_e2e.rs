@@ -69,7 +69,7 @@ fn non_tty_json_output_remains_one_undecorated_document() -> TestResult {
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
-    fs::create_dir_all(&home)?;
+    fs::create_dir_all(home.join("repos"))?;
     fs::write(&config, "root = \"repos\"\n")?;
 
     let output = support::lager(&home, &config)
@@ -80,7 +80,7 @@ fn non_tty_json_output_remains_one_undecorated_document() -> TestResult {
     assert!(output.stderr.is_empty());
     assert!(!output.stdout.contains(&0x1b));
     let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
     Ok(())
 }
 
@@ -112,7 +112,7 @@ fn observable_outbound_tripwire_records_remote_access_and_localhost_bypasses_it(
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
-    fs::create_dir_all(&home)?;
+    fs::create_dir_all(home.join("repos"))?;
 
     let local = TcpListener::bind("127.0.0.1:0")?;
     let local_url = format!("http://{}", local.local_addr()?);

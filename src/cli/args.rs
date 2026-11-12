@@ -39,10 +39,10 @@ pub enum Command {
     #[command(about = "Run configured hooks for explicit repositories")]
     Hook(HookArgs),
     #[command(
-        visible_alias = "ls",
-        about = "Show declarations and local repository state"
+        visible_aliases = ["list", "ls"],
+        about = "Print the inventory rows as a table or one JSON document"
     )]
-    List(ListArgs),
+    Status(StatusArgs),
     #[command(name = "tui", about = "Open the repository inventory")]
     Inventory(InventoryArgs),
 }
@@ -183,11 +183,13 @@ pub struct HookArgs {
 }
 
 #[derive(Debug, ClapArgs)]
-pub struct ListArgs {
+pub struct StatusArgs {
     #[arg(long, help = "Query providers for expanded wildcard members")]
     pub remote: bool,
     #[arg(long, help = "Include archived repositories; requires --remote")]
     pub include_archived: bool,
+    #[arg(long, help = "Show only declared repositories and wildcard patterns")]
+    pub registered: bool,
     #[arg(long, help = "Render one stable JSON document")]
     pub json: bool,
 }

@@ -39,5 +39,11 @@ result or performs cleanup. `lager::cli::run()` installs no signal handlers for
 library callers. `lager::cli::run_binary()` scopes its interruption policy to
 inventory and restores previous signal actions afterward.
 
-For `list --json`, only the versioned document is written to stdout; warnings
-and provider errors remain on stderr.
+`status` (and its aliases `list` and `ls`) exits `0` when the scan finished
+and nothing failed. It exits `1` when a path could not be read, a Git
+observation failed, or a provider failed with `--remote`: the failures that
+make a `tui` session exit `1`. A root that does not exist is an unreadable
+path. The rows are printed in every case, and each failure is one line on
+stderr. Invalid flags exit `2` and invalid configuration exits `1`, both before
+any output. With `--json`, only the versioned document is written to stdout;
+its `problems` list holds the same failures.

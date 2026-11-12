@@ -307,7 +307,7 @@ fn remote_list_uses_configured_github_cli_and_filters_archived_repositories()
     let home = temp.path().join("home");
     let bin = temp.path().join("bin");
     let config = temp.path().join("config.toml");
-    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(home.join("repos"))?;
     std::fs::create_dir_all(&bin)?;
     let gh = bin.join("gh");
     std::fs::write(
@@ -333,21 +333,21 @@ JSON
         String::from_utf8_lossy(&output.stderr)
     );
     let document: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    let rows = document["repositories"].as_array().unwrap();
     assert_eq!(
-        rows.len(),
-        1,
+        members(&document),
+        [member("github.com/org/active", "remote_only", false)],
         "stdout: {} stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(rows[0]["identity"], "github.com/org/active");
+    assert_eq!(patterns(&document), ["github.com/org/*"]);
     assert!(
-        rows[0]["destination"]
+        document["rows"][0]["configured_path"]
             .as_str()
             .unwrap()
             .ends_with("/repos/github/team/org/active")
     );
+    assert_eq!(document["problems"], serde_json::json!([]));
     Ok(())
 }
 
@@ -357,7 +357,7 @@ fn cloud_pagination_rejects_cross_origin_before_bearer_or_basic_credentials_leak
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
-    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(home.join("repos"))?;
     let attacker = HttpFixture::new(vec![(
         "/steal".to_owned(),
         "{\"values\":[],\"next\":null}".to_owned(),
@@ -392,6 +392,9 @@ fn cloud_pagination_rejects_cross_origin_before_bearer_or_basic_credentials_leak
         let output = run_with_env(&home, &config, &["list", "--remote", "--json"], &variables)?;
         assert_eq!(output.status.code(), Some(1), "{auth}");
         assert!(String::from_utf8_lossy(&output.stderr).contains("origin"));
+        let document: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(document["problems"][0]["source"], "provider", "{auth}");
+        assert_eq!(document["problems"].as_array().unwrap().len(), 1, "{auth}");
         assert!(attacker.requests().is_empty(), "{auth} credentials leaked");
     }
     Ok(())
@@ -403,7 +406,7 @@ fn cloud_pagination_accepts_relative_and_same_origin_opaque_links()
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
-    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(home.join("repos"))?;
     let fixture = HttpFixture::new(vec![
         (
             "/2.0/repositories/workspace".to_owned(),
@@ -474,17 +477,19 @@ fn bitbucket_discovery_ignores_unused_clone_links_and_excluded_archives() {
                 fixture.base
             );
             std::fs::write(&config, &original).unwrap();
+            std::fs::create_dir_all(temp.path().join("repos")).unwrap();
             let output = support::lager(temp.path(), &config)
                 .args(["list", "--remote", "--json"])
                 .output()
                 .unwrap();
             assert!(output.status.success(), "{preset}: {output:?}");
             let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(json["repositories"].as_array().unwrap().len(), 1);
             assert_eq!(
-                json["repositories"][0]["identity"],
-                "bitbucket.org/workspace/repo"
+                members(&json),
+                [member("bitbucket.org/workspace/repo", "remote_only", false)],
+                "{preset}"
             );
+            assert_eq!(patterns(&json), ["bitbucket.org/workspace/*"]);
             assert!(!String::from_utf8_lossy(&output.stdout).contains("SENTINEL"));
             assert!(!String::from_utf8_lossy(&output.stderr).contains("SENTINEL"));
             assert_eq!(std::fs::read_to_string(config).unwrap(), original);
@@ -498,7 +503,7 @@ fn cloud_listing_follows_opaque_next_filters_archived_and_ensures_idempotently()
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
-    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(home.join("repos"))?;
     let remote_root = temp.path().join("remotes");
     std::fs::create_dir_all(&remote_root)?;
     std::fs::create_dir_all(remote_root.join("workspace"))?;
@@ -537,9 +542,17 @@ fn cloud_listing_follows_opaque_next_filters_archived_and_ensures_idempotently()
         fixture.requests()
     );
     let listed: serde_json::Value = serde_json::from_slice(&list.stdout)?;
-    assert_eq!(listed["repositories"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        members(&listed),
+        [member(
+            "bitbucket.org/workspace/active",
+            "remote_only",
+            false
+        )]
+    );
+    assert_eq!(patterns(&listed), ["bitbucket.org/workspace/*"]);
     assert!(
-        listed["repositories"][0]["destination"]
+        listed["rows"][0]["configured_path"]
             .as_str()
             .unwrap()
             .ends_with("/repos/cloud/team/workspace/active")
@@ -551,11 +564,11 @@ fn cloud_listing_follows_opaque_next_filters_archived_and_ensures_idempotently()
     )?;
     assert!(include.status.success());
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&include.stdout)?["repositories"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
+        members(&serde_json::from_slice(&include.stdout)?),
+        [
+            member("bitbucket.org/workspace/active", "remote_only", false),
+            member("bitbucket.org/workspace/old", "remote_only", true),
+        ]
     );
     let excluded_config = std::fs::read_to_string(&config)?.replace(
         "url = \"bitbucket.org/workspace/*\"",
@@ -569,11 +582,12 @@ fn cloud_listing_follows_opaque_next_filters_archived_and_ensures_idempotently()
     )?;
     assert!(excluded.status.success());
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&excluded.stdout)?["repositories"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
+        members(&serde_json::from_slice(&excluded.stdout)?),
+        [member(
+            "bitbucket.org/workspace/active",
+            "remote_only",
+            false
+        )]
     );
     let requests = fixture.requests();
     assert!(
@@ -708,11 +722,26 @@ fn provider_failures_preserve_successful_rows_and_skip_fzf_when_all_fail()
             fixture.base
         ),
     )?;
+    std::fs::create_dir_all(home.join("repos"))?;
     let listed = run(&home, &config, &["list", "--remote", "--json"])?;
     assert_eq!(listed.status.code(), Some(1));
     let document: serde_json::Value = serde_json::from_slice(&listed.stdout)?;
-    assert_eq!(document["repositories"].as_array().unwrap().len(), 1);
-    assert_eq!(document["provider_errors"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        members(&document),
+        [member(
+            "bitbucket.org/workspace/active",
+            "remote_only",
+            false
+        )]
+    );
+    assert_eq!(
+        patterns(&document),
+        ["bitbucket.org/workspace/*", "dc.example/project/*"]
+    );
+    let problems = document["problems"].as_array().unwrap();
+    assert_eq!(problems.len(), 1);
+    assert_eq!(problems[0]["source"], "provider");
+    assert_eq!(problems[0]["subject"], "dc.example");
     assert!(String::from_utf8_lossy(&listed.stderr).contains("dc.example"));
     let alias = run(&home, &config, &["ls", "--remote", "--json"])?;
     assert_eq!(alias.status.code(), listed.status.code());
@@ -779,7 +808,7 @@ fn data_center_uses_personal_project_path_auth_headers_and_destination_mapping()
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
-    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(home.join("repos"))?;
     let remote_root = temp.path().join("dc-remotes");
     std::fs::create_dir_all(remote_root.join("~alice"))?;
     bare_remote(&remote_root.join("~alice"), "active")?;
@@ -814,18 +843,21 @@ fn data_center_uses_personal_project_path_auth_headers_and_destination_mapping()
         fixture.requests()
     );
     let document: serde_json::Value = serde_json::from_slice(&bearer.stdout)?;
-    let row = &document["repositories"][0];
+    let row = &document["rows"][0];
     assert_eq!(
-        row["clone_url"],
+        row["origin"]["value"],
         "ssh://forge@dc.example:2222/~alice/active.git"
     );
     assert!(
-        row["destination"]
+        row["configured_path"]
             .as_str()
             .unwrap()
             .ends_with("/company/alice/active")
     );
-    assert_eq!(document["repositories"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        members(&document),
+        [member("dc.example/~alice/active", "remote_only", false)]
+    );
     let requests = fixture.requests();
     assert!(requests.iter().any(
         |(path, auth)| path.contains("projects/~alice/repos?start=0")
@@ -866,11 +898,11 @@ fn data_center_uses_personal_project_path_auth_headers_and_destination_mapping()
         String::from_utf8_lossy(&basic.stderr)
     );
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&basic.stdout)?["repositories"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
+        members(&serde_json::from_slice(&basic.stdout)?),
+        [
+            member("dc.example/~alice/old", "remote_only", true),
+            member("dc.example/~alice/active", "cloned", false),
+        ]
     );
     let requests = fixture.requests();
     assert!(requests.iter().any(|(_, auth)| auth.starts_with("Basic ")));
@@ -907,13 +939,18 @@ fn cloud_bearer_and_basic_environment_credentials_succeed_without_persistence() 
             fixture.base
         );
         std::fs::write(&config, &original).unwrap();
+        std::fs::create_dir_all(temp.path().join("repos")).unwrap();
         let output =
             run_with_env(temp.path(), &config, &["list", "--remote", "--json"], &envs).unwrap();
         assert!(output.status.success(), "{output:?}");
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(
-            value["repositories"][0]["identity"],
-            "bitbucket.org/workspace/active"
+            members(&value),
+            [member(
+                "bitbucket.org/workspace/active",
+                "remote_only",
+                false
+            )]
         );
         assert_eq!(
             fixture.requests(),
@@ -942,6 +979,38 @@ fn cloud_bearer_and_basic_environment_credentials_succeed_without_persistence() 
         }
         assert!(!saved.contains(expected));
     }
+}
+
+/// The rows a status document lists besides the wildcard patterns, as identity, checkout and
+/// archived flag.
+fn members(document: &serde_json::Value) -> Vec<(String, String, serde_json::Value)> {
+    document["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["kind"] != "pattern")
+        .map(|row| {
+            (
+                row["identity"].as_str().unwrap().to_owned(),
+                row["checkout"].as_str().unwrap().to_owned(),
+                row["archived"].clone(),
+            )
+        })
+        .collect()
+}
+
+fn member(identity: &str, checkout: &str, archived: bool) -> (String, String, serde_json::Value) {
+    (identity.to_owned(), checkout.to_owned(), archived.into())
+}
+
+fn patterns(document: &serde_json::Value) -> Vec<&str> {
+    document["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["kind"] == "pattern")
+        .map(|row| row["identity"].as_str().unwrap())
+        .collect()
 }
 
 fn run_with_env(

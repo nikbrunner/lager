@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::application::ports::{ProviderCatalog, ProviderFailure};
 use crate::domain::config::{Config, RepositoryDeclaration};
 use crate::domain::repository::RepositoryRef;
 
@@ -25,6 +26,8 @@ pub struct InventoryRow {
     pub origin: String,
     /// The original origin URL, when the row has one; `origin` is display text.
     pub remote: Option<String>,
+    /// What the origin probe found, for a row with an observed checkout.
+    pub origin_fact: Option<OriginFact>,
     pub branch: ObservationField,
     pub changes: ObservationField,
     pub configured_destination: Option<PathBuf>,
@@ -32,6 +35,8 @@ pub struct InventoryRow {
     pub declaration: Option<String>,
     pub warnings: Vec<String>,
     pub markable: bool,
+    /// Whether the provider reports the repository as archived; `None` until a provider says.
+    pub archived: Option<bool>,
 }
 
 /// A row key deliberately preserves the observed platform path. Display strings are lossy.
@@ -66,6 +71,8 @@ pub enum CheckoutState {
     Unknown,
     Conflict,
     Unreadable,
+    /// A provider member with no local checkout and nothing at its configured destination.
+    RemoteOnly,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +149,8 @@ pub struct LocalScan {
     /// A probe's immutable target snapshot changed before its result could be applied.
     pub stale_paths: Vec<PathBuf>,
     pub diagnostics: Vec<ScanDiagnostic>,
+    /// Git observations that failed; the checkout keeps the failed fields as errors.
+    pub failures: Vec<ScanDiagnostic>,
     pub incomplete: bool,
     pub complete: bool,
 }
@@ -172,34 +181,7 @@ pub fn build_inventory(
     home: &Path,
     scan: LocalScan,
 ) -> Result<InventoryReport, String> {
-    let root = config
-        .resolve_root(home)
-        .map_err(|error| error.to_string())?;
-    let mut concrete = Vec::new();
-    let mut wildcards = Vec::new();
-    for declaration in &config.repositories {
-        let reference =
-            RepositoryRef::parse(&declaration.url).map_err(|error| error.to_string())?;
-        let destination = configured_destination(config, &reference, &root);
-        if reference.is_wildcard() {
-            wildcards.push(WildcardDeclaration {
-                reference,
-                declaration,
-                destination,
-            });
-        } else {
-            concrete.push(ConcreteDeclaration {
-                reference,
-                declaration,
-                destination,
-            });
-        }
-    }
-
-    let explicit_identities: HashSet<String> = concrete
-        .iter()
-        .map(|declaration| declaration.reference.identity())
-        .collect();
+    let (concrete, wildcards, explicit_identities) = declarations(config, home)?;
     let mut rows_by_key = BTreeMap::new();
 
     for declaration in &concrete {
@@ -216,6 +198,7 @@ pub fn build_inventory(
                 checkout: filesystem.destination_state(&declaration.destination),
                 origin: declaration.reference.clone_url.clone(),
                 remote: Some(declaration.reference.clone_url.clone()),
+                origin_fact: None,
                 branch: if scan.complete {
                     ObservationField::NotApplicable
                 } else {
@@ -231,6 +214,7 @@ pub fn build_inventory(
                 declaration: Some(declaration.declaration.url.clone()),
                 warnings: relationships,
                 markable: true,
+                archived: None,
             },
         );
     }
@@ -248,6 +232,7 @@ pub fn build_inventory(
                 checkout: CheckoutState::Pattern,
                 origin: wildcard.reference.clone_url.clone(),
                 remote: None,
+                origin_fact: None,
                 branch: ObservationField::NotApplicable,
                 changes: ObservationField::NotApplicable,
                 configured_destination: Some(wildcard.destination.clone()),
@@ -260,6 +245,7 @@ pub fn build_inventory(
                     .map(|excluded| format!("excludes {excluded}"))
                     .collect(),
                 markable: false,
+                archived: None,
             },
         );
     }
@@ -283,6 +269,7 @@ pub fn build_inventory(
                 checkout: CheckoutState::Unknown,
                 origin: "pending".to_owned(),
                 remote: None,
+                origin_fact: None,
                 branch: ObservationField::Pending,
                 changes: ObservationField::Pending,
                 configured_destination: None,
@@ -290,6 +277,7 @@ pub fn build_inventory(
                 declaration: None,
                 warnings: Vec::new(),
                 markable: true,
+                archived: None,
             },
         );
     }
@@ -306,6 +294,7 @@ pub fn build_inventory(
                 checkout: CheckoutState::Unknown,
                 origin: "stale observation".to_owned(),
                 remote: None,
+                origin_fact: None,
                 branch: ObservationField::Stale("target changed during observation".to_owned()),
                 changes: ObservationField::Stale("target changed during observation".to_owned()),
                 configured_destination: None,
@@ -313,6 +302,7 @@ pub fn build_inventory(
                 declaration: None,
                 warnings: vec!["Target changed before its Git observation completed".to_owned()],
                 markable: true,
+                archived: None,
             },
         );
     }
@@ -333,6 +323,7 @@ pub fn build_inventory(
                     }
                     row.origin = checkout.origin.display();
                     row.remote = checkout.origin.original();
+                    row.origin_fact = Some(checkout.origin.clone());
                     row.branch = checkout.branch;
                     row.changes = checkout.changes;
                     row.observed_path = Some(observed);
@@ -395,6 +386,7 @@ pub fn build_inventory(
                     },
                     origin: checkout.origin.display(),
                     remote: checkout.origin.original(),
+                    origin_fact: Some(checkout.origin.clone()),
                     branch: checkout.branch,
                     changes: checkout.changes,
                     configured_destination,
@@ -404,6 +396,7 @@ pub fn build_inventory(
                         .map(|declaration| declaration.declaration.url.clone()),
                     warnings,
                     markable: true,
+                    archived: None,
                 },
             );
         } else {
@@ -426,6 +419,7 @@ pub fn build_inventory(
                     },
                     origin: checkout.origin.display(),
                     remote: checkout.origin.original(),
+                    origin_fact: Some(checkout.origin.clone()),
                     branch: checkout.branch,
                     changes: checkout.changes,
                     configured_destination: None,
@@ -433,6 +427,7 @@ pub fn build_inventory(
                     declaration: None,
                     warnings,
                     markable: true,
+                    archived: None,
                 },
             );
         }
@@ -462,6 +457,136 @@ pub fn build_inventory(
         observation_generation: 1,
         incomplete: scan.incomplete,
     })
+}
+
+type Declarations<'a> = (
+    Vec<ConcreteDeclaration<'a>>,
+    Vec<WildcardDeclaration<'a>>,
+    HashSet<String>,
+);
+
+fn declarations<'a>(config: &'a Config, home: &Path) -> Result<Declarations<'a>, String> {
+    let root = config
+        .resolve_root(home)
+        .map_err(|error| error.to_string())?;
+    let mut concrete = Vec::new();
+    let mut wildcards = Vec::new();
+    for declaration in &config.repositories {
+        let reference =
+            RepositoryRef::parse(&declaration.url).map_err(|error| error.to_string())?;
+        let destination = configured_destination(config, &reference, &root);
+        if reference.is_wildcard() {
+            wildcards.push(WildcardDeclaration {
+                reference,
+                declaration,
+                destination,
+            });
+        } else {
+            concrete.push(ConcreteDeclaration {
+                reference,
+                declaration,
+                destination,
+            });
+        }
+    }
+    let explicit = concrete
+        .iter()
+        .map(|declaration| declaration.reference.identity())
+        .collect();
+    Ok((concrete, wildcards, explicit))
+}
+
+/// Expands every wildcard declaration through its provider and merges the members into the
+/// rows. A member with a row of its own identity only gains its archived flag; one without a
+/// local row becomes a declaration row at its configured destination, `remote only` while
+/// nothing is there. Exclusions and explicit declarations take precedence over members, and an
+/// archived member gains no row of its own unless `include_archived` is set. A provider failure
+/// is returned and leaves every other row in place.
+pub(crate) fn add_remote_members<P: ProviderCatalog>(
+    report: &mut InventoryReport,
+    filesystem: &impl InventoryFilesystem,
+    config: &Config,
+    home: &Path,
+    providers: &P,
+    include_archived: bool,
+) -> Result<Vec<ProviderFailure>, String> {
+    let (_, wildcards, explicit) = declarations(config, home)?;
+    let root = config
+        .resolve_root(home)
+        .map_err(|error| error.to_string())?;
+    let mut failures = Vec::new();
+    for wildcard in &wildcards {
+        let mut members = match providers.expand(&wildcard.reference, include_archived) {
+            Ok(members) => members,
+            Err(error) => {
+                failures.push(ProviderFailure {
+                    provider: wildcard.reference.host.clone(),
+                    error,
+                });
+                continue;
+            }
+        };
+        for member in &members {
+            crate::domain::repository::validate_reference_safety(&member.reference.clone_url)
+                .map_err(|error| error.to_string())?;
+        }
+        members.sort_by_key(|member| member.reference.identity());
+        for member in members {
+            let identity = member.reference.identity();
+            let mut known = false;
+            for row in &mut report.rows {
+                if row_identity(row) == Some(identity.as_str()) {
+                    row.archived = Some(member.archived);
+                    known = true;
+                }
+            }
+            if known || member.archived && !include_archived {
+                continue;
+            }
+            let (registration, relationships) = registration_for(&identity, &wildcards, &explicit);
+            if !matches!(registration, RegistrationState::Wildcard { .. }) {
+                continue;
+            }
+            let destination = configured_destination(config, &member.reference, &root);
+            let occupied = report.rows.iter().any(|row| {
+                row.observed_path.as_ref() == Some(&destination)
+                    && row.checkout == CheckoutState::Cloned
+            });
+            let checkout = match filesystem.destination_state(&destination) {
+                CheckoutState::Missing => CheckoutState::RemoteOnly,
+                _ if occupied => CheckoutState::Conflict,
+                state => state,
+            };
+            let key = declaration_key(&identity, &destination);
+            report.rows.push(InventoryRow {
+                key,
+                repository: identity,
+                path: destination.to_string_lossy().into_owned(),
+                registration,
+                checkout,
+                origin: member.reference.clone_url.clone(),
+                remote: Some(member.reference.clone_url),
+                origin_fact: None,
+                branch: ObservationField::NotApplicable,
+                changes: ObservationField::NotApplicable,
+                configured_destination: Some(destination),
+                observed_path: None,
+                declaration: None,
+                warnings: relationships,
+                markable: true,
+                archived: Some(member.archived),
+            });
+        }
+    }
+    report.rows.sort_by(|left, right| left.key.cmp(&right.key));
+    Ok(failures)
+}
+
+fn row_identity(row: &InventoryRow) -> Option<&str> {
+    match &row.key {
+        RowKey::Declaration { identity, .. } | RowKey::Checkout { identity, .. } => Some(identity),
+        RowKey::Path(_) | RowKey::Pattern(_) => None,
+    }
 }
 
 fn declaration_key(identity: &str, destination: &Path) -> RowKey {
@@ -559,6 +684,18 @@ pub(crate) fn wildcard_relative<'a>(pattern: &RepositoryRef, identity: &'a str) 
         .filter(|relative| !relative.is_empty())
 }
 
+impl InventoryRow {
+    /// Whether a declaration covers the row: explicit, by a wildcard, or the pattern itself.
+    pub fn registered(&self) -> bool {
+        matches!(
+            self.registration,
+            RegistrationState::Explicit
+                | RegistrationState::Wildcard { .. }
+                | RegistrationState::Pattern
+        )
+    }
+}
+
 impl RegistrationState {
     pub fn label(&self) -> &'static str {
         match self {
@@ -580,6 +717,7 @@ impl CheckoutState {
             Self::Unknown => "unknown",
             Self::Conflict => "conflict",
             Self::Unreadable => "unreadable",
+            Self::RemoteOnly => "remote only",
         }
     }
 }
@@ -1041,12 +1179,14 @@ mod tests {
             checkout: CheckoutState::Cloned,
             origin: String::new(),
             remote: None,
+            origin_fact: None,
             branch: ObservationField::NotApplicable,
             changes: ObservationField::NotApplicable,
             configured_destination: None,
             observed_path: None,
             declaration: None,
             warnings: Vec::new(),
+            archived: None,
         }
     }
 

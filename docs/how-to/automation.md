@@ -6,13 +6,14 @@ Use explicit arguments and flags in scripts; commands never require a terminal w
 lager add github.com/my-org/project --no-register
 lager remove github.com/my-org/project --unregister --yes --force
 lager ensure --include-archived
-lager list --remote --json > repositories.json
+lager status --remote --json > repositories.json
 ```
 
 `register` and `unregister` accept repeated repository arguments. `add` requires exactly `--register` or `--no-register` outside a TTY; `--post-clone` implies registration and conflicts with `--no-register`. `remove` similarly requires exactly one of `--unregister`/`--keep-registered` plus `--yes` outside a TTY. Invalid choices fail before disk or config mutation.
 
-Use `list --json` as the automation boundary. It emits one JSON document on stdout;
-warnings and provider errors use stderr. Git and hook subprocesses inherit stdin,
+Use `status --json` as the automation boundary. It prints the rows `lager tui`
+shows, as one [JSON document](../reference/status-json.md) on stdout; warnings and
+problems use stderr, and any problem makes it exit `1`. Git and hook subprocesses inherit stdin,
 stdout, and stderr.
 
 Human field values are presentation-escaped (`\n`, `\r`, `\t`, `\xNN`,

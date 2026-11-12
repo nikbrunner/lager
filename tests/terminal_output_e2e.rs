@@ -22,6 +22,7 @@ fn provider_and_config_diagnostics_are_one_safe_line_but_json_errors_are_raw() {
         "#!/bin/sh\nprintf '%s' \"$ERROR\" >&2\nexit 1\n",
     );
     fs::write(&config, "root = 'repos'\n[providers.'github.com']\npreset = 'github'\n[[repositories]]\nurl = 'org/*'\n").unwrap();
+    fs::create_dir(temp.path().join("repos")).unwrap();
     for command in ["list", "ensure", "register"] {
         let mut process = support::lager_with_path(temp.path(), &config, Some(&bin));
         process.arg(command).env("ERROR", &error);
@@ -35,7 +36,10 @@ fn provider_and_config_diagnostics_are_one_safe_line_but_json_errors_are_raw() {
         assert!(!String::from_utf8_lossy(&output.stderr).contains("\nend"));
         if command == "list" {
             let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(value["provider_errors"][0]["error"], error);
+            assert_eq!(
+                value["problems"],
+                serde_json::json!([{"source": "provider", "subject": "github.com", "message": error}])
+            );
         }
     }
     let missing = temp.path().join("missing\n\u{1b}\u{85}.toml");
@@ -377,47 +381,61 @@ fn native_git_and_hook_streams_remain_raw_while_ensure_reporter_escapes_fields()
 
 #[test]
 fn human_rows_and_unknown_keys_escape_controls_while_json_preserves_values() {
-    let temp = tempfile::tempdir().unwrap();
-    let config = temp.path().join("config.toml");
-    // Portable roots permit control characters; repository reference validation
-    // stays intact. Quoted TOML keys reach the warning adapter directly.
-    let root = format!("repos{}", controls());
-    let key = format!("future{}", controls());
-    let mut document = toml_edit::DocumentMut::new();
-    document["root"] = toml_edit::value(&root);
-    document[&key] = toml_edit::value(true);
-    document["providers"]["github.com"]["preset"] = toml_edit::value("github");
-    document["providers"]["github.com"][&key] = toml_edit::value(true);
-    let mut repository = toml_edit::Table::new();
-    repository["url"] = toml_edit::value("org/repo");
-    repository[&key] = toml_edit::value(true);
-    let mut repositories = toml_edit::ArrayOfTables::new();
-    repositories.push(repository);
-    document["repositories"] = toml_edit::Item::ArrayOfTables(repositories);
-    fs::write(&config, document.to_string()).unwrap();
+    // A directory name cannot hold NUL: that root is an unreadable path, one problem line and
+    // exit 1; the root without NUL exists and the scan succeeds.
+    for with_nul in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.toml");
+        // Portable roots permit control characters; repository reference validation
+        // stays intact. Quoted TOML keys reach the warning adapter directly.
+        let root = if with_nul {
+            format!("repos{}", controls())
+        } else {
+            let root = format!("repos{}", controls().replace('\0', ""));
+            fs::create_dir(temp.path().join(&root)).unwrap();
+            root
+        };
+        let key = format!("future{}", controls());
+        let mut document = toml_edit::DocumentMut::new();
+        document["root"] = toml_edit::value(&root);
+        document[&key] = toml_edit::value(true);
+        document["providers"]["github.com"]["preset"] = toml_edit::value("github");
+        document["providers"]["github.com"][&key] = toml_edit::value(true);
+        let mut repository = toml_edit::Table::new();
+        repository["url"] = toml_edit::value("org/repo");
+        repository[&key] = toml_edit::value(true);
+        let mut repositories = toml_edit::ArrayOfTables::new();
+        repositories.push(repository);
+        document["repositories"] = toml_edit::Item::ArrayOfTables(repositories);
+        fs::write(&config, document.to_string()).unwrap();
+        let code = Some(if with_nul { 1 } else { 0 });
 
-    let human = support::lager(temp.path(), &config)
-        .arg("list")
-        .output()
-        .unwrap();
-    assert!(human.status.success(), "{human:?}");
-    assert_safe_fields(&human.stdout);
-    assert_safe_fields(&human.stderr);
-    assert_eq!(String::from_utf8_lossy(&human.stdout).lines().count(), 1);
-    assert_eq!(
-        String::from_utf8_lossy(&human.stdout).matches('\t').count(),
-        2
-    );
-    assert_eq!(String::from_utf8_lossy(&human.stderr).lines().count(), 3);
-    assert!(String::from_utf8_lossy(&human.stdout).contains("\\x1b"));
-    let json = support::lager(temp.path(), &config)
-        .args(["list", "--json"])
-        .output()
-        .unwrap();
-    assert!(json.status.success(), "{json:?}");
-    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    assert_eq!(
-        value["repositories"][0]["destination"].as_str().unwrap(),
-        temp.path().join(root).join("org/repo").to_str().unwrap()
-    );
+        let human = support::lager(temp.path(), &config)
+            .arg("list")
+            .output()
+            .unwrap();
+        assert_eq!(human.status.code(), code, "{human:?}");
+        assert_safe_fields(&human.stdout);
+        assert_safe_fields(&human.stderr);
+        let stdout = String::from_utf8_lossy(&human.stdout);
+        assert_eq!(stdout.lines().count(), 2);
+        assert_eq!(stdout.matches('\t').count(), 0);
+        assert_eq!(
+            String::from_utf8_lossy(&human.stderr).lines().count(),
+            if with_nul { 4 } else { 3 }
+        );
+        assert!(stdout.contains("\\x1b"));
+        assert_eq!(stdout.contains("\\x00"), with_nul, "{stdout}");
+        let json = support::lager(temp.path(), &config)
+            .args(["list", "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(json.status.code(), code, "{json:?}");
+        let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+        assert_eq!(
+            value["rows"][0]["configured_path"].as_str().unwrap(),
+            temp.path().join(&root).join("org/repo").to_str().unwrap()
+        );
+        assert_eq!(value["rows"].as_array().unwrap().len(), 1);
+    }
 }

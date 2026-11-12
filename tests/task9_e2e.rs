@@ -48,8 +48,8 @@ mod unix {
             "Permanently delete guarded local checkouts",
             "Create missing declared checkouts sequentially",
             "Run configured hooks for explicit repositories",
-            "Show declarations and local repository state",
-            "[alias: ls]",
+            "Print the inventory rows as a table or one JSON document",
+            "[aliases: list, ls]",
             "Use PATH instead of the default configuration file",
             "lager add github.com/org/project --register",
             "lager remove github.com/org/project --unregister --yes --force",
@@ -113,6 +113,7 @@ mod unix {
                 &[
                     "Query providers for expanded wildcard members",
                     "Include archived repositories; requires --remote",
+                    "Show only declared repositories and wildcard patterns",
                     "Render one stable JSON document",
                 ],
             ),
@@ -152,7 +153,7 @@ mod unix {
         let cache = temp.path().join("cache");
         let config = temp.path().join("config.toml");
         let bin = isolated_path(temp.path())?;
-        fs::create_dir_all(&home)?;
+        fs::create_dir_all(home.join("repos"))?;
         fs::write(
             &config,
             "root = \"repos\"\nfuture_key = \"preserve\"\n\n[[repositories]]\nurl = \"github.com/org/repo\"\n",
@@ -161,10 +162,13 @@ mod unix {
         let output = run(&config, &home, &cache, &bin, &["list", "--json"])?;
         assert!(output.status.success());
         let document: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-        assert_eq!(document["schema_version"], 1);
-        assert!(document["repositories"].is_array());
+        assert_eq!(document["schema_version"], 2);
+        assert_eq!(document["rows"][0]["identity"], "github.com/org/repo");
+        assert_eq!(document["rows"].as_array().unwrap().len(), 1);
         assert!(String::from_utf8_lossy(&output.stderr).contains("future_key"));
-        assert!(!String::from_utf8_lossy(&output.stdout).contains("warning"));
+        // Rows carry a `warnings` key; the config warning itself stays off stdout.
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("lager: warning"));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("future_key"));
         assert!(fs::read_to_string(config)?.contains("future_key = \"preserve\""));
         Ok(())
     }

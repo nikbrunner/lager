@@ -42,10 +42,10 @@ Hooks run from the repository directory through `/bin/sh -c`, with their normal 
 ## Check and reconcile
 
 ```sh
-lager list
+lager status
 lager ensure
 ```
 
-`list` compares declarations with disk without contacting providers. `ensure` creates missing effective declarations in configuration order. Running it again leaves matching checkouts alone.
+`status` compares declarations with disk without contacting providers. `ensure` creates missing effective declarations in configuration order. Running it again leaves matching checkouts alone.
 
-Next, read the [configuration reference](../reference/config.md) to add providers, hooks, and wildcards. For machine consumers, use `lager list --json`; see the [JSON reference](../reference/list-json.md).
+Next, read the [configuration reference](../reference/config.md) to add providers, hooks, and wildcards. For machine consumers, use `lager status --json`; see the [JSON reference](../reference/status-json.md).

@@ -56,8 +56,8 @@ printf 'Sandbox: %s\nBinary: %s\n' "$SANDBOX" "$BIN"
 - [ ] Register a batch with `lager register org/first invalid </dev/null`; expect exit 1 and no `org/first` declaration. Then run `lager register org/first org/second </dev/null` twice; expect `added` first and `already managed` on retry.
   - Agent check: PASS — `registration_e2e` atomic/duplicate cases and compiled-binary batch rejection smoke.
 
-- [ ] Run `lager list --json > "$SANDBOX/list.json"` and `lager ls --json > "$SANDBOX/ls.json"`; compare with `cmp`. Expect identical JSON, two missing declarations, no decorative output. Run `lager list` again in the same shell; declarations persist.
-  - Agent check: PASS — compiled-binary smoke compared exact `list`/`ls` JSON; config remained readable across invocations.
+- [ ] Run `lager status --json > "$SANDBOX/status.json"`, `lager list --json > "$SANDBOX/list.json"` and `lager ls --json > "$SANDBOX/ls.json"`; compare with `cmp`. Expect identical JSON, two missing declarations, no decorative output. Run `lager status` again in the same shell; declarations persist.
+  - Agent check: NOT RUN for this step. `status_e2e::status_list_and_ls_print_identical_bytes_and_exit_codes` compares the three names byte for byte in table and JSON.
 
 Create a local clone fixture and remove the placeholder declarations:
 
@@ -120,8 +120,8 @@ url = "org/repo"
 TOML
 ```
 
-- [ ] Run `lager --config "$SANDBOX/display.toml" list`; expect one repository row, two real column separators, and one warning line. The field text shows `\n`, `\r`, `\t`, `\x1b`, `\x7f`, `\x85`; no cursor movement, terminal title change, or injected row. Run with `--json`; a JSON parser must recover the original control characters in the destination, not the human escape notation.
-  - Agent check: PASS — `terminal_output_e2e` covers every C0/C1/DEL value, all three unknown-key warning levels, exact row/column counts, and raw JSON field values.
+- [ ] Run `lager --config "$SANDBOX/display.toml" status`; expect a header, one repository row, no raw tab, one warning line, and one problem line for the root, which does not exist. The field text shows `\n`, `\r`, `\t`, `\x1b`, `\x7f`, `\x85`; no cursor movement, terminal title change, or injected row. Run with `--json`; a JSON parser must recover the original control characters in the destination, not the human escape notation.
+  - Agent check: NOT RUN for this step. `terminal_output_e2e::human_rows_and_unknown_keys_escape_controls_while_json_preserves_values` covers every C0/C1/DEL value, all three unknown-key warning levels, exact line counts, and raw JSON field values.
 
 - [ ] In a real terminal, run `lager --config "$SANDBOX/prompt.toml" init`; press Enter for the default root and answer no to root creation and GitHub setup. Expect readable prompts, normal keyboard control, and the stored root `repos`. Cancel a new registration prompt with Ctrl-C; check the terminal still accepts normal input.
   - Agent check: PASS — safe input/default and confirmation PTY tests, registration prompt cancellation, and the full local suite pass; real-terminal acceptance remains for the tester.
@@ -131,7 +131,7 @@ TOML
 
 ## Regression smoke test
 
-- [ ] Register `https://github.com/org/transport` without cloning, then inspect `lager list --json`; expect HTTPS retained verbatim. Try both `https://token@github.com/org/rejected` and `https:///token@github.com/org/rejected`; expect redacted errors without persisting or echoing the token. Unregister `org/transport` afterward.
+- [ ] Register `https://github.com/org/transport` without cloning, then inspect `lager status --json`; expect HTTPS retained verbatim. Try both `https://token@github.com/org/rejected` and `https:///token@github.com/org/rejected`; expect redacted errors without persisting or echoing the token. Unregister `org/transport` afterward.
   - Agent check: PASS — `references_e2e` covers transport retention, actual clone argv, credential rejection before effects, and malformed loaded configuration.
 
 - [ ] Create a separate config with `printf '# fixture\nroot = 42\n' > "$SANDBOX/invalid.toml"` and run `lager --config "$SANDBOX/invalid.toml" list --json`; expect exit 1, empty stdout, and a line-2 error location on stderr without the source value.

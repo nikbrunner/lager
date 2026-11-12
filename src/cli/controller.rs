@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use super::args::{
-    Args, CloneArgs, Command, EnsureArgs, HookArgs, InitArgs, InventoryArgs, ListArgs, RemoveArgs,
+    Args, CloneArgs, Command, EnsureArgs, HookArgs, InitArgs, InventoryArgs, RemoveArgs,
     RepositoryArgs, UnregisterArgs,
 };
 use super::interaction::{Interaction, InteractionError};
@@ -60,7 +60,7 @@ pub fn run(
         }
         Command::Ensure(command) => ensure(&config_path, command),
         Command::Hook(command) => hook(&config_path, command, selector),
-        Command::List(command) => list(&config_path, command),
+        Command::Status(command) => super::inventory::status::run(&config_path, command),
         Command::Inventory(command) => inventory(&config_path, command),
     }
 }
@@ -618,85 +618,6 @@ fn home_dir() -> PathBuf {
 
 fn inventory(path: &Path, args: InventoryArgs) -> i32 {
     super::inventory::run(path, args, || None)
-}
-
-fn list(path: &Path, args: ListArgs) -> i32 {
-    if args.include_archived && !args.remote {
-        eprintln!("lager: --include-archived requires --remote");
-        return 2;
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let store = CommandConfigStore::default();
-    let git = NativeGit;
-    let config = match store.load(path) {
-        Ok(config) => config,
-        Err(error) => {
-            eprintln!("lager: {}", escape(error));
-            return 1;
-        }
-    };
-    let providers = match ConfiguredProviders::from_config(&config) {
-        Ok(providers) => providers,
-        Err(error) => {
-            eprintln!("lager: {}", escape(error));
-            return 1;
-        }
-    };
-    match warehouse::list(
-        &store,
-        &git,
-        &providers,
-        path,
-        args.remote,
-        args.include_archived,
-        &home,
-    ) {
-        Ok(report) => {
-            if args.json {
-                match serde_json::to_string(&report) {
-                    Ok(document) => println!("{document}"),
-                    Err(error) => {
-                        eprintln!("lager: could not render list: {}", escape(error));
-                        return 1;
-                    }
-                }
-            } else {
-                render_list(&report);
-            }
-            for error in &report.provider_errors {
-                eprintln!(
-                    "lager: {}: {}",
-                    escape(&error.provider),
-                    escape(&error.error)
-                );
-            }
-            i32::from(report.failed())
-        }
-        Err(error) => {
-            eprintln!("lager: {}", escape(error));
-            1
-        }
-    }
-}
-
-fn render_list(report: &warehouse::ListReport) {
-    for row in &report.repositories {
-        let state = row
-            .state
-            .map(|state| format!("{state:?}").to_ascii_lowercase())
-            .unwrap_or_else(|| "wildcard".to_owned());
-        let destination = row.destination.as_deref().unwrap_or("-");
-        let archived = if row.archived { " [archived]" } else { "" };
-        println!(
-            "{}\t{}\t{}{}",
-            escape(&row.identity),
-            state,
-            escape(destination),
-            archived
-        );
-    }
 }
 
 fn remove(

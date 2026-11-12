@@ -358,6 +358,7 @@ pub fn removal_eligibility(
         CheckoutState::Missing => return Eligibility::Available,
         CheckoutState::Conflict => "destination conflicts with repository",
         CheckoutState::Unreadable => "destination is unreadable",
+        CheckoutState::RemoteOnly => "no local checkout",
         CheckoutState::Unknown | CheckoutState::Pattern => {
             "checkout state is unknown until it is observed"
         }
@@ -1573,6 +1574,7 @@ mod tests {
             checkout: CheckoutState::Unknown,
             origin: String::new(),
             remote: None,
+            origin_fact: None,
             branch: ObservationField::Stale("main".into()),
             changes: ObservationField::Stale("known clean".into()),
             configured_destination: None,
@@ -1580,6 +1582,7 @@ mod tests {
             declaration: None,
             warnings: Vec::new(),
             markable: true,
+            archived: None,
         };
         let config = CountingStore::default().load(Path::new("config")).unwrap();
         assert_eq!(
@@ -1852,6 +1855,7 @@ mod tests {
             },
             origin: String::new(),
             remote: None,
+            origin_fact: None,
             branch: ObservationField::NotApplicable,
             changes: ObservationField::NotApplicable,
             configured_destination: None,
@@ -1859,6 +1863,7 @@ mod tests {
             declaration: None,
             warnings: Vec::new(),
             markable: true,
+            archived: None,
         };
         let declared = |name: &str| RowKey::Declaration {
             identity: format!("github.com/org/{name}"),

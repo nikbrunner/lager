@@ -97,6 +97,7 @@ fn provider_credentials_are_rejected_instead_of_silently_materialized() {
     let config = temp.path().join("config.toml");
     let original = "root = 'repos'\n[providers.'github.com']\npreset = 'github'\n[[repositories]]\nurl = 'github.com/org/*'\n";
     fs::write(&config, original).unwrap();
+    fs::create_dir(temp.path().join("repos")).unwrap();
     let tools = temp.path().join("tools");
     fs::create_dir(&tools).unwrap();
     let gh = tools.join("gh");
@@ -121,7 +122,13 @@ fn provider_credentials_are_rejected_instead_of_silently_materialized() {
         assert!(!String::from_utf8_lossy(&output.stdout).contains("SENTINEL"));
         assert!(!String::from_utf8_lossy(&output.stderr).contains("SENTINEL"));
         let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(json["repositories"].as_array().unwrap().len(), 0);
+        let kinds: Vec<_> = json["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["pattern"], "{json}");
         assert_eq!(fs::read_to_string(&config).unwrap(), original);
     }
 }
@@ -230,7 +237,7 @@ fn clone_argv_and_full_pipeline_preserve_transport_and_equivalent_identity() {
     .enumerate()
     {
         let home = temp.path().join(index.to_string());
-        fs::create_dir(&home).unwrap();
+        fs::create_dir_all(home.join("repos")).unwrap();
         let config = home.join("config.toml");
         let capture = home.join("argv");
         fs::write(&config, "root = 'repos'\n").unwrap();
@@ -249,7 +256,9 @@ fn clone_argv_and_full_pipeline_preserve_transport_and_equivalent_identity() {
         for command in ["list", "ls"] {
             let output = run(&[command, "--json"]);
             let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(json["repositories"][0]["clone_url"], clone_url);
+            assert_eq!(json["rows"].as_array().unwrap().len(), 1);
+            assert_eq!(json["rows"][0]["origin"]["state"], "declared");
+            assert_eq!(json["rows"][0]["origin"]["value"], clone_url);
         }
         run(&["register", equivalent, "--post-clone", "printf HOOK"]);
         assert_eq!(fs::read(&config).unwrap(), saved);
@@ -280,7 +289,7 @@ fn clone_argv_and_full_pipeline_preserve_transport_and_equivalent_identity() {
         run(&["remove", equivalent, "--yes", "--force", "--unregister"]);
         let output = run(&["list", "--json"]);
         let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(json["repositories"].as_array().unwrap().len(), 0);
+        assert_eq!(json["rows"].as_array().unwrap().len(), 0);
     }
 }
 
@@ -414,6 +423,7 @@ fn explicit_transport_survives_registration_and_listing() {
         let temp = tempfile::tempdir().unwrap();
         let config = temp.path().join("config.toml");
         fs::write(&config, "root = 'repos'\n").unwrap();
+        fs::create_dir(temp.path().join("repos")).unwrap();
         let output = support::lager(temp.path(), &config)
             .args(["register", reference])
             .output()
@@ -427,7 +437,8 @@ fn explicit_transport_survives_registration_and_listing() {
                 .unwrap();
             assert!(output.status.success(), "{output:?}");
             let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(json["repositories"][0]["clone_url"], reference);
+            assert_eq!(json["rows"].as_array().unwrap().len(), 1);
+            assert_eq!(json["rows"][0]["origin"]["value"], reference);
         }
     }
 }
@@ -463,6 +474,7 @@ fn malformed_scp_hosts_and_unsupported_schemes_are_not_registered() {
         let temp = tempfile::tempdir().unwrap();
         let config = temp.path().join("config.toml");
         fs::write(&config, "root = 'repos'\n").unwrap();
+        fs::create_dir(temp.path().join("repos")).unwrap();
         let output = support::lager(temp.path(), &config)
             .args(["register", reference])
             .output()

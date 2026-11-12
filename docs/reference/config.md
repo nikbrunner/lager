@@ -93,7 +93,7 @@ exclude = ["retired"]
 Only one trailing `/*` is valid. Wildcards require a configured provider and cannot have hooks. Explicit declarations cannot have exclusions. Equivalent declarations must have the same hook, exclusions, and wildcard status.
 
 Accepted explicit SCP, SSH, HTTP(S), and file clone references retain their text
-in TOML, `clone_url` JSON, and Git clone arguments regardless of a `.git` suffix.
+in TOML, the `origin` value of `status --json`, and Git clone arguments regardless of a `.git` suffix.
 Identity comparison and destination mapping remain transport-independent; an
 equivalent registration does not replace the existing stored URL.
 Shorthand and canonical IDs still materialize default SSH URLs. The sole browser

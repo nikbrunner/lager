@@ -2166,6 +2166,99 @@ fn inventory_excludes_git_file_entries_reports_unreadable_paths_escapes_controls
 
 #[cfg(unix)]
 #[test]
+fn status_prints_the_rows_the_inventory_screen_shows() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    fs::create_dir_all(&root).unwrap();
+    let config = temp.path().join("config.toml");
+    fs::write(
+        &config,
+        r#"root = "repos"
+
+[providers."github.com"]
+preset = "github"
+
+[[repositories]]
+url = "github.com/org/managed"
+
+[[repositories]]
+url = "github.com/org/missing"
+
+[[repositories]]
+url = "github.com/org/*"
+exclude = ["skip"]
+"#,
+    )
+    .unwrap();
+    init_repo(
+        &root.join("org/managed"),
+        "git@github.com:org/managed.git",
+        true,
+    );
+    init_repo(
+        &root.join("elsewhere/managed"),
+        "git@github.com:org/managed.git",
+        true,
+    );
+    init_repo(
+        &root.join("org/extra"),
+        "git@github.com:org/extra.git",
+        false,
+    );
+    init_repo(&root.join("org/skip"), "git@github.com:org/skip.git", true);
+    init_repo(
+        &root.join("other/stray"),
+        "git@github.com:other/stray.git",
+        true,
+    );
+    init_repo_without_origin(&root.join("local/no-origin"));
+
+    let transcript = run_inventory_pty_with_size(
+        support::lager(&home, &config).arg("tui"),
+        &["8 rows", "No active operation"],
+        b"q",
+        40,
+        220,
+    );
+    let screen = inventory_rows(&screen_text(&transcript, 40, 220));
+    let status = output(support::lager(&home, &config).arg("status"));
+    assert!(status.status.success(), "{status:?}");
+    let printed = status_rows(&String::from_utf8(status.stdout).unwrap());
+    assert_eq!(printed.len(), 8, "{printed:?}");
+    assert_eq!(printed, screen);
+}
+
+/// Splits `lager status` table lines at the header's column starts.
+fn status_rows(table: &str) -> Vec<Vec<String>> {
+    let mut lines = table.lines();
+    let header = lines.next().unwrap();
+    let mut offsets = Vec::new();
+    let mut from = 0;
+    for heading in header.split_whitespace() {
+        let start = header[from..].find(heading).unwrap() + from;
+        offsets.push(start);
+        from = start + heading.len();
+    }
+    lines
+        .map(|line| {
+            let characters = line.chars().collect::<Vec<_>>();
+            (0..offsets.len())
+                .map(|column| {
+                    let end = offsets.get(column + 1).copied().unwrap_or(characters.len());
+                    characters[offsets[column].min(characters.len())..end.min(characters.len())]
+                        .iter()
+                        .collect::<String>()
+                        .trim()
+                        .to_owned()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
 fn offline_inventory_renders_discovery_identity_and_status_rows_in_a_pty() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");

@@ -39,6 +39,7 @@ use crate::presentation::escape;
 use super::args::InventoryArgs;
 
 mod keys;
+pub(super) mod status;
 use keys::{Action, Bindings, Mode};
 
 pub fn run(config_path: &Path, args: InventoryArgs, interrupted: impl Fn() -> Option<i32>) -> i32 {
@@ -4258,6 +4259,7 @@ fn registration_style(state: &model::RegistrationState) -> Style {
 fn checkout_style(state: &model::CheckoutState) -> Style {
     match state {
         model::CheckoutState::Cloned | model::CheckoutState::Pattern => Style::default(),
+        model::CheckoutState::RemoteOnly => dim(),
         model::CheckoutState::Missing | model::CheckoutState::Unknown => warn(),
         model::CheckoutState::Conflict | model::CheckoutState::Unreadable => tint(Color::Red),
     }
@@ -4571,6 +4573,52 @@ fn fuzzy_subsequence(value: &str, query: &str) -> bool {
     wanted.is_none()
 }
 
+const WIDE_HEADINGS: [&str; 7] = [
+    "repository",
+    "path",
+    "registration",
+    "checkout",
+    "origin",
+    "branch",
+    "changes",
+];
+
+/// One row's cells in the wide grid's column order, with their tints. The compact grid drops
+/// path and origin.
+fn wide_cells(row: &model::InventoryRow, name: String, home: &Path) -> [(String, Style); 7] {
+    let path = if matches!(row.key, model::RowKey::Pattern(_)) {
+        "—".to_owned()
+    } else {
+        home_relative(Path::new(&row.path), home)
+    };
+    let name = if row.archived == Some(true) {
+        format!("{name} [archived]")
+    } else {
+        name
+    };
+    [
+        (name, Style::default()),
+        (path, Style::default()),
+        (
+            registration_text(&row.registration).to_owned(),
+            registration_style(&row.registration),
+        ),
+        (
+            checkout_text(&row.checkout).to_owned(),
+            checkout_style(&row.checkout),
+        ),
+        (origin_text(row), Style::default()),
+        (
+            observation_text(&row.branch),
+            observation_style(&row.branch),
+        ),
+        (
+            observation_text(&row.changes),
+            observation_style(&row.changes),
+        ),
+    ]
+}
+
 fn repository_table(
     rows: &[&model::InventoryRow],
     names: &HashMap<model::RowKey, String>,
@@ -4594,59 +4642,17 @@ fn repository_table(
             &[0],
         )
     } else {
-        (
-            &[
-                "repository",
-                "path",
-                "registration",
-                "checkout",
-                "origin",
-                "branch",
-                "changes",
-            ],
-            vec![25, 27, 15, 13, 24, 13, 13],
-            &[1, 4],
-        )
+        (&WIDE_HEADINGS, vec![25, 27, 15, 13, 24, 13, 13], &[1, 4])
     };
     let slot = |column: usize| if column == 0 { MARK_SLOT } else { 0 };
     let cells = rows
         .iter()
         .map(|row| {
-            let pattern = matches!(row.key, model::RowKey::Pattern(_));
-            let mut cells = vec![(names[&row.key].clone(), Style::default())];
-            if !compact {
-                cells.push((
-                    if pattern {
-                        "—".to_owned()
-                    } else {
-                        home_relative(Path::new(&row.path), home)
-                    },
-                    Style::default(),
-                ));
+            let mut cells = Vec::from(wide_cells(row, names[&row.key].clone(), home));
+            if compact {
+                cells.remove(4);
+                cells.remove(1);
             }
-            cells.extend([
-                (
-                    registration_text(&row.registration).to_owned(),
-                    registration_style(&row.registration),
-                ),
-                (
-                    checkout_text(&row.checkout).to_owned(),
-                    checkout_style(&row.checkout),
-                ),
-            ]);
-            if !compact {
-                cells.push((origin_text(row), Style::default()));
-            }
-            cells.extend([
-                (
-                    observation_text(&row.branch),
-                    observation_style(&row.branch),
-                ),
-                (
-                    observation_text(&row.changes),
-                    observation_style(&row.changes),
-                ),
-            ]);
             cells
         })
         .collect::<Vec<_>>();
@@ -4902,6 +4908,7 @@ mod tests {
             checkout: CheckoutState::Pattern,
             origin: key.to_owned(),
             remote: None,
+            origin_fact: None,
             branch: ObservationField::NotApplicable,
             changes: ObservationField::NotApplicable,
             configured_destination: None,
@@ -4909,6 +4916,7 @@ mod tests {
             declaration: Some(key.to_owned()),
             warnings: Vec::new(),
             markable: false,
+            archived: None,
         };
         let alpha = row("github.com/org/alpha/*");
         let beta = row("github.com/org/beta/*");
@@ -4934,6 +4942,7 @@ mod tests {
             checkout: CheckoutState::Pattern,
             origin: name.to_owned(),
             remote: None,
+            origin_fact: None,
             branch: ObservationField::NotApplicable,
             changes: ObservationField::NotApplicable,
             configured_destination: None,
@@ -4941,6 +4950,7 @@ mod tests {
             declaration: Some(name.to_owned()),
             warnings: Vec::new(),
             markable: false,
+            archived: None,
         };
         let alpha = row("alpha");
         let beta = row("beta");
@@ -4972,6 +4982,7 @@ mod tests {
             checkout,
             origin: String::new(),
             remote: None,
+            origin_fact: None,
             branch: ObservationField::NotApplicable,
             changes: ObservationField::NotApplicable,
             configured_destination: None,
@@ -4979,6 +4990,7 @@ mod tests {
             declaration: None,
             warnings: Vec::new(),
             markable: true,
+            archived: None,
         }
     }
 

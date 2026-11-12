@@ -44,6 +44,7 @@ fn overlay_current_sources(source: &Path, destination: &Path) {
         "src/cli/controller.rs",
         "src/cli/inventory.rs",
         "src/cli/inventory/keys.rs",
+        "src/cli/inventory/status.rs",
         "src/cli/mod.rs",
         "src/cli/signals.rs",
         "src/main.rs",

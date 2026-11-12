@@ -12,14 +12,16 @@ fn list_with_alias_parity(
     flags: &[&str],
 ) -> std::process::Output {
     let listed = run(config, home, &[&["list"], flags].concat());
-    let alias = run(config, home, &[&["ls"], flags].concat());
-    assert_eq!(alias.status.code(), listed.status.code());
-    assert_eq!(alias.stdout, listed.stdout);
-    // Clap may use the invoked name in usage text; all other diagnostics match.
-    assert_eq!(
-        String::from_utf8_lossy(&alias.stderr).replace("lager ls", "lager list"),
-        String::from_utf8_lossy(&listed.stderr)
-    );
+    for name in ["ls", "status"] {
+        let alias = run(config, home, &[&[name], flags].concat());
+        assert_eq!(alias.status.code(), listed.status.code());
+        assert_eq!(alias.stdout, listed.stdout);
+        // Clap may use the invoked name in usage text; all other diagnostics match.
+        assert_eq!(
+            String::from_utf8_lossy(&alias.stderr).replace(&format!("lager {name}"), "lager list"),
+            String::from_utf8_lossy(&listed.stderr)
+        );
+    }
     listed
 }
 
@@ -28,7 +30,7 @@ fn ls_matches_empty_list_in_human_and_json_formats() -> TestResult {
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
-    fs::create_dir_all(&home)?;
+    fs::create_dir_all(home.join("repos"))?;
     fs::write(&config, "root = \"repos\"\n")?;
 
     for flags in [&[][..], &["--json"][..]] {
@@ -36,12 +38,21 @@ fn ls_matches_empty_list_in_human_and_json_formats() -> TestResult {
         assert!(listed.status.success());
         assert!(listed.stderr.is_empty());
         if flags.is_empty() {
-            assert!(listed.stdout.is_empty());
+            assert_eq!(
+                String::from_utf8(listed.stdout)?,
+                "repository  path  registration  checkout  origin  branch  changes\n"
+            );
         } else {
             let document: Value = serde_json::from_slice(&listed.stdout)?;
-            assert_eq!(document["schema_version"], 1);
-            assert_eq!(document["repositories"], serde_json::json!([]));
-            assert_eq!(document["provider_errors"], serde_json::json!([]));
+            assert_eq!(
+                document,
+                serde_json::json!({
+                    "schema_version": 2,
+                    "complete": true,
+                    "rows": [],
+                    "problems": [],
+                })
+            );
         }
     }
     Ok(())
@@ -59,11 +70,19 @@ fn offline_json_list_is_single_versioned_document_with_wildcard_metadata() -> Te
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
-    fs::create_dir_all(&home)?;
+    fs::create_dir_all(home.join("repos"))?;
     fs::write(
         &config,
         "root = \"repos\"\n\n[providers.\"github.com\"]\npreset = \"github\"\n\n[[repositories]]\nurl = \"github.com/org/repo\"\npost_clone = \"echo hook\"\n\n[[repositories]]\nurl = \"github.com/team/*\"\nexclude = [\"skip\"]\n",
     )?;
+    let destination = |relative: &str| {
+        home.join("repos")
+            .join(relative)
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+    let not_applicable = serde_json::json!({"state": "not_applicable", "value": null});
 
     let output = list_with_alias_parity(&config, &home, &["--json"]);
     assert!(
@@ -76,17 +95,62 @@ fn offline_json_list_is_single_versioned_document_with_wildcard_metadata() -> Te
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(String::from_utf8(output.stdout.clone())?.lines().count(), 1);
     let document: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(document["schema_version"], 1);
-    assert_eq!(document["repositories"].as_array().unwrap().len(), 2);
-    assert_eq!(document["repositories"][0]["state"], "missing");
-    assert!(document["repositories"][0]["hook"].as_bool().unwrap());
-    assert_eq!(document["repositories"][1]["pattern"], "github.com/team/*");
-    assert_eq!(document["repositories"][1]["exclusions"][0], "skip");
-    assert!(document["provider_errors"].as_array().unwrap().is_empty());
+    assert_eq!(
+        document,
+        serde_json::json!({
+            "schema_version": 2,
+            "complete": true,
+            "rows": [
+                {
+                    "kind": "declaration",
+                    "identity": "github.com/org/repo",
+                    "declaration": "github.com/org/repo",
+                    "hook": "echo hook",
+                    "registration": "explicit",
+                    "pattern": null,
+                    "exclusions": null,
+                    "checkout": "missing",
+                    "found_path": null,
+                    "configured_path": destination("org/repo"),
+                    "origin": {"state": "declared", "value": "git@github.com:org/repo.git"},
+                    "branch": not_applicable,
+                    "changes": not_applicable,
+                    "archived": null,
+                    "warnings": [],
+                },
+                {
+                    "kind": "pattern",
+                    "identity": "github.com/team/*",
+                    "declaration": "github.com/team/*",
+                    "hook": null,
+                    "registration": "pattern",
+                    "pattern": null,
+                    "exclusions": ["skip"],
+                    "checkout": "pattern",
+                    "found_path": null,
+                    "configured_path": destination("team"),
+                    "origin": not_applicable,
+                    "branch": not_applicable,
+                    "changes": not_applicable,
+                    "archived": null,
+                    "warnings": ["excludes skip"],
+                },
+            ],
+            "problems": [],
+        })
+    );
     let human = list_with_alias_parity(&config, &home, &[]);
     assert!(human.status.success());
-    assert!(String::from_utf8_lossy(&human.stdout).contains("github.com/team/*"));
+    assert_eq!(
+        String::from_utf8(human.stdout)?,
+        "\
+repository  path              registration  checkout  origin               branch  changes
+repo        ~/repos/org/repo  explicit      missing   github.com/org/repo  —       —
+team/*      —                 wildcard      —         github.com/team/*    —       —
+"
+    );
     Ok(())
 }
 
@@ -123,43 +187,77 @@ fn ls_matches_offline_list_for_every_local_state() -> TestResult {
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     let root = home.join("repos/org");
-    fs::create_dir_all(root.join("conflict"))?;
-    let cloned = root.join("cloned");
-    for args in [
-        vec!["init", cloned.to_str().unwrap()],
-        vec![
-            "-C",
-            cloned.to_str().unwrap(),
-            "remote",
-            "add",
-            "origin",
-            "git@github.com:org/cloned.git",
-        ],
-    ] {
-        let output = support::external(&home, "git").args(&args).output()?;
-        assert!(output.status.success(), "{args:?}: {output:?}");
+    fs::create_dir_all(root.join("plain"))?;
+    for (directory, origin) in [("cloned", "cloned"), ("conflict", "other")] {
+        let checkout = root.join(directory);
+        let origin = format!("git@github.com:org/{origin}.git");
+        for args in [
+            vec!["init", checkout.to_str().unwrap()],
+            vec![
+                "-C",
+                checkout.to_str().unwrap(),
+                "remote",
+                "add",
+                "origin",
+                &origin,
+            ],
+        ] {
+            let output = support::external(&home, "git").args(&args).output()?;
+            assert!(output.status.success(), "{args:?}: {output:?}");
+        }
     }
     // An ancestor loop makes metadata inspection fail, even when run as root.
     symlink("blocked", home.join("repos/blocked"))?;
     fs::write(
         &config,
-        "root = \"repos\"\n\n[[repositories]]\nurl = \"github.com/org/missing\"\n\n[[repositories]]\nurl = \"github.com/org/cloned\"\n\n[[repositories]]\nurl = \"github.com/org/conflict\"\n\n[[repositories]]\nurl = \"github.com/blocked/unreadable\"\n",
+        "root = \"repos\"\n\n[[repositories]]\nurl = \"github.com/org/missing\"\n\n[[repositories]]\nurl = \"github.com/org/cloned\"\n\n[[repositories]]\nurl = \"github.com/org/conflict\"\n\n[[repositories]]\nurl = \"github.com/org/plain\"\n\n[[repositories]]\nurl = \"github.com/blocked/unreadable\"\n",
     )?;
     let output = list_with_alias_parity(&config, &home, &["--json"]);
-    assert!(output.status.success());
+    assert!(output.status.success(), "{output:?}");
     let document: Value = serde_json::from_slice(&output.stdout)?;
-    let states: Vec<_> = document["repositories"]
+    let states: Vec<_> = document["rows"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|row| row["state"].as_str().unwrap())
+        .map(|row| {
+            (
+                row["kind"].as_str().unwrap(),
+                row["identity"].as_str().unwrap(),
+                row["checkout"].as_str().unwrap(),
+            )
+        })
         .collect();
-    assert_eq!(states, ["missing", "cloned", "conflict", "unreadable"]);
+    assert_eq!(
+        states,
+        [
+            ("declaration", "github.com/blocked/unreadable", "unreadable"),
+            ("declaration", "github.com/org/cloned", "cloned"),
+            ("declaration", "github.com/org/conflict", "conflict"),
+            ("declaration", "github.com/org/missing", "missing"),
+            ("declaration", "github.com/org/plain", "unknown"),
+            ("checkout", "github.com/org/other", "cloned"),
+        ]
+    );
     let human = list_with_alias_parity(&config, &home, &[]);
     assert!(human.status.success());
-    for state in states {
-        assert!(String::from_utf8_lossy(&human.stdout).contains(state));
-    }
+    let human = String::from_utf8(human.stdout)?;
+    let checkouts: Vec<_> = human
+        .lines()
+        .skip(1)
+        .map(|line| line.split_whitespace().nth(3).unwrap())
+        .collect();
+    assert_eq!(
+        checkouts,
+        [
+            "unreadable",
+            "cloned",
+            "conflict",
+            "missing",
+            "unknown",
+            "cloned"
+        ],
+        "{human}"
+    );
     Ok(())
 }
 

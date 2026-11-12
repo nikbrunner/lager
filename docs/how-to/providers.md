@@ -17,7 +17,7 @@ Authenticate `gh` before remote discovery:
 
 ```sh
 gh auth login
-lager list --remote --json
+lager status --remote --json
 ```
 
 GitHub catalog requests use `gh`; cloning continues to use native Git and your SSH credentials.
@@ -57,10 +57,10 @@ Lager reads credentials from the named environment variables. Keep tokens and pa
 Archived repositories are excluded unless you ask for them:
 
 ```sh
-lager list --remote --include-archived
+lager status --remote --include-archived
 lager register --include-archived
 lager add --include-archived
 lager ensure --include-archived
 ```
 
-`list --include-archived` requires `--remote`. For a no-argument `add`, successful picker selections still run when another provider fails, but the command exits 1 to report that failure.
+`status --include-archived` requires `--remote`. For a no-argument `add`, successful picker selections still run when another provider fails, but the command exits 1 to report that failure.

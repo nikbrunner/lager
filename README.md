@@ -63,7 +63,7 @@ Git is required for `add`, `remove`, `ensure`, `hook`, and `tui`. Interactive re
 lager init --root ~/repos --create-root --github
 lager register github.com/my-org/project
 lager add github.com/my-org/project --register
-lager list
+lager status
 lager ensure
 ```
 
@@ -100,10 +100,10 @@ See the [configuration reference](docs/reference/config.md) for every field, def
 | `remove` | Permanently deletes guarded local checkouts. | `--unregister`, `--keep-registered`, `--yes`, `--force` |
 | `ensure` | Creates missing declared checkouts. | `--include-archived` |
 | `hook` | Runs a declared repository's post-clone hook again. | — |
-| `list`, `ls` | Shows declarations and their local state. | `--remote`, `--include-archived`, `--json` |
+| `status`, `list`, `ls` | Prints the rows `tui` shows: declarations, checkouts and their state. | `--remote`, `--include-archived`, `--registered`, `--json` |
 | `tui` | Opens an offline overview in a terminal that registers, unregisters, clones and removes repositories. | `r` removes a checkout after confirmation; `m` opens the actions; `R` refreshes; `q` or Esc quits. |
 
-`ls` is an identical alias for `list`, which is offline by default. Use `list --json` for stable machine-readable output. The [CLI reference](docs/reference/cli.md) documents every option, default, and interactive behavior.
+`list` and `ls` are identical aliases of `status`, which is offline by default and needs no terminal. Use `status --json` for stable machine-readable output. The [CLI reference](docs/reference/cli.md) documents every option, default, and interactive behavior.
 
 Lager escapes terminal control characters and literal backslashes in its own
 human fields, diagnostics, and picker labels. Stored values, JSON, and native
@@ -117,7 +117,7 @@ worktree guards.
 - [CLI reference](docs/reference/cli.md) · [configuration reference](docs/reference/config.md)
 - [Provider setup](docs/how-to/providers.md) · [automation](docs/how-to/automation.md)
 - [Safe removal](docs/how-to/remove-safely.md) · [wildcards](docs/how-to/wildcards.md)
-- [JSON output](docs/reference/list-json.md) · [exit codes](docs/reference/exit-codes.md)
+- [status JSON](docs/reference/status-json.md) · [exit codes](docs/reference/exit-codes.md)
 - [Declarations and local state](docs/explanation/declarations-and-local-state.md)
 
 ## Development

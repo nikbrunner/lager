@@ -56,6 +56,7 @@ fn config_precedence_is_explicit_then_environment_then_home_default() {
     let temp = tempfile::tempdir().unwrap();
     let home_default = temp.path().join(".config/lager/config.toml");
     fs::create_dir_all(home_default.parent().unwrap()).unwrap();
+    fs::create_dir_all(temp.path().join("repos")).unwrap();
     let environment = temp.path().join("environment.toml");
     let explicit = temp.path().join("explicit.toml");
     for (path, name) in [
@@ -84,9 +85,10 @@ fn config_precedence_is_explicit_then_environment_then_home_default() {
         assert!(output.status.success(), "{output:?}");
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(
-            value["repositories"][0]["identity"],
+            value["rows"][0]["identity"],
             format!("github.com/org/{expected}")
         );
+        assert_eq!(value["rows"].as_array().unwrap().len(), 1);
     }
 }
 

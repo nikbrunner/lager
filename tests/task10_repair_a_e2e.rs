@@ -318,7 +318,7 @@ fn full_clone_url_for_unknown_host_remains_valid_and_preserved() -> TestResult {
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
-    fs::create_dir_all(&home)?;
+    fs::create_dir_all(home.join("repos"))?;
     fs::write(
         &config,
         "root = \"repos\"\n[[repositories]]\nurl = \"ssh://git@git.example.com:2222/team/repo.git\"\n",
@@ -327,8 +327,11 @@ fn full_clone_url_for_unknown_host_remains_valid_and_preserved() -> TestResult {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(
-        json["repositories"][0]["clone_url"],
-        "ssh://git@git.example.com:2222/team/repo.git"
+        json["rows"][0]["origin"],
+        serde_json::json!({
+            "state": "declared",
+            "value": "ssh://git@git.example.com:2222/team/repo.git",
+        })
     );
     Ok(())
 }
@@ -409,10 +412,9 @@ fn explicit_configured_reference_uses_one_exact_path_for_list_ensure_and_hook() 
     let listed = lager(&home, &config, &["list", "--json"]);
     assert!(listed.status.success());
     let json: serde_json::Value = serde_json::from_slice(&listed.stdout)?;
-    assert_eq!(
-        json["repositories"][0]["destination"],
-        exact.to_str().unwrap()
-    );
+    assert_eq!(json["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(json["rows"][0]["configured_path"], exact.to_str().unwrap());
+    assert_eq!(json["rows"][0]["found_path"], exact.to_str().unwrap());
 
     fs::remove_file(&hook_log)?;
     let hook = support::lager(&home, &config)
