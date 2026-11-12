@@ -108,6 +108,17 @@ impl Action {
                     | Self::ClearSearch
             ),
             Mode::Search => matches!(self, Self::Accept | Self::Cancel | Self::Help | Self::Quit),
+            Mode::Confirmation => matches!(
+                self,
+                Self::Up
+                    | Self::Down
+                    | Self::PageUp
+                    | Self::PageDown
+                    | Self::Accept
+                    | Self::Cancel
+                    | Self::Help
+                    | Self::Quit
+            ),
             Mode::Inspection => matches!(
                 self,
                 Self::Up
@@ -146,7 +157,7 @@ impl Bindings {
         let mut maps: BTreeMap<Mode, BTreeMap<Action, Vec<(KeyEvent, String)>>> = BTreeMap::new();
         for (name, mode) in modes {
             let typing = matches!(mode, Mode::Search | Mode::Input);
-            let popup = matches!(mode, Mode::Menu | Mode::Inspection);
+            let popup = matches!(mode, Mode::Menu | Mode::Inspection | Mode::Confirmation);
             let mut defaults: Vec<(Action, Vec<&str>)> = vec![
                 (Help, vec![if typing { "F1" } else { "?" }]),
                 (Quit, vec![if typing || popup { "Ctrl+q" } else { "q" }]),

@@ -395,7 +395,8 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
             field("Branch", "main"),
             field("Changes", "1 modified"),
             String::new(),
-            field("Register", "unavailable · read-only inventory"),
+            field("Register", "no-op · identity is already registered"),
+            field("Unregister", "available"),
         ];
         let visible = expected
             .iter()
@@ -1427,7 +1428,7 @@ fn inventory_unions_nested_wildcards_with_exclusions_in_each_declaration_order()
             &[
                 (
                     vec!["No active operation", "github.com/group/sub/repo"],
-                    b"/sub/repo\r\r".to_vec(),
+                    b"kk\r".to_vec(),
                 ),
                 (
                     vec![
@@ -1437,7 +1438,7 @@ fn inventory_unions_nested_wildcards_with_exclusions_in_each_declaration_order()
                     ],
                     b"\x1b".to_vec(),
                 ),
-                (vec!["NORMAL ·", "absent: Inspect /"], b"\x7fq".to_vec()),
+                (vec!["NORMAL ·", "absent: Inspect /"], b"q".to_vec()),
             ],
             24,
             220,
@@ -3357,7 +3358,8 @@ fn inventory_inspect_explains_unavailable_actions_without_changing_the_checkout(
             (vec!["Inspect / alpha"], vec![b'j'; 40]),
             (
                 vec![
-                    "pair: Register unavailable",
+                    "pair: Register no-op",
+                    "pair: Unregister available",
                     "pair: Clone unavailable",
                     "pair: Remove unavailable",
                     "read-only inventory",
@@ -4097,8 +4099,8 @@ fn inventory_open_origin_opens_only_a_derived_https_address() {
         support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
         &[
             (
-                vec!["NORMAL · 2 rows", "absent: Scanning", "selected: executed"],
-                b"jmjjj\r".to_vec(),
+                vec!["NORMAL · 2 rows", "absent: Scanning"],
+                b"kkjmjjj\r".to_vec(),
             ),
             (
                 vec!["Opening https://github.com/org/alpha in the browser"],
@@ -4130,8 +4132,8 @@ fn inventory_open_origin_opens_only_a_derived_https_address() {
         support::lager(&home, &config).arg("inventory"),
         &[
             (
-                vec!["NORMAL · 2 rows", "absent: Scanning", "selected: executed"],
-                b"jmjjj\r".to_vec(),
+                vec!["NORMAL · 2 rows", "absent: Scanning"],
+                b"kkjmjjj\r".to_vec(),
             ),
             (
                 vec!["Open origin unavailable: no URL opener found"],
@@ -4204,11 +4206,16 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
                 ],
                 b"\r".to_vec(),
             ),
-            (vec!["Register is unavailable in this build"], repository(1)),
             (
-                vec!["Unregister is unavailable in this build"],
-                repository(2),
+                vec!["Batch / Register", "pair: NO-OP alpha"],
+                b"\x1b".to_vec(),
             ),
+            (vec!["NORMAL", "absent: Batch /"], repository(1)),
+            (
+                vec!["Batch / Unregister", "pair: SUCCEEDED alpha"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Batch /"], repository(2)),
             (
                 vec!["Clone only is unavailable in this build"],
                 repository(3),
@@ -4398,8 +4405,8 @@ fn inventory_keeps_drawing_while_the_opener_and_clipboard_hang() {
         support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
         &[
             (
-                vec!["NORMAL · 2 rows", "absent: Scanning", "selected: alpha"],
-                b"mjjj\r".to_vec(),
+                vec!["NORMAL · 2 rows", "absent: Scanning"],
+                b"kkmjjj\r".to_vec(),
             ),
             (
                 vec!["Opening https://github.com/org/alpha in the browser"],
@@ -4420,6 +4427,790 @@ fn inventory_keeps_drawing_while_the_opener_and_clipboard_hang() {
     );
     // The clipboard gets 2 s in total, however many utilities it tries.
     assert!(started.elapsed() < Duration::from_secs(6));
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_registers_and_unregisters_the_current_row_without_touching_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    init_repo(&root.join("org/beta"), "git@github.com:org/beta.git", false);
+    let tree = checkout_tree(&root);
+    let mut configs = Vec::new();
+
+    run_inventory_pty_actions_with_hook(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec![
+                    "NORMAL · 1 row",
+                    "absent: Scanning",
+                    "selected: beta",
+                    "unregistered",
+                ],
+                b"m\r".to_vec(),
+            ),
+            (
+                vec!["Repository actions / beta", "Register", "Unregister"],
+                b"\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Register",
+                    "1 / 1 processed",
+                    "pair: SUCCEEDED beta",
+                    "pair: beta updated",
+                    "Register: 1 succeeded",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL",
+                    "absent: Batch /",
+                    "absent: Scanning",
+                    "explicit",
+                    "absent: unregistered",
+                ],
+                b"m\rj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Unregister",
+                    "pair: SUCCEEDED beta",
+                    "pair: beta updated",
+                    "Unregister: 1 succeeded",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "absent: Scanning", "unregistered"],
+                b"m\rj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Unregister",
+                    "pair: NO-OP beta",
+                    "Unregister: 1 no-op",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Batch /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        |action| {
+            if matches!(action, 2 | 4 | 6) {
+                configs.push(fs::read_to_string(&config).unwrap());
+            }
+        },
+    );
+
+    let registered =
+        "root = \"repos\"\n\n[[repositories]]\nurl = \"git@github.com:org/beta.git\"\n";
+    assert_eq!(
+        cli_config(
+            &home,
+            original,
+            &["register", "git@github.com:org/beta.git"]
+        ),
+        registered
+    );
+    let unregistered = cli_config(&home, registered, &["unregister", "github.com/org/beta"]);
+    assert_eq!(configs, [registered, &unregistered, &unregistered]);
+    assert_eq!(fs::read_to_string(&config).unwrap(), unregistered);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_registers_every_marked_row_including_hidden_ones_and_reports_each_outcome() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n[providers.\"github.com\"]\npreset = \"github\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n";
+    fs::write(&config, original).unwrap();
+    init_repo(
+        &root.join("org/alpha"),
+        "git@github.com:org/alpha.git",
+        true,
+    );
+    init_repo(&root.join("org/beta"), "git@github.com:org/beta.git", true);
+    init_repo_without_origin(&root.join("scratch/local"));
+    let tree = checkout_tree(&root);
+    let mut configs = Vec::new();
+
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 3 rows", "absent: Scanning"],
+                b"kkjj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Inspect / local",
+                    "pair: Register unavailable",
+                    "pair: Unregister unavailable",
+                    "unavailable · no supported origin observed",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "absent: Inspect /", "selected: local"],
+                b"kk j j /github.com/org/beta\r".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "3 marked · 2 hidden", "selected: beta"],
+                b"m\r\r".to_vec(),
+            ),
+            (
+                vec![
+                    "CONFIRM",
+                    "Register / preview",
+                    "3 exact targets · 2 hidden by filter",
+                    "NO-OP alpha (hidden by filter)",
+                    "~/repos/org/alpha · github.com/org/alpha · identity is already registered",
+                    "ELIGIBLE beta",
+                    "~/repos/org/beta · github.com/org/beta",
+                    "BLOCKED local (hidden by filter)",
+                    "~/repos/scratch/local · no identity · no supported origin observed",
+                    "pair: Cancel default",
+                    "Register 1 target",
+                    "1 no-op · 1 blocked stay unchanged",
+                    "Nothing changes until you confirm",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Register",
+                    "3 / 3 processed · 2 hidden by filter",
+                    "pair: NO-OP alpha",
+                    "already registered",
+                    "pair: SUCCEEDED beta",
+                    "pair: beta updated",
+                    "pair: BLOCKED local",
+                    "Register: 1 succeeded, 1 no-op, 1 blocked",
+                    "· 1 problem",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "absent: Batch /", "absent: Scanning"],
+                format!("m{}\r", "j".repeat(9)).into_bytes(),
+            ),
+            (
+                vec![
+                    "Session problems / 1",
+                    "batch · local",
+                    "Register blocked: no supported origin observed",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Session problems /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        1,
+        |action| {
+            if matches!(action, 4 | 5) {
+                configs.push(fs::read_to_string(&config).unwrap());
+            }
+        },
+    );
+
+    let registered = cli_config(
+        &home,
+        original,
+        &["register", "git@github.com:org/beta.git"],
+    );
+    assert_ne!(registered, original);
+    assert_eq!(configs, [original, registered.as_str()]);
+    assert_eq!(fs::read_to_string(&config).unwrap(), registered);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_registration_edits_wildcard_exclusions_and_keeps_patterns_inspect_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n[providers.\"github.com\"]\npreset = \"github\"\n\n[[repositories]]\nurl = \"github.com/team/*\"\nexclude = [\"gamma\"]\n";
+    fs::write(&config, original).unwrap();
+    init_repo(
+        &root.join("team/delta"),
+        "git@github.com:team/delta.git",
+        true,
+    );
+    init_repo(
+        &root.join("team/gamma"),
+        "git@github.com:team/gamma.git",
+        true,
+    );
+    let tree = checkout_tree(&root);
+    let mut configs = Vec::new();
+
+    run_inventory_pty_actions_with_hook(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 3 rows", "absent: Scanning", "excluded"],
+                b"kkjm\r\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Register",
+                    "pair: SUCCEEDED gamma",
+                    "pair: gamma updated",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL",
+                    "absent: Batch /",
+                    "absent: Scanning",
+                    "absent: excluded",
+                    "selected: gamma",
+                ],
+                b"km\rj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Unregister",
+                    "pair: SUCCEEDED delta",
+                    "pair: delta updated",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "absent: Scanning", "excluded", "selected: delta"],
+                b"jjm\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Repository actions / team/*",
+                    "pair: Register patterns",
+                    "pair: Unregister patterns",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                vec!["Repository actions / team/*", "absent: Batch /"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["All actions", "absent: Repository actions /"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "absent: All actions", "absent: Batch /"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        |action| {
+            if matches!(action, 1 | 3) {
+                configs.push(fs::read_to_string(&config).unwrap());
+            }
+        },
+    );
+
+    let registered = cli_config(
+        &home,
+        original,
+        &["register", "git@github.com:team/gamma.git"],
+    );
+    assert!(!registered.contains("gamma"), "{registered}");
+    assert!(
+        !registered.contains("[[repositories]]\nurl = \"git@"),
+        "{registered}"
+    );
+    let unregistered = cli_config(&home, &registered, &["unregister", "github.com/team/delta"]);
+    assert!(
+        unregistered.contains("exclude = [\"delta\"]"),
+        "{unregistered}"
+    );
+    assert_eq!(configs, [registered.as_str(), &unregistered]);
+    assert_eq!(fs::read_to_string(&config).unwrap(), unregistered);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_cancelled_preview_changes_nothing_and_keeps_query_cursor_and_marks() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    for name in ["alpha1", "alpha2", "zeta"] {
+        init_repo(
+            &root.join("org").join(name),
+            &format!("git@github.com:org/{name}.git"),
+            true,
+        );
+    }
+    let tree = checkout_tree(&root);
+    let kept = |message: &'static str, selected: &'static str| {
+        vec![
+            "NORMAL",
+            "absent: / preview",
+            message,
+            "NORMAL · 2 rows",
+            "1 marked · 1 hidden",
+            "/ github.com/org/alpha",
+            selected,
+            "absent: problem",
+            "absent: Batch /",
+        ]
+    };
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 3 rows", "absent: Scanning"],
+                b"kkjj /github.com/org/alpha\r".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 2 rows", "1 marked · 1 hidden", "selected: alpha2"],
+                b"m\r\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Register / preview",
+                    "1 exact target · 1 hidden by filter",
+                    "ELIGIBLE zeta (hidden by filter)",
+                    "~/repos/org/zeta · github.com/org/zeta",
+                    "Register 1 target",
+                ],
+                b"q".to_vec(),
+            ),
+            (
+                kept("Register cancelled · nothing changed", "selected: alpha2"),
+                b"km\rj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Unregister / preview",
+                    "NO-OP zeta (hidden by filter)",
+                    "identity is not registered",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                kept("Unregister cancelled · nothing changed", "selected: alpha1"),
+                b"jm\r\r".to_vec(),
+            ),
+            (vec!["Register / preview"], b"j".to_vec()),
+            (vec!["Register / preview"], b"\x1b".to_vec()),
+            (
+                kept("Register cancelled · nothing changed", "selected: alpha2"),
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_rechecks_each_target_before_its_write_and_blocks_a_vanished_one_as_stale() {
+    recheck_blocks_a_vanished_checkout(false);
+}
+
+/// An exported repository with beta's origin must neither stand in for the deleted beta nor
+/// make alpha read as changed.
+#[cfg(unix)]
+#[test]
+fn inventory_recheck_ignores_an_exported_git_dir_and_work_tree() {
+    recheck_blocks_a_vanished_checkout(true);
+}
+
+#[cfg(unix)]
+fn recheck_blocks_a_vanished_checkout(exported_git: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    init_repo(
+        &root.join("org/alpha"),
+        "git@github.com:org/alpha.git",
+        true,
+    );
+    init_repo(&root.join("org/beta"), "git@github.com:org/beta.git", true);
+    let mut command = support::lager(&home, &config);
+    if exported_git {
+        let decoy = temp.path().join("decoy");
+        init_repo(&decoy, "git@github.com:org/beta.git", true);
+        command
+            .env("GIT_DIR", decoy.join(".git"))
+            .env("GIT_WORK_TREE", &decoy);
+    }
+
+    run_inventory_pty_with_exit(
+        command.arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 2 rows", "absent: Scanning"],
+                b"kk j m\r\r".to_vec(),
+            ),
+            (
+                vec!["Register / preview", "ELIGIBLE alpha", "ELIGIBLE beta"],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Register",
+                    "2 / 2 processed",
+                    "pair: SUCCEEDED alpha",
+                    "pair: BLOCKED beta",
+                    "stale: checkout is gone",
+                    "Register: 1 succeeded, 1 blocked",
+                    "· 1 problem",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Batch /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        1,
+        |action| {
+            if action == 1 {
+                // Only the repository goes when Git is exported, so the directory still answers.
+                let beta = root.join("org/beta");
+                fs::remove_dir_all(if exported_git {
+                    beta.join(".git")
+                } else {
+                    beta
+                })
+                .unwrap();
+            }
+        },
+    );
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        cli_config(
+            &home,
+            original,
+            &["register", "git@github.com:org/alpha.git"]
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_blocks_a_previewed_no_op_whose_registration_changed_before_its_write() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n";
+    fs::write(&config, original).unwrap();
+    for name in ["alpha", "zeta"] {
+        init_repo(
+            &root.join("org").join(name),
+            &format!("git@github.com:org/{name}.git"),
+            true,
+        );
+    }
+    let tree = checkout_tree(&root);
+    let zeta = ["register", "git@github.com:org/zeta.git"];
+
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 2 rows", "absent: Scanning"],
+                b"kk j m\rj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Unregister / preview",
+                    "ELIGIBLE alpha",
+                    "NO-OP zeta",
+                    "identity is not registered",
+                    "Unregister 1 target",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Unregister",
+                    "2 / 2 processed",
+                    "pair: SUCCEEDED alpha",
+                    "pair: BLOCKED zeta",
+                    "stale: registration changed after preview",
+                    "Unregister: 1 succeeded, 1 blocked",
+                    "· 1 problem",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Batch /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        1,
+        |action| {
+            if action == 1 {
+                let result = support::lager(&home, &config).args(zeta).output().unwrap();
+                assert!(result.status.success(), "{result:?}");
+            }
+        },
+    );
+    let registered = cli_config(&home, original, &zeta);
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        cli_config(&home, &registered, &["unregister", "github.com/org/alpha"])
+    );
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_long_preview_scrolls_its_targets_while_the_choices_stay_in_view() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    for index in 0..12 {
+        init_repo(
+            &root.join(format!("org/r{index:02}")),
+            &format!("git@github.com:org/r{index:02}.git"),
+            true,
+        );
+    }
+    let tree = checkout_tree(&root);
+    let choices = ["pair: Cancel default", "Register 12 targets"];
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 12 rows", "absent: Scanning"],
+                b"mjjjjj\rj\r".to_vec(),
+            ),
+            (vec!["12 marked · 0 hidden"], b"m\r\r".to_vec()),
+            (
+                [
+                    &[
+                        "Register / preview",
+                        "12 exact targets",
+                        "ELIGIBLE r00",
+                        "absent: ELIGIBLE r11",
+                        "PageUp/PageDown scroll",
+                    ][..],
+                    &choices,
+                ]
+                .concat(),
+                b"\x1b[6~".repeat(4),
+            ),
+            (
+                [&["ELIGIBLE r11", "absent: ELIGIBLE r00"][..], &choices].concat(),
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Register",
+                    "12 / 12 processed",
+                    "pair: SUCCEEDED r11",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Batch /"], b"q".to_vec()),
+        ],
+        24,
+        80,
+    );
+    assert_eq!(
+        fs::read_to_string(&config)
+            .unwrap()
+            .matches("[[repositories]]")
+            .count(),
+        12
+    );
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_failed_registration_write_is_one_problem_per_identity_and_keeps_columns() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let directory = temp.path().join("etc");
+    let config = directory.join("config.toml");
+    fs::create_dir_all(&directory).unwrap();
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    init_repo(
+        &root.join("archive/beta"),
+        "git@github.com:org/beta.git",
+        true,
+    );
+    init_repo(&root.join("org/beta"), "git@github.com:org/beta.git", true);
+    let tree = checkout_tree(&root);
+    // The lock lives in the test cache beside the config; only the config's own directory is read-only.
+    fs::create_dir_all(directory.join("lager-test-cache")).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o555)).unwrap();
+    let mut frames = Vec::new();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_inventory_pty_with_exit_observing(
+            support::lager(&home, &config).arg("inventory"),
+            &[
+                (
+                    vec!["NORMAL · 2 rows", "absent: Scanning"],
+                    b"kk j ".to_vec(),
+                ),
+                (vec!["2 marked · 0 hidden"], b"m\r\r".to_vec()),
+                (
+                    vec!["Register / preview", "ELIGIBLE beta (copy)"],
+                    b"j\r".to_vec(),
+                ),
+                (
+                    vec![
+                        "Batch / Register",
+                        "2 / 2 processed",
+                        "pair: FAILED beta",
+                        "write failed",
+                        "could not write config",
+                        "shared with beta",
+                        "Register: 2 failed",
+                        "· 1 problem",
+                    ],
+                    b"\x1b".to_vec(),
+                ),
+                (
+                    vec!["NORMAL", "absent: Batch /", "· 1 problem"],
+                    b"q".to_vec(),
+                ),
+            ],
+            32,
+            132,
+            1,
+            |action, _, frame| {
+                if action == 3 {
+                    frames.push(frame.to_owned());
+                }
+            },
+        );
+    }));
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+
+    let [frame] = frames.as_slice() else {
+        panic!("expected one outcomes frame");
+    };
+    let screen = screen_text(frame, 32, 132);
+    let lines = screen
+        .lines()
+        .map(|line| line.chars().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let header = lines
+        .iter()
+        .position(|line| String::from_iter(line).contains("outcome  "))
+        .expect("outcome header");
+    let header_text = String::from_iter(&lines[header]);
+    let outcome = header_text.find("outcome").unwrap();
+    let reason = header_text[..header_text.find("reason").unwrap()]
+        .chars()
+        .count();
+    let outcome = header_text[..outcome].chars().count();
+    let rows = lines[header + 1..]
+        .iter()
+        .take_while(|line| {
+            line.get(outcome..reason)
+                .is_some_and(|cells| cells.iter().any(|c| *c != ' '))
+                || line.get(reason).is_some_and(|c| *c != ' ')
+        })
+        .collect::<Vec<_>>();
+    assert!(rows.len() > 2, "the long reason wraps:\n{screen}");
+    let copy = rows
+        .iter()
+        .position(|line| String::from_iter(line.iter()).contains("beta (copy)"))
+        .expect("the shared row");
+    let copy_reason = rows[copy..]
+        .iter()
+        .enumerate()
+        .take_while(|(offset, line)| {
+            *offset == 0 || line[outcome..reason].iter().all(|c| *c == ' ')
+        })
+        .flat_map(|(_, line)| {
+            line[reason..]
+                .iter()
+                .filter(|c| !c.is_whitespace() && **c != '│')
+        })
+        .collect::<String>();
+    for part in ["couldnotwriteconfig", "sharedwithbeta"] {
+        assert!(
+            copy_reason.contains(part),
+            "{part} missing from the shared row:\n{screen}"
+        );
+    }
+    for line in rows {
+        let cells = String::from_iter(&line[outcome..reason]);
+        assert!(
+            cells.trim().is_empty() || cells.starts_with("FAILED"),
+            "reason left its column:\n{screen}"
+        );
+    }
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+/// The configuration the CLI produces from `before` for the same request.
+#[cfg(unix)]
+fn cli_config(home: &std::path::Path, before: &str, args: &[&str]) -> String {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("config.toml");
+    fs::write(&config, before).unwrap();
+    let result = support::lager(home, &config).args(args).output().unwrap();
+    assert!(result.status.success(), "{result:?}");
+    fs::read_to_string(&config).unwrap()
+}
+
+/// Every file below `root` with its bytes, except the index `git status` may refresh.
+#[cfg(unix)]
+fn checkout_tree(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if !path.ends_with(".git/index") {
+                files.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    fs::read(&path).unwrap(),
+                );
+            }
+        }
+    }
+    files
 }
 
 #[cfg(unix)]

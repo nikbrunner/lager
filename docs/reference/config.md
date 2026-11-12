@@ -144,14 +144,17 @@ normal shortcuts unless a menu override or a menu-local binding takes precedence
 Inspection uses navigation, paging, `copy` (default `c`), accept, cancel, help
 and quit. Help popups use inspection
 bindings to scroll and close while listing the invoking mode's bindings.
-Menu, Inspect and Help default to Esc/q for cancel and Ctrl-Q for quit. Normal
+Menu, Inspect, Help and the batch preview default to Esc/q for cancel and Ctrl-Q
+for quit. Normal
 mode uses q/Esc for quit. To bind popup quit to q explicitly, also set
 `cancel = ["Esc"]` in that mode so the actions do not collide.
 
 Search uses accept, cancel, help and quit, with Enter, Esc, F1 and Ctrl-Q as
-defaults. Its letters remain text. Input and confirmation settings are reserved
-for future dialogs. Known future normal actions can be configured but remain
-unavailable until implemented.
+defaults. Its letters remain text. Confirmation settings drive the batch preview:
+up and down move the cursor between Cancel and the action, page up and down
+scroll the target list, accept chooses, cancel closes it, plus help and quit.
+Input settings are reserved for future dialogs. Known future normal actions can
+be configured but remain unavailable until implemented.
 
 Keys include single characters, Enter, Esc, arrows, Home, End, PageUp, PageDown,
 Tab, Shift+Tab, Backspace, Delete, Space, F1 and Ctrl combinations. Ctrl-letter

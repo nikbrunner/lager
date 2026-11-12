@@ -620,6 +620,13 @@ pub(crate) struct CommandConfigStore {
 }
 
 impl CommandConfigStore {
+    /// Never prints warnings, for callers that own the terminal.
+    pub(crate) fn quiet() -> Self {
+        Self {
+            warned: std::cell::Cell::new(true),
+        }
+    }
+
     fn should_warn(&self) -> bool {
         !self.warned.replace(true)
     }

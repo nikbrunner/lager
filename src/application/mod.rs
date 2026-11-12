@@ -1,3 +1,4 @@
+pub mod batch;
 pub mod configuration;
 pub mod inventory;
 pub mod ports;

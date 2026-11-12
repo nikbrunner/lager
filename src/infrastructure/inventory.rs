@@ -534,7 +534,7 @@ fn git_dir_output<const N: usize>(
     command_output(command, cancel)
 }
 
-fn clean_git_environment(command: &mut Command) {
+pub(crate) fn clean_git_environment(command: &mut Command) {
     for name in [
         "GIT_DIR",
         "GIT_WORK_TREE",

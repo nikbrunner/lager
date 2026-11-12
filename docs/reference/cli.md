@@ -24,7 +24,7 @@ Lager selects the configuration path in this order:
 | `ensure` | `ensure [--include-archived]` | Creates missing effective declarations sequentially. |
 | `hook` | `hook [REPOSITORY]...` | Runs hooks for explicit declarations. Without repositories, it selects explicit declarations. |
 | `list`, `ls` | `list [--remote] [--include-archived] [--json]` | Reports declarations and local state. `--remote` expands wildcards through providers. |
-| `inventory`, `inv` | `inventory` | Opens a read-only offline overview; requires TTY stdin and stdout. |
+| `inventory`, `inv` | `inventory` | Opens the offline overview with registration actions; requires TTY stdin and stdout. |
 
 `ls` is a visible alias for `list`. Both names accept the same arguments, options, and configuration selection, and produce identical data output and exit statuses. Help and usage text reflect the invoked name.
 
@@ -105,7 +105,33 @@ The menu groups actions for this row (Repository actions…, Inspect, Copy value
 Open origin, Worktrees…), the selection (mark this row, mark visible concrete
 rows, clear all marks) and the session (Add, Remote discovery…, Refresh, Session
 problems…, batch cancellation, Help and Quit). Entries for actions this build
-does not provide report that they are unavailable. Copy value puts the full
+does not provide report that they are unavailable.
+Repository actions… → Register and Unregister act on the marked rows, hidden
+ones included, or on the current row when nothing is marked. They change the
+configuration only, through the same registry services as `register` and
+`unregister`: Register keeps a checkout's own clone URL text, otherwise the
+identity, and removes the member's exclusions from every matching wildcard;
+Unregister removes the explicit declaration and excludes the member from every
+matching wildcard. On marked rows a preview lists every target with its exact
+path and identity, eligible, no-op or blocked with the reason; the list scrolls
+while Cancel and the action stay in view, Cancel is the default and changes
+nothing. The current row alone acts directly. Targets are fixed when
+the action starts, and a refresh never changes them. They run one after another,
+each with its own configuration write; targets of one identity share one change
+and one reported failure. The batch popup lists every target with its outcome
+(succeeded, no-op, failed, blocked, cancelled or unattempted) and separate disk
+and config cells, empty when unchanged. Path-identified rows (no origin, an
+unsupported origin, or an origin that is pending, stale or failed) and wildcard
+patterns are blocked; Inspect and the menu show why. Immediately before its
+write, each target is checked again. A target found as a checkout must still be
+at its exact path with the same origin identity, and the configuration must
+still declare the identity as it did when the action started, so a target shown
+as a no-op is never written and a change that was already made is not reported
+as done. Otherwise the target is blocked as stale (`stale: origin changed`,
+`stale: checkout is gone or unreadable` or `stale: registration changed`,
+followed by `after preview`, or `since the action started` for the current row
+alone), nothing is written for it, and the other targets go on. Blocked and
+failed targets are session problems; a cancelled preview is not. Copy value puts the full
 original Path, Origin, Identity or Branch on the clipboard through `pbcopy`
 (macOS), `clip` (Windows) or `wl-copy`, `xclip` or `xsel`, trying the next one
 when a utility fails, and gives up after 2 seconds in total; in Inspect, `c` opens the
@@ -116,12 +142,12 @@ explained in the status line and is not a failure.
 Session problems… lists every failure that makes the session exit `1`; the header
 shows their count.
 Popup content scrolls independently of its title and effective action hints.
-In Menu, Inspect and Help, q or Esc closes the current popup; Ctrl-Q quits the
-app. Normal-mode q and Esc quit.
+In Menu, Inspect, Help and the batch preview, q or Esc closes the current popup;
+Ctrl-Q quits the app. Normal-mode q and Esc quit.
 Configure shortcuts through [inventory key maps](config.md#inventory-key-maps).
 
-These actions are read-only. Repository mutations and remote
-discovery are unavailable. `--remote`, including with `--include-archived`, exits
+Register and Unregister are the only repository mutations; the other repository
+actions and remote discovery are unavailable. `--remote`, including with `--include-archived`, exits
 `2` before raw mode. `--include-archived` without `--remote` is also invalid.
 Non-TTY use exits `2`; fatal startup/configuration errors exit `1`.
 

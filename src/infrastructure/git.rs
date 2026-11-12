@@ -433,12 +433,10 @@ pub fn inspect_removal(destination: &Path, expected_url: &str) -> Result<Vec<Str
 }
 
 fn git_output(directory: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(["-C"])
-        .arg(directory)
-        .args(args)
-        .output()
-        .map_err(|error| error.to_string())?;
+    let mut command = Command::new("git");
+    command.args(["-C"]).arg(directory).args(args);
+    crate::infrastructure::inventory::clean_git_environment(&mut command);
+    let output = command.output().map_err(|error| error.to_string())?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {

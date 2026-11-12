@@ -17,13 +17,15 @@ use ratatui::widgets::{
     Block, Cell, Clear, HighlightSpacing, Paragraph, Row, Table, TableState, Wrap,
 };
 
+use crate::application::batch::{self, Batch, BatchAction, BatchTarget, Eligibility, Outcome};
 use crate::application::inventory::{
     self as model, CopyField, InventoryFilesystem, InventoryReport, LocalScan, Marks,
     SessionProblems,
 };
 use crate::application::ports::Desktop;
-use crate::infrastructure::config::load_inventory;
+use crate::infrastructure::config::{CommandConfigStore, load_inventory};
 use crate::infrastructure::desktop::NativeDesktop;
+use crate::infrastructure::git::NativeGit;
 use crate::infrastructure::inventory::{
     LocalInventoryFilesystem, ScanContext, ScanEvent, ScanHandle, start_local_scan_with_context,
 };
@@ -113,6 +115,8 @@ struct InventorySession {
     /// The outcome of the last action; the next key press clears it.
     message: Option<String>,
     cached_report: Option<InventoryReport>,
+    /// The running or last finished batch; a new batch replaces it.
+    batch: Option<Batch>,
 }
 
 impl InventorySession {
@@ -142,6 +146,7 @@ impl InventorySession {
             notice: None,
             message: None,
             cached_report: None,
+            batch: None,
         }
     }
 
@@ -285,6 +290,53 @@ impl InventorySession {
         });
         self.complete = false;
         Ok(())
+    }
+
+    /// Runs the next batch target, records its blocker or failure, and refreshes once the batch
+    /// is finished.
+    fn step_batch(&mut self) {
+        let Some(batch) = self.batch.as_mut() else {
+            return;
+        };
+        let Some(index) = batch.step(&CommandConfigStore::quiet(), &NativeGit, &self.config_path)
+        else {
+            return;
+        };
+        let (action, target, result) = (batch.action, &batch.targets[index], &batch.results[index]);
+        if matches!(result.outcome, Outcome::Blocked | Outcome::Failed)
+            && batch.shared_with(index).is_none()
+        {
+            self.problems.record(
+                format!("batch · {}", target.name),
+                format!(
+                    "{} {}: {}",
+                    action.label(),
+                    outcome_label(result.outcome).to_lowercase(),
+                    escape(&result.reason)
+                ),
+            );
+        }
+        if batch.finished() {
+            let counts = [
+                Outcome::Succeeded,
+                Outcome::Noop,
+                Outcome::Failed,
+                Outcome::Blocked,
+                Outcome::Cancelled,
+            ]
+            .into_iter()
+            .filter_map(|outcome| {
+                let count = batch
+                    .results
+                    .iter()
+                    .filter(|result| result.outcome == outcome)
+                    .count();
+                (count > 0).then(|| format!("{count} {}", outcome_label(outcome).to_lowercase()))
+            })
+            .collect::<Vec<_>>();
+            self.message = Some(format!("{}: {}", action.label(), counts.join(", ")));
+            refresh(self);
+        }
     }
 }
 
@@ -433,6 +485,7 @@ impl TerminalSession {
                 return code;
             }
             session.receive_events();
+            session.step_batch();
             let report = match session.report() {
                 Ok(report) => report,
                 Err(error) => {
@@ -454,7 +507,15 @@ impl TerminalSession {
                 eprintln!("lager: terminal render failed: {}", escape(error));
                 return 1;
             }
-            let ready = event::poll(Duration::from_millis(50));
+            let running = session
+                .batch
+                .as_ref()
+                .is_some_and(|batch| !batch.finished());
+            let ready = event::poll(if running {
+                Duration::ZERO
+            } else {
+                Duration::from_millis(50)
+            });
             if let Some(code) = interrupted() {
                 session.worker.cancel_and_join();
                 return code;
@@ -513,6 +574,68 @@ impl TerminalSession {
                             }
                             Some(Action::Cancel | Action::Accept) if view == View::Problems => {
                                 selection.problems = false;
+                            }
+                            Some(Action::Accept) if view == View::Preview => {
+                                let batch = selection.preview.take();
+                                if !selection.preview_run {
+                                    session.message = batch.map(|batch| {
+                                        format!(
+                                            "{} cancelled · nothing changed",
+                                            batch.action.label()
+                                        )
+                                    });
+                                } else if session
+                                    .batch
+                                    .as_ref()
+                                    .is_some_and(|batch| !batch.finished())
+                                {
+                                    session.message = Some("A batch is already running".to_owned());
+                                } else if let Some(batch) = batch {
+                                    start_batch(
+                                        session,
+                                        &mut selection,
+                                        Batch {
+                                            previewed: true,
+                                            ..batch
+                                        },
+                                    );
+                                }
+                            }
+                            Some(Action::Cancel) if view == View::Preview => {
+                                session.message = selection.preview.take().map(|batch| {
+                                    format!("{} cancelled · nothing changed", batch.action.label())
+                                });
+                            }
+                            Some(action @ (Action::Up | Action::Down)) if view == View::Preview => {
+                                selection.preview_run = action == Action::Down;
+                            }
+                            Some(Action::PageUp) if view == View::Preview => {
+                                selection.preview_scroll =
+                                    selection.preview_scroll.saturating_sub(10);
+                            }
+                            Some(Action::PageDown) if view == View::Preview => {
+                                selection.preview_scroll = selection
+                                    .preview_scroll
+                                    .saturating_add(10)
+                                    .min(self.preview_scroll_limit(&selection, session));
+                            }
+                            Some(Action::Cancel | Action::Accept) if view == View::Batch => {
+                                selection.batch = false;
+                            }
+                            Some(
+                                action @ (Action::Up
+                                | Action::Down
+                                | Action::PageUp
+                                | Action::PageDown),
+                            ) if view == View::Batch => {
+                                let limit = self.batch_scroll_limit(session);
+                                let scroll = selection.batch_scroll;
+                                selection.batch_scroll = match action {
+                                    Action::Up => scroll.saturating_sub(1),
+                                    Action::Down => scroll.saturating_add(1).min(limit),
+                                    Action::PageUp => scroll.saturating_sub(10),
+                                    _ => scroll.saturating_add(10).min(limit),
+                                };
                             }
                             Some(Action::Cancel | Action::Accept) if view == View::Inspect => {
                                 selection.close_inspection();
@@ -585,6 +708,7 @@ impl TerminalSession {
                                             row,
                                             &report.rows,
                                             &session.home,
+                                            &session.config,
                                         )
                                     })
                                     .unwrap_or(0);
@@ -603,6 +727,7 @@ impl TerminalSession {
                                             row,
                                             &report.rows,
                                             &session.home,
+                                            &session.config,
                                         )
                                     })
                                     .unwrap_or(0);
@@ -658,6 +783,7 @@ impl TerminalSession {
         row: &model::InventoryRow,
         rows: &[model::InventoryRow],
         home: &Path,
+        config: &crate::domain::config::Config,
     ) -> u16 {
         let area = self.area();
         popup_scroll_limit(
@@ -668,6 +794,7 @@ impl TerminalSession {
                 short_names(rows).remove(&row.key).unwrap_or_default(),
                 rows,
                 home,
+                config,
                 popup_body_width(area, WIDE_POPUP),
             ),
         )
@@ -675,6 +802,29 @@ impl TerminalSession {
 
     fn problems_scroll_limit(&self, session: &InventorySession) -> u16 {
         popup_scroll_limit(self.area(), WIDE_POPUP, &problems_widget(session))
+    }
+
+    fn preview_scroll_limit(&self, selection: &Selection, session: &InventorySession) -> u16 {
+        selection.preview.as_ref().map_or(0, |batch| {
+            let lines = preview_lines(batch, &session.home);
+            let (_, list, _) = preview_regions(self.area(), &lines);
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .line_count(list.width)
+                .saturating_sub(usize::from(list.height.max(1)))
+                .min(usize::from(u16::MAX)) as u16
+        })
+    }
+
+    fn batch_scroll_limit(&self, session: &InventorySession) -> u16 {
+        session.batch.as_ref().map_or(0, |batch| {
+            let area = self.area();
+            popup_scroll_limit(
+                area,
+                WIDE_POPUP,
+                &batch_widget(batch, &session.home, popup_body_width(area, WIDE_POPUP)),
+            )
+        })
     }
 
     fn draw_report(
@@ -691,10 +841,20 @@ impl TerminalSession {
         selection.problems_scroll = selection
             .problems_scroll
             .min(self.problems_scroll_limit(session));
+        selection.batch_scroll = selection.batch_scroll.min(self.batch_scroll_limit(session));
+        selection.preview_scroll = selection
+            .preview_scroll
+            .min(self.preview_scroll_limit(selection, session));
         if let Some(row) = selection.inspected_row(visible_rows) {
-            selection.inspection_scroll = selection
-                .inspection_scroll
-                .min(self.inspection_scroll_limit(row, &report.rows, &session.home));
+            selection.inspection_scroll =
+                selection
+                    .inspection_scroll
+                    .min(self.inspection_scroll_limit(
+                        row,
+                        &report.rows,
+                        &session.home,
+                        &session.config,
+                    ));
         }
         let names = short_names(&report.rows);
         let menu = selection.menu.last().map(|(menu, _)| {
@@ -883,6 +1043,7 @@ impl TerminalSession {
                                     names[&row.key].clone(),
                                     &report.rows,
                                     home,
+                                    &session.config,
                                     popup_body_width(area, WIDE_POPUP),
                                 )
                                 .scroll((shown.inspection_scroll, 0)),
@@ -922,6 +1083,78 @@ impl TerminalSession {
                             ),
                         )
                     }
+                    View::Preview => {
+                        if let Some(batch) = &shown.preview {
+                            let lines = preview_lines(batch, home);
+                            let ([popup, title, _, footer], list, choices) =
+                                preview_regions(area, &lines);
+                            let pages = paired_keys(
+                                &bindings.keys(Mode::Confirmation, Action::PageUp),
+                                &bindings.keys(Mode::Confirmation, Action::PageDown),
+                            );
+                            frame.render_widget(Clear, popup);
+                            frame.render_widget(Block::bordered().border_style(focus()), popup);
+                            frame.render_widget(
+                                bar(
+                                    &format!("{} / preview", batch.action.label()),
+                                    "lager",
+                                    title.width,
+                                ),
+                                title,
+                            );
+                            frame.render_widget(
+                                Paragraph::new(lines)
+                                    .wrap(Wrap { trim: false })
+                                    .scroll((shown.preview_scroll, 0)),
+                                list,
+                            );
+                            frame.render_widget(
+                                Paragraph::new(preview_choices(batch, shown.preview_run)),
+                                choices,
+                            );
+                            frame.render_widget(
+                                Paragraph::new(format!(
+                                    "{} focus · {pages} scroll · {} · {}",
+                                    rows_hint(bindings, Mode::Confirmation, true),
+                                    first_key_hint(
+                                        bindings,
+                                        Mode::Confirmation,
+                                        Action::Accept,
+                                        "choose"
+                                    ),
+                                    first_key_hint(
+                                        bindings,
+                                        Mode::Confirmation,
+                                        Action::Cancel,
+                                        "cancel"
+                                    )
+                                ))
+                                .style(dim()),
+                                footer,
+                            );
+                        }
+                    }
+                    View::Batch => {
+                        if let Some(batch) = &session.batch {
+                            draw_popup(
+                                frame,
+                                WIDE_POPUP,
+                                &format!("Batch / {}", batch.action.label()),
+                                batch_widget(batch, home, popup_body_width(area, WIDE_POPUP))
+                                    .scroll((shown.batch_scroll, 0)),
+                                format!(
+                                    "{} scroll · {}",
+                                    rows_hint(bindings, Mode::Inspection, true),
+                                    first_key_hint(
+                                        bindings,
+                                        Mode::Inspection,
+                                        Action::Cancel,
+                                        "return"
+                                    )
+                                ),
+                            )
+                        }
+                    }
                     View::Normal | View::Search => {}
                 }
             })
@@ -939,6 +1172,8 @@ enum View {
     Inspect,
     Menu,
     Problems,
+    Preview,
+    Batch,
     Help,
 }
 
@@ -950,6 +1185,8 @@ impl View {
             Self::Inspect => "INSPECT",
             Self::Menu => "MENU",
             Self::Problems => "PROBLEMS",
+            Self::Preview => "CONFIRM",
+            Self::Batch => "RESULTS",
             Self::Help => "HELP",
         }
     }
@@ -959,7 +1196,8 @@ impl View {
             Self::Normal => Mode::Normal,
             Self::Search => Mode::Search,
             Self::Menu => Mode::Menu,
-            Self::Inspect | Self::Problems | Self::Help => Mode::Inspection,
+            Self::Inspect | Self::Problems | Self::Batch | Self::Help => Mode::Inspection,
+            Self::Preview => Mode::Confirmation,
         }
     }
 }
@@ -1084,7 +1322,19 @@ fn footer_widget(bindings: &Bindings, view: View, width: u16) -> Paragraph<'stat
             (first(Mode::Menu, Action::Accept), "choose"),
             (first(Mode::Menu, Action::Cancel), "back"),
         ],
-        View::Help | View::Problems => vec![
+        View::Preview => vec![
+            (rows_hint(bindings, Mode::Confirmation, false), "focus"),
+            (
+                paired_keys(
+                    &bindings.keys(Mode::Confirmation, Action::PageUp),
+                    &bindings.keys(Mode::Confirmation, Action::PageDown),
+                ),
+                "scroll",
+            ),
+            (first(Mode::Confirmation, Action::Accept), "choose"),
+            (first(Mode::Confirmation, Action::Cancel), "cancel"),
+        ],
+        View::Help | View::Problems | View::Batch => vec![
             (rows_hint(bindings, Mode::Inspection, false), "scroll"),
             (first(Mode::Inspection, Action::Cancel), "close"),
         ],
@@ -1212,7 +1462,8 @@ fn status_lines(
         ),
         _ if message.is_some() && complete => message.unwrap_or_default().to_owned(),
         _ if message.is_some() => format!("{state} · {}", message.unwrap_or_default()),
-        View::Menu | View::Help | View::Problems => state.to_owned(),
+        View::Preview => "Nothing changes until you confirm".to_owned(),
+        View::Menu | View::Help | View::Problems | View::Batch => state.to_owned(),
         View::Normal | View::Inspect if compact && complete && !inspect.is_empty() => format!(
             "Path and origin: {} inspects, menu copies the full value",
             inspect[0]
@@ -1323,7 +1574,14 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
             (single(Cancel), "close"),
             (help_quit(), "help / quit"),
         ],
-        Mode::Input | Mode::Confirmation => vec![
+        Mode::Confirmation => vec![
+            (pair(Down, Up), "move focus"),
+            (pair(PageUp, PageDown), "page up / down"),
+            (single(Accept), "choose"),
+            (single(Cancel), "cancel"),
+            (help_quit(), "help / quit"),
+        ],
+        Mode::Input => vec![
             (pair(Down, Up), "scroll"),
             (pair(PageUp, PageDown), "page up / down"),
             (single(Accept), "close"),
@@ -1496,9 +1754,9 @@ fn observation_text(field: &model::ObservationField) -> String {
     }
 }
 
-/// Lays out `name value` with the value in its own column; long values wrap inside it.
-fn field_lines(name: &str, value: &str, style: Style, width: u16) -> Vec<Line<'static>> {
-    let room = usize::from(width).saturating_sub(INSPECT_KEY_COLUMN).max(1);
+/// Splits `value` into pieces at most `room` cells wide, so a column can wrap in place.
+fn column_chunks(value: &str, room: usize) -> Vec<String> {
+    let room = room.max(1);
     let mut chunks = vec![String::new()];
     let mut used = 0;
     for character in value.chars() {
@@ -1511,6 +1769,11 @@ fn field_lines(name: &str, value: &str, style: Style, width: u16) -> Vec<Line<'s
         used += size;
     }
     chunks
+}
+
+/// Lays out `name value` with the value in its own column; long values wrap inside it.
+fn field_lines(name: &str, value: &str, style: Style, width: u16) -> Vec<Line<'static>> {
+    column_chunks(value, usize::from(width).saturating_sub(INSPECT_KEY_COLUMN))
         .into_iter()
         .enumerate()
         .map(|(index, chunk)| {
@@ -1528,6 +1791,7 @@ fn inspection_widget(
     name: String,
     rows: &[model::InventoryRow],
     home: &Path,
+    config: &crate::domain::config::Config,
     width: u16,
 ) -> Paragraph<'static> {
     let mut lines = Vec::new();
@@ -1624,12 +1888,20 @@ fn inspection_widget(
         );
     }
     lines.push(Line::default());
+    for action in [BatchAction::Register, BatchAction::Unregister] {
+        let state = match batch::eligibility(row, action, config) {
+            Eligibility::Available => "available".to_owned(),
+            Eligibility::Noop(reason) => format!("no-op · {reason}"),
+            Eligibility::Unavailable(reason) => format!("unavailable · {reason}"),
+        };
+        lines.extend(field_lines(action.label(), &state, dim(), width));
+    }
     let reason = if row.markable {
         "unavailable · read-only inventory"
     } else {
         "unavailable · patterns are inspect-only"
     };
-    for action in ["Register", "Clone", "Remove"] {
+    for action in ["Clone", "Remove"] {
         lines.extend(field_lines(action, reason, dim(), width));
     }
     Paragraph::new(lines).wrap(Wrap { trim: false })
@@ -1658,6 +1930,7 @@ enum Entry {
     ToggleMark,
     MarkVisible,
     ClearMarks,
+    Run(BatchAction),
 }
 
 /// One popup line: a group heading or spacer without an entry, or an entry with its hint.
@@ -1789,23 +2062,47 @@ fn menu_lines(
                 item(Entry::Quit, "Quit", key(Action::Quit), true),
             ]
         }
-        Menu::Repository => [
-            ("Register", "Register is unavailable in this build"),
-            ("Unregister", "Unregister is unavailable in this build"),
-            ("Clone only", "Clone only is unavailable in this build"),
-            (
-                "Clone + register",
-                "Clone + register is unavailable in this build",
-            ),
-            ("Remove only", "Remove only is unavailable in this build"),
-            (
-                "Remove + unregister",
-                "Remove + unregister is unavailable in this build",
-            ),
-        ]
-        .into_iter()
-        .map(|(label, message)| on_row(Entry::Unavailable(message), label, String::new()))
-        .collect(),
+        Menu::Repository => [BatchAction::Register, BatchAction::Unregister]
+            .into_iter()
+            .map(|action| {
+                let entry = Entry::Run(action);
+                let label = action.label();
+                match row {
+                    _ if !session.marks.is_empty() => item(
+                        entry,
+                        label,
+                        format!("{} marked", session.marks.len()),
+                        true,
+                    ),
+                    None => on_row(entry, label, String::new()),
+                    Some(row) => match batch::eligibility(row, action, &session.config) {
+                        Eligibility::Available => item(entry, label, String::new(), true),
+                        Eligibility::Noop(reason) => {
+                            item(entry, label, format!("no-op · {reason}"), true)
+                        }
+                        Eligibility::Unavailable(reason) => {
+                            item(entry, label, reason.to_owned(), false)
+                        }
+                    },
+                }
+            })
+            .chain(
+                [
+                    ("Clone only", "Clone only is unavailable in this build"),
+                    (
+                        "Clone + register",
+                        "Clone + register is unavailable in this build",
+                    ),
+                    ("Remove only", "Remove only is unavailable in this build"),
+                    (
+                        "Remove + unregister",
+                        "Remove + unregister is unavailable in this build",
+                    ),
+                ]
+                .into_iter()
+                .map(|(label, message)| on_row(Entry::Unavailable(message), label, String::new())),
+            )
+            .collect(),
         Menu::Copy => CopyField::ALL
             .into_iter()
             .map(|field| {
@@ -1977,9 +2274,71 @@ fn activate_menu_entry(
             1 => "Cleared 1 mark".to_owned(),
             count => format!("Cleared {count} marks"),
         }),
+        (Entry::Run(_), _)
+            if session
+                .batch
+                .as_ref()
+                .is_some_and(|batch| !batch.finished()) =>
+        {
+            Some("A batch is already running".to_owned())
+        }
+        (Entry::Run(action), _) => {
+            let keys = if session.marks.is_empty() {
+                row.map(|row| row.key.clone()).into_iter().collect()
+            } else {
+                session.marks.keys().cloned().collect::<Vec<_>>()
+            };
+            let targets = keys
+                .into_iter()
+                .map(|key| {
+                    let hidden = !visible_rows.iter().any(|row| row.key == key);
+                    match report.rows.iter().find(|row| row.key == key) {
+                        Some(row) => BatchTarget::freeze(
+                            row,
+                            names[&row.key].clone(),
+                            hidden,
+                            action,
+                            &session.config,
+                        ),
+                        None => BatchTarget {
+                            name: match &key {
+                                model::RowKey::Path(path) => home_relative(path, &session.home),
+                                model::RowKey::Declaration { identity, .. }
+                                | model::RowKey::Checkout { identity, .. }
+                                | model::RowKey::Pattern(identity) => escape(identity),
+                            },
+                            key,
+                            identity: None,
+                            path: None,
+                            found: false,
+                            reference: None,
+                            hidden,
+                            blocked: Some("the entry is no longer listed".to_owned()),
+                            noop: None,
+                            registration: Default::default(),
+                        },
+                    }
+                })
+                .collect();
+            let batch = Batch::new(action, targets);
+            if session.marks.is_empty() {
+                start_batch(session, selection, batch);
+            } else {
+                selection.preview = Some(batch);
+                selection.preview_run = false;
+                selection.preview_scroll = 0;
+            }
+            None
+        }
         _ => None,
     };
     None
+}
+
+fn start_batch(session: &mut InventorySession, selection: &mut Selection, batch: Batch) {
+    session.batch = Some(batch);
+    selection.batch = true;
+    selection.batch_scroll = 0;
 }
 
 fn toggle_mark(
@@ -2040,6 +2399,217 @@ fn problems_widget(session: &InventorySession) -> Paragraph<'static> {
         ),
     ]);
     Paragraph::new(lines).wrap(Wrap { trim: false })
+}
+
+fn outcome_label(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::Succeeded => "SUCCEEDED",
+        Outcome::Noop => "NO-OP",
+        Outcome::Failed => "FAILED",
+        Outcome::Blocked => "BLOCKED",
+        Outcome::Cancelled => "CANCELLED",
+        Outcome::Unattempted => "UNATTEMPTED",
+    }
+}
+
+fn batch_widget(batch: &Batch, home: &Path, width: u16) -> Paragraph<'static> {
+    let active = batch.active();
+    let hidden = batch.targets.iter().filter(|target| target.hidden).count();
+    let mut summary = format!("{} / {} processed", batch.processed(), batch.targets.len());
+    if hidden > 0 {
+        summary.push_str(&format!(" · {hidden} hidden by filter"));
+    }
+    if let Some(path) = active.and_then(|index| batch.targets[index].path.as_ref()) {
+        summary.push_str(&format!(" · active: {}", home_relative(path, home)));
+    }
+    let name_width = batch
+        .targets
+        .iter()
+        .map(|target| Line::raw(target.name.clone()).width())
+        .max()
+        .unwrap_or(0)
+        .max(11);
+    let cells = |name: &str, disk: &str, config: &str| {
+        let padding = name_width.saturating_sub(Line::raw(name.to_owned()).width());
+        format!("{name}{} {disk:<9} {config:<13} ", " ".repeat(padding))
+    };
+    let mut lines = vec![
+        Line::raw(summary),
+        Line::default(),
+        Line::styled(
+            format!(
+                "{:<12} {}reason",
+                "outcome",
+                cells("repository", "disk", "config")
+            ),
+            dim(),
+        ),
+    ];
+    let reason_column = 13 + Line::raw(cells("", "", "")).width();
+    for (index, (target, result)) in batch.targets.iter().zip(&batch.results).enumerate() {
+        let (label, style) = match result.outcome {
+            _ if Some(index) == active => ("ACTIVE", warn()),
+            Outcome::Succeeded => ("SUCCEEDED", focus()),
+            Outcome::Failed | Outcome::Blocked => (outcome_label(result.outcome), tint(Color::Red)),
+            outcome => (outcome_label(outcome), dim()),
+        };
+        let reason = [
+            escape(&result.reason),
+            batch
+                .shared_with(index)
+                .map(|earlier| format!("shared with {}", batch.targets[earlier].name))
+                .unwrap_or_default(),
+        ]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+        for (line, chunk) in
+            column_chunks(&reason, usize::from(width).saturating_sub(reason_column))
+                .into_iter()
+                .enumerate()
+        {
+            lines.push(if line == 0 {
+                Line::from(vec![
+                    Span::styled(format!("{label:<12} "), style),
+                    Span::raw(cells(&target.name, &result.disk, &result.config)),
+                    Span::styled(chunk, dim()),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw(" ".repeat(reason_column)),
+                    Span::styled(chunk, dim()),
+                ])
+            });
+        }
+    }
+    lines.extend([
+        Line::default(),
+        Line::styled(
+            "Registration changes configuration only. Checkouts and their files stay as they are.",
+            dim(),
+        ),
+    ]);
+    Paragraph::new(lines).wrap(Wrap { trim: false })
+}
+
+/// Every frozen target before the batch runs: its exact path and identity, and whether it is
+/// eligible, a no-op or blocked, with the reason.
+fn preview_lines(batch: &Batch, home: &Path) -> Vec<Line<'static>> {
+    let hidden = batch.targets.iter().filter(|target| target.hidden).count();
+    let mut summary = format!(
+        "{} exact {}",
+        batch.targets.len(),
+        if batch.targets.len() == 1 {
+            "target"
+        } else {
+            "targets"
+        }
+    );
+    if hidden > 0 {
+        summary.push_str(&format!(" · {hidden} hidden by filter"));
+    }
+    let mut lines = vec![
+        Line::raw(summary),
+        Line::styled(
+            "Registration changes configuration only. Checkouts and their files stay as they are.",
+            dim(),
+        ),
+    ];
+    for target in &batch.targets {
+        let (label, style, reason) = match (&target.blocked, &target.noop) {
+            (Some(reason), _) => ("BLOCKED", tint(Color::Red), Some(reason)),
+            (None, Some(reason)) => ("NO-OP", dim(), Some(reason)),
+            (None, None) => ("ELIGIBLE", focus(), None),
+        };
+        let mut heading = vec![
+            Span::styled(label, style),
+            Span::raw(format!(" {}", target.name)),
+        ];
+        if target.hidden {
+            heading.push(Span::styled(" (hidden by filter)", dim()));
+        }
+        let mut detail = vec![
+            target
+                .path
+                .as_ref()
+                .map_or_else(|| "no path".to_owned(), |path| home_relative(path, home)),
+            target
+                .identity
+                .as_deref()
+                .map_or_else(|| "no identity".to_owned(), escape),
+        ];
+        detail.extend(reason.map(escape));
+        lines.extend([
+            Line::default(),
+            Line::from(heading),
+            Line::styled(detail.join(" · "), dim()),
+        ]);
+    }
+    lines
+}
+
+/// The preview's two choices with one cursor; `run` focuses the run choice instead of Cancel.
+fn preview_choices(batch: &Batch, run: bool) -> Vec<Line<'static>> {
+    let count = |noop: bool| {
+        batch
+            .targets
+            .iter()
+            .filter(|target| target.blocked.is_none() && target.noop.is_some() == noop)
+            .count()
+    };
+    let (changing, noop) = (count(false), count(true));
+    let blocked = batch.targets.len() - changing - noop;
+    let unchanged = [(noop, "no-op"), (blocked, "blocked")]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, label)| format!("{count} {label}"))
+        .collect::<Vec<_>>();
+    let choice = |label: String, hint: String, focused: bool| {
+        let style = if focused {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        Line::from(vec![
+            Span::styled(label, style),
+            Span::styled(format!("  {hint}"), dim()),
+        ])
+    };
+    vec![
+        choice("Cancel".to_owned(), "default".to_owned(), !run),
+        choice(
+            format!(
+                "{} {changing} {}",
+                batch.action.label(),
+                if changing == 1 { "target" } else { "targets" }
+            ),
+            if unchanged.is_empty() {
+                "configuration only".to_owned()
+            } else {
+                format!("{} stay unchanged", unchanged.join(" · "))
+            },
+            run,
+        ),
+    ]
+}
+
+/// The preview popup's regions, its scrolling target list, and the choices pinned below it.
+fn preview_regions(area: Rect, list: &[Line<'static>]) -> ([Rect; 4], Rect, Rect) {
+    let mut sizing = list.to_vec();
+    sizing.extend(std::iter::repeat_n(Line::default(), 3));
+    let regions = popup_regions(
+        area,
+        WIDE_POPUP,
+        &Paragraph::new(sizing).wrap(Wrap { trim: false }),
+    );
+    let [list, _, choices] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(2),
+    ])
+    .areas(regions[2]);
+    (regions, list, choices)
 }
 
 /// Local wall-clock time of day, or UTC where the platform offers no local time zone.
@@ -2125,6 +2695,12 @@ struct Selection {
     menu_scroll: u16,
     problems: bool,
     problems_scroll: u16,
+    batch: bool,
+    batch_scroll: u16,
+    /// Targets frozen for a batch that has not started; refreshes never change them.
+    preview: Option<Batch>,
+    preview_run: bool,
+    preview_scroll: u16,
     help: bool,
     help_mode: Mode,
     help_scroll: u16,
@@ -2212,6 +2788,10 @@ impl Selection {
             View::Help
         } else if !self.menu.is_empty() {
             View::Menu
+        } else if self.preview.is_some() {
+            View::Preview
+        } else if self.batch {
+            View::Batch
         } else if self.problems {
             View::Problems
         } else if self.inspection {
@@ -2672,6 +3252,7 @@ mod tests {
             notice: None,
             message: None,
             cached_report: None,
+            batch: None,
         };
 
         session.receive_events();

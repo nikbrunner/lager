@@ -549,7 +549,7 @@ fn registration_for(
     (RegistrationState::Unregistered, relationships)
 }
 
-fn wildcard_relative<'a>(pattern: &RepositoryRef, identity: &'a str) -> Option<&'a str> {
+pub(crate) fn wildcard_relative<'a>(pattern: &RepositoryRef, identity: &'a str) -> Option<&'a str> {
     identity
         .strip_prefix(&(pattern.identity() + "/"))
         .filter(|relative| !relative.is_empty())
@@ -609,6 +609,10 @@ impl Marks {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &RowKey> {
+        self.0.iter()
     }
 
     /// Returns whether the row is marked afterwards.
