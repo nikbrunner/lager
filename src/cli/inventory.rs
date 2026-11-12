@@ -17,12 +17,15 @@ use ratatui::widgets::{
     Block, Cell, Clear, HighlightSpacing, Paragraph, Row, Table, TableState, Wrap,
 };
 
-use crate::application::batch::{self, Batch, BatchAction, BatchTarget, Eligibility, Outcome};
+use crate::application::batch::{
+    self, AddChoice, AddPreview, Batch, BatchAction, BatchTarget, Eligibility, Outcome,
+};
 use crate::application::inventory::{
     self as model, CopyField, InventoryFilesystem, InventoryReport, LocalScan, Marks,
     SessionProblems,
 };
 use crate::application::ports::Desktop;
+use crate::domain::repository::validate_reference_safety;
 use crate::infrastructure::config::{CommandConfigStore, load_inventory};
 use crate::infrastructure::desktop::NativeDesktop;
 use crate::infrastructure::git::NativeGit;
@@ -533,6 +536,66 @@ impl TerminalSession {
                         let mode = view.mode();
                         match session.bindings.action(mode, key) {
                             Some(Action::Quit) => return quit(session),
+                            Some(Action::Add) if view == View::Normal => {
+                                selection.add = Some(AddForm::default());
+                            }
+                            Some(Action::Accept) if view == View::AddInput => {
+                                let form = selection.add.as_mut().expect("Add is open");
+                                match batch::add_preview(
+                                    &form.text,
+                                    &session.config,
+                                    &session.root,
+                                    &report.rows,
+                                    session.complete,
+                                    &LocalInventoryFilesystem,
+                                ) {
+                                    Ok(preview) => {
+                                        form.choice =
+                                            match preview.eligibility(AddChoice::CloneRegister) {
+                                                Eligibility::Unavailable(_) => 0,
+                                                _ => 2,
+                                            };
+                                        form.preview = Some(preview);
+                                        form.rejected = None;
+                                    }
+                                    Err(reason) => {
+                                        if validate_reference_safety(&form.text).is_err() {
+                                            form.text.clear();
+                                        }
+                                        form.rejected = Some(reason);
+                                    }
+                                }
+                            }
+                            Some(Action::Cancel) if view == View::AddInput => {
+                                selection.add = None;
+                                session.message =
+                                    Some("Add cancelled · nothing changed".to_owned());
+                            }
+                            Some(Action::Cancel) if view == View::AddPreview => {
+                                if let Some(form) = selection.add.as_mut() {
+                                    form.preview = None;
+                                }
+                            }
+                            Some(action @ (Action::Up | Action::Down))
+                                if view == View::AddPreview =>
+                            {
+                                if let Some(form) = selection.add.as_mut() {
+                                    form.choice = if action == Action::Up {
+                                        form.choice.saturating_sub(1)
+                                    } else {
+                                        (form.choice + 1).min(ADD_CHOICES.len())
+                                    };
+                                }
+                            }
+                            Some(Action::Accept) if view == View::AddPreview => {
+                                choose_add(session, &mut selection);
+                            }
+                            None if view == View::AddInput => {
+                                if let Some(form) = selection.add.as_mut() {
+                                    edit_text(&mut form.text, key);
+                                    form.rejected = None;
+                                }
+                            }
                             Some(Action::Accept) if view == View::Menu => {
                                 if let Some(code) = activate_menu_entry(
                                     session,
@@ -744,7 +807,7 @@ impl TerminalSession {
                             }
                             Some(Action::Up) => selection.move_by(&visible_rows, -1),
                             Some(Action::Down) => selection.move_by(&visible_rows, 1),
-                            None if view == View::Search => selection.edit_query(key),
+                            None if view == View::Search => edit_text(&mut selection.query, key),
                             _ => {}
                         }
                     }
@@ -1155,6 +1218,89 @@ impl TerminalSession {
                             )
                         }
                     }
+                    View::AddInput => {
+                        if let Some(form) = &shown.add {
+                            draw_popup(
+                                frame,
+                                POPUP,
+                                "Add / URL or reference",
+                                add_input_widget(
+                                    form,
+                                    session.marks.len(),
+                                    bindings,
+                                    popup_body_width(area, POPUP),
+                                ),
+                                format!(
+                                    "{} · {}",
+                                    first_key_hint(bindings, Mode::Input, Action::Accept, "preview"),
+                                    first_key_hint(bindings, Mode::Input, Action::Cancel, "back")
+                                ),
+                            )
+                        }
+                    }
+                    View::AddPreview => {
+                        if let Some((form, preview)) = shown
+                            .add
+                            .as_ref()
+                            .and_then(|form| Some((form, form.preview.as_ref()?)))
+                        {
+                            let (fields, choices) = add_preview_lines(
+                                preview,
+                                form.choice,
+                                session.marks.len(),
+                                home,
+                                bindings,
+                                popup_body_width(area, WIDE_POPUP),
+                            );
+                            let mut sizing = fields.clone();
+                            sizing.extend(choices.iter().cloned());
+                            let [popup, title, content, footer] = popup_regions(
+                                area,
+                                WIDE_POPUP,
+                                &Paragraph::new(sizing).wrap(Wrap { trim: false }),
+                            );
+                            let fields = Paragraph::new(fields).wrap(Wrap { trim: false });
+                            let choices = Paragraph::new(choices).wrap(Wrap { trim: false });
+                            // The note under the choices gives way first, then the fields.
+                            let room = content
+                                .height
+                                .saturating_sub(fields.line_count(content.width) as u16);
+                            let [fields_area, choices_area] = Layout::vertical([
+                                Constraint::Min(0),
+                                Constraint::Length(
+                                    (choices.line_count(content.width) as u16)
+                                        .min(room)
+                                        .max(ADD_CHOICES_HEIGHT.min(content.height)),
+                                ),
+                            ])
+                            .areas(content);
+                            frame.render_widget(Clear, popup);
+                            frame.render_widget(Block::bordered().border_style(focus()), popup);
+                            frame.render_widget(bar("Add / preview", "lager", title.width), title);
+                            frame.render_widget(fields, fields_area);
+                            frame.render_widget(choices, choices_area);
+                            frame.render_widget(
+                                Paragraph::new(format!(
+                                    "{} select · {} · {}",
+                                    rows_hint(bindings, Mode::Confirmation, true),
+                                    first_key_hint(
+                                        bindings,
+                                        Mode::Confirmation,
+                                        Action::Accept,
+                                        "choose"
+                                    ),
+                                    first_key_hint(
+                                        bindings,
+                                        Mode::Confirmation,
+                                        Action::Cancel,
+                                        "back"
+                                    )
+                                ))
+                                .style(dim()),
+                                footer,
+                            );
+                        }
+                    }
                     View::Normal | View::Search => {}
                 }
             })
@@ -1175,6 +1321,8 @@ enum View {
     Preview,
     Batch,
     Help,
+    AddInput,
+    AddPreview,
 }
 
 impl View {
@@ -1188,6 +1336,7 @@ impl View {
             Self::Preview => "CONFIRM",
             Self::Batch => "RESULTS",
             Self::Help => "HELP",
+            Self::AddInput | Self::AddPreview => "INPUT",
         }
     }
 
@@ -1197,7 +1346,8 @@ impl View {
             Self::Search => Mode::Search,
             Self::Menu => Mode::Menu,
             Self::Inspect | Self::Problems | Self::Batch | Self::Help => Mode::Inspection,
-            Self::Preview => Mode::Confirmation,
+            Self::Preview | Self::AddPreview => Mode::Confirmation,
+            Self::AddInput => Mode::Input,
         }
     }
 }
@@ -1322,6 +1472,18 @@ fn footer_widget(bindings: &Bindings, view: View, width: u16) -> Paragraph<'stat
             (first(Mode::Menu, Action::Accept), "choose"),
             (first(Mode::Menu, Action::Cancel), "back"),
         ],
+        View::AddInput => vec![
+            (first(Mode::Input, Action::Accept), "preview"),
+            (first(Mode::Input, Action::Cancel), "back"),
+        ],
+        View::AddPreview => vec![
+            (rows_hint(bindings, Mode::Confirmation, false), "select"),
+            (first(Mode::Confirmation, Action::Accept), "choose"),
+            (
+                first(Mode::Confirmation, Action::Cancel),
+                "back to reference",
+            ),
+        ],
         View::Preview => vec![
             (rows_hint(bindings, Mode::Confirmation, false), "focus"),
             (
@@ -1344,6 +1506,7 @@ fn footer_widget(bindings: &Bindings, view: View, width: u16) -> Paragraph<'stat
                 [
                     (Action::Search, "search"),
                     (Action::Mark, "mark"),
+                    (Action::Add, "add"),
                     (Action::Inspect, "inspect"),
                     (Action::Refresh, "refresh"),
                     (Action::Menu, "menu"),
@@ -1367,7 +1530,9 @@ fn footer_widget(bindings: &Bindings, view: View, width: u16) -> Paragraph<'stat
             .saturating_sub(2)
     };
     // Least needed first; exit, help and menu routes always stay visible.
-    for dropped in ["mark", "rows", "refresh", "search", "inspect", "delete"] {
+    for dropped in [
+        "mark", "add", "rows", "refresh", "search", "inspect", "delete",
+    ] {
         if width_of(&items) <= usize::from(width) {
             break;
         }
@@ -1463,6 +1628,8 @@ fn status_lines(
         _ if message.is_some() && complete => message.unwrap_or_default().to_owned(),
         _ if message.is_some() => format!("{state} · {}", message.unwrap_or_default()),
         View::Preview => "Nothing changes until you confirm".to_owned(),
+        View::AddInput => "Ordinary keys type text · nothing is saved yet".to_owned(),
+        View::AddPreview => "Nothing changes until you choose".to_owned(),
         View::Menu | View::Help | View::Problems | View::Batch => state.to_owned(),
         View::Normal | View::Inspect if compact && complete && !inspect.is_empty() => format!(
             "Path and origin: {} inspects, menu copies the full value",
@@ -1545,6 +1712,7 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
             (pair(Down, Up), "previous / next row"),
             (single(Search), "live fuzzy search"),
             (single(Mark), "toggle mark"),
+            (single(Add), "add a repository by reference"),
             (single(ClearSearch), "clear filter"),
             (single(Inspect), "Inspect repository"),
             (single(Refresh), "refresh local/config state"),
@@ -1582,10 +1750,8 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
             (help_quit(), "help / quit"),
         ],
         Mode::Input => vec![
-            (pair(Down, Up), "scroll"),
-            (pair(PageUp, PageDown), "page up / down"),
-            (single(Accept), "close"),
-            (single(Cancel), "close"),
+            (single(Accept), "preview the reference"),
+            (single(Cancel), "back"),
             (help_quit(), "help / quit"),
         ],
     };
@@ -1922,6 +2088,7 @@ enum Entry {
     OpenOrigin,
     Refresh,
     Problems,
+    Add,
     Help,
     Quit,
     /// Reports the message instead of acting.
@@ -2024,12 +2191,7 @@ fn menu_lines(
                 ),
                 heading(String::new()),
                 heading("Session".to_owned()),
-                item(
-                    Entry::Unavailable("Add repository is unavailable in this build"),
-                    "Add repository",
-                    String::new(),
-                    true,
-                ),
+                item(Entry::Add, "Add repository", key(Action::Add), true),
                 item(
                     Entry::Unavailable("Remote discovery is unavailable in this build"),
                     "Remote discovery…",
@@ -2172,26 +2334,43 @@ fn menu_widget(lines: &[MenuLine], selected: usize, width: u16) -> Paragraph<'st
                 if line.entry.is_none() {
                     return Line::styled(line.label.clone(), dim());
                 }
-                let label = Line::raw(line.label.clone()).width();
-                let hint = abbreviate(&line.hint, width.saturating_sub(label + 2), false);
-                let gap = width
-                    .saturating_sub(label + Line::raw(hint.as_str()).width())
-                    .max(1);
-                let (label_style, hint_style) = if index == selected {
-                    let reversed = Style::default().add_modifier(Modifier::REVERSED);
-                    (reversed, reversed)
-                } else if line.enabled {
-                    (Style::default(), dim())
-                } else {
-                    (dim(), dim())
-                };
-                Line::from(vec![
-                    Span::styled(format!("{}{}", line.label, " ".repeat(gap)), label_style),
-                    Span::styled(hint, hint_style),
-                ])
+                choice_line(
+                    &line.label,
+                    &line.hint,
+                    line.enabled,
+                    index == selected,
+                    width,
+                )
             })
             .collect::<Vec<_>>(),
     )
+}
+
+/// A choice with its hint at the right edge; the focused choice is reversed, a disabled one dim.
+fn choice_line(
+    label: &str,
+    hint: &str,
+    enabled: bool,
+    focused: bool,
+    width: usize,
+) -> Line<'static> {
+    let label_width = Line::raw(label.to_owned()).width();
+    let hint = abbreviate(hint, width.saturating_sub(label_width + 2), false);
+    let gap = width
+        .saturating_sub(label_width + Line::raw(hint.as_str()).width())
+        .max(1);
+    let (label_style, hint_style) = if focused {
+        let reversed = Style::default().add_modifier(Modifier::REVERSED);
+        (reversed, reversed)
+    } else if enabled {
+        (Style::default(), dim())
+    } else {
+        (dim(), dim())
+    };
+    Line::from(vec![
+        Span::styled(format!("{label}{}", " ".repeat(gap)), label_style),
+        Span::styled(hint, hint_style),
+    ])
 }
 
 /// Runs the selected menu entry. Returns the exit code when the entry quits.
@@ -2232,6 +2411,10 @@ fn activate_menu_entry(
         }
         (Entry::Refresh, _) => {
             refresh(session);
+            None
+        }
+        (Entry::Add, _) => {
+            selection.add = Some(AddForm::default());
             None
         }
         (Entry::Problems, _) => {
@@ -2333,6 +2516,207 @@ fn activate_menu_entry(
         _ => None,
     };
     None
+}
+
+/// The Add form: the typed reference, why the last one was rejected, and its preview with the
+/// cursor on one of the preview's choices.
+#[derive(Default)]
+struct AddForm {
+    text: String,
+    rejected: Option<String>,
+    preview: Option<AddPreview>,
+    choice: usize,
+}
+
+/// A spacer and the four preview choices, kept in view before the note and the fields.
+const ADD_CHOICES_HEIGHT: u16 = 5;
+
+/// The preview's choices in board order; the cursor index past them is "Back to reference".
+const ADD_CHOICES: [(AddChoice, &str); 3] = [
+    (AddChoice::Register, "configuration only"),
+    (AddChoice::Clone, "files only"),
+    (AddChoice::CloneRegister, "files, then configuration"),
+];
+
+fn add_input_widget(
+    form: &AddForm,
+    marked: usize,
+    bindings: &Bindings,
+    width: u16,
+) -> Paragraph<'static> {
+    let width = usize::from(width);
+    let mut lines = vec![
+        Line::raw("Repository reference"),
+        Line::styled(format!("{}█", escape(&form.text)), focus()),
+    ];
+    if let Some(reason) = &form.rejected {
+        lines.push(Line::styled(
+            format!("Rejected: {}", escape(reason)),
+            tint(Color::Red),
+        ));
+    }
+    lines.extend([
+        Line::styled(
+            "Shorthand, canonical identity or a supported clone URL. One concrete repository, no wildcards. Nothing is saved yet.",
+            dim(),
+        ),
+        Line::default(),
+        choice_line(
+            "Preview destination",
+            &bindings.keys(Mode::Input, Action::Accept).join("/"),
+            true,
+            true,
+            width,
+        ),
+        choice_line(
+            "Cancel",
+            &bindings.keys(Mode::Input, Action::Cancel).join("/"),
+            true,
+            false,
+            width,
+        ),
+    ]);
+    if marked > 0 {
+        lines.extend([
+            Line::default(),
+            Line::styled(
+                if marked == 1 {
+                    "1 marked row is not a target of Add.".to_owned()
+                } else {
+                    format!("{marked} marked rows are not targets of Add.")
+                },
+                dim(),
+            ),
+        ]);
+    }
+    Paragraph::new(lines).wrap(Wrap { trim: false })
+}
+
+/// The preview's fields, and its choices with the closing note; the choices stay in view when
+/// long values leave too little room.
+fn add_preview_lines(
+    preview: &AddPreview,
+    choice: usize,
+    marked: usize,
+    home: &Path,
+    bindings: &Bindings,
+    width: u16,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+    let checkout = match preview.checkout {
+        model::CheckoutState::Missing => "missing · verified just now",
+        model::CheckoutState::Cloned => "cloned · matching checkout at the destination",
+        model::CheckoutState::Conflict => "conflict · another checkout is at the destination",
+        model::CheckoutState::Unreadable => "unreadable · the state is unknown",
+        _ if preview.pending => "unknown · not observed yet",
+        _ => "unknown · no checkout observed here",
+    };
+    let checkout_style = match preview.checkout {
+        model::CheckoutState::Cloned => Style::default(),
+        model::CheckoutState::Missing => warn(),
+        _ => tint(Color::Red),
+    };
+    let fields = [
+        ("Reference", escape(&preview.reference), Style::default()),
+        ("Identity", escape(&preview.identity), Style::default()),
+        (
+            "Destination",
+            home_relative(&preview.destination, home),
+            Style::default(),
+        ),
+        ("Checkout", checkout.to_owned(), checkout_style),
+        (
+            "Registration",
+            preview.registration.label().to_owned(),
+            dim(),
+        ),
+        (
+            "Post-clone hook",
+            preview
+                .hook
+                .as_deref()
+                .map_or_else(|| "none declared".to_owned(), escape),
+            dim(),
+        ),
+        (
+            "Existing marks",
+            format!("{marked} · unaffected by this action"),
+            Style::default(),
+        ),
+    ]
+    .into_iter()
+    .flat_map(|(name, value, style)| field_lines(name, &value, style, width))
+    .collect::<Vec<_>>();
+    let mut lines = vec![Line::default()];
+    let width = usize::from(width);
+    for (index, (action, hint)) in ADD_CHOICES.into_iter().enumerate() {
+        let (hint, enabled) = match preview.eligibility(action) {
+            Eligibility::Available => (hint.to_owned(), true),
+            Eligibility::Noop(reason) => (format!("no-op · {reason}"), true),
+            Eligibility::Unavailable(reason) => (reason.to_owned(), false),
+        };
+        lines.push(choice_line(
+            action.label(),
+            &hint,
+            enabled,
+            index == choice,
+            width,
+        ));
+    }
+    lines.extend([
+        choice_line(
+            "Back to reference",
+            &bindings.keys(Mode::Confirmation, Action::Cancel).join("/"),
+            true,
+            choice == ADD_CHOICES.len(),
+            width,
+        ),
+        Line::default(),
+        Line::styled(
+            "An unknown checkout state disables Clone until it is observed. It is never shown as missing.",
+            dim(),
+        ),
+    ]);
+    (fields, lines)
+}
+
+/// Register only runs as a one-target registration batch.
+fn choose_add(session: &mut InventorySession, selection: &mut Selection) {
+    let Some(form) = selection.add.as_mut() else {
+        return;
+    };
+    let Some(preview) = &form.preview else {
+        return;
+    };
+    let Some((choice, _)) = ADD_CHOICES.get(form.choice).copied() else {
+        form.preview = None;
+        return;
+    };
+    let label = choice.label();
+    session.message = Some(match (choice, preview.eligibility(choice)) {
+        (_, Eligibility::Unavailable(reason)) => format!("{label} unavailable: {reason}"),
+        (AddChoice::Register, _)
+            if session
+                .batch
+                .as_ref()
+                .is_some_and(|batch| !batch.finished()) =>
+        {
+            "A batch is already running".to_owned()
+        }
+        (AddChoice::Register, _) => {
+            let target = preview.target(escape(&preview.identity));
+            selection.add = None;
+            start_batch(
+                session,
+                selection,
+                Batch {
+                    previewed: true,
+                    ..Batch::new(BatchAction::Register, vec![target])
+                },
+            );
+            return;
+        }
+        _ => format!("{label} is unavailable in this build"),
+    });
 }
 
 fn start_batch(session: &mut InventorySession, selection: &mut Selection, batch: Batch) {
@@ -2701,6 +3085,7 @@ struct Selection {
     preview: Option<Batch>,
     preview_run: bool,
     preview_scroll: u16,
+    add: Option<AddForm>,
     help: bool,
     help_mode: Mode,
     help_scroll: u16,
@@ -2788,6 +3173,12 @@ impl Selection {
             View::Help
         } else if !self.menu.is_empty() {
             View::Menu
+        } else if let Some(add) = &self.add {
+            if add.preview.is_some() {
+                View::AddPreview
+            } else {
+                View::AddInput
+            }
         } else if self.preview.is_some() {
             View::Preview
         } else if self.batch {
@@ -2866,21 +3257,21 @@ impl Selection {
         self.table.select(Some(index));
         self.remember(Some(rows[index]));
     }
+}
 
-    fn edit_query(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Backspace => {
-                self.query.pop();
-            }
-            KeyCode::Char(character)
-                if !key.modifiers.intersects(
-                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
-                ) =>
-            {
-                self.query.push(character);
-            }
-            _ => {}
+fn edit_text(text: &mut String, key: KeyEvent) {
+    match key.code {
+        KeyCode::Backspace => {
+            text.pop();
         }
+        KeyCode::Char(character)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
+        {
+            text.push(character);
+        }
+        _ => {}
     }
 }
 

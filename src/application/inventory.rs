@@ -471,7 +471,11 @@ fn declaration_key(identity: &str, destination: &Path) -> RowKey {
     }
 }
 
-fn configured_destination(config: &Config, reference: &RepositoryRef, root: &Path) -> PathBuf {
+pub(crate) fn configured_destination(
+    config: &Config,
+    reference: &RepositoryRef,
+    root: &Path,
+) -> PathBuf {
     let Some(provider) = config.providers.get(&reference.host) else {
         return reference.destination(root);
     };

@@ -94,7 +94,7 @@ refresh; otherwise it returns `0`. Informational exclusions and deliberate
 cancellation do not count as failures.
 
 Use `j`/`k` or arrow keys to select a row, `/` for live fuzzy search, Space to
-mark the row, Enter to inspect the selected repository, `m` for the action menu,
+mark the row, `a` to add a repository by reference, Enter to inspect the selected repository, `m` for the action menu,
 and `?` for effective bindings. Search matches full attributes, paths and origins; Enter/Esc
 retain the filter and normal-mode Backspace clears it. Ordinary search letters
 remain text; F1 opens search help. Help describes the mode it was opened from.
@@ -139,15 +139,36 @@ same choices. Open origin hands an HTTPS address derived from the repository
 identity to `open` (macOS) or `xdg-open` without waiting for it, never the
 origin's own scheme; Windows has no opener. A missing or failing utility is
 explained in the status line and is not a failure.
+Add (`a`, or Add repository in the menu) takes one concrete reference through
+the same parser as the CLI: shorthand, a canonical identity or a supported clone
+URL. Its letters are text; Enter previews and Esc closes the form.
+References with credentials, a query or a fragment are rejected without showing
+the value again: the field is emptied and only the reason remains. Any `*`
+rejects the reference as a wildcard; a wildcard or an unparsable reference keeps
+its text in the field for editing. The preview
+shows the identity, the configured destination, the checkout state observed there,
+the registration and any declared post-clone hook, then offers Register only,
+Clone only, Clone + register and Back to reference. Only a destination that does
+not exist reads `missing`; a file, a symlink or a path that cannot be read reads
+`unreadable`; a directory reads `cloned` or `conflict` once the scan has observed
+a checkout there and `unknown` otherwise, either not observed yet or holding no
+observed checkout after the scan. An unknown, unreadable or conflicting
+destination disables both clone choices with the reason.
+Register only runs as a one-target registration batch with the same re-check and
+outcomes as Repository actions… → Register, keeping the typed reference text.
+Clone only and Clone + register report that cloning is unavailable in this build.
+Add never targets or changes marks, and closing it changes no files or
+configuration and keeps the query, cursor and marks.
 Session problems… lists every failure that makes the session exit `1`; the header
 shows their count.
 Popup content scrolls independently of its title and effective action hints.
-In Menu, Inspect, Help and the batch preview, q or Esc closes the current popup;
+In Menu, Inspect, Help, the batch preview and the Add preview, q or Esc closes
+the current popup (the Add preview returns to its reference);
 Ctrl-Q quits the app. Normal-mode q and Esc quit.
 Configure shortcuts through [inventory key maps](config.md#inventory-key-maps).
 
-Register and Unregister are the only repository mutations; the other repository
-actions and remote discovery are unavailable. `--remote`, including with `--include-archived`, exits
+Register and Unregister, including Add's Register only, are the only repository
+mutations; cloning, removal and remote discovery are unavailable. `--remote`, including with `--include-archived`, exits
 `2` before raw mode. `--include-archived` without `--remote` is also invalid.
 Non-TTY use exits `2`; fatal startup/configuration errors exit `1`.
 

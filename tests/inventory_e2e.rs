@@ -299,9 +299,11 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         }
         // At 80 columns the hint line stays one line and drops its least needed hint.
         let footer: &[&str] = if compact {
-            &["  j/k rows  / search  Enter inspect  R refresh  m menu  ? help  q quit"]
+            &["  j/k rows  / search  a add  Enter inspect  R refresh  m menu  ? help  q quit"]
         } else {
-            &["  j/k rows  / search  Space mark  Enter inspect  R refresh  m menu  ? help  q quit"]
+            &[
+                "  j/k rows  / search  Space mark  a add  Enter inspect  R refresh  m menu  ? help  q quit",
+            ]
         };
         let status = rows - 1 - footer.len();
         assert!(
@@ -4186,6 +4188,7 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
                     "pair: Selection… Space",
                     "Session",
                     "Add repository",
+                    "pair: repository a",
                     "pair: discovery… off",
                     "pair: config R",
                     "pair: problems… none",
@@ -4272,8 +4275,9 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
                 vec!["Marked visible concrete rows", "1 marked · 0 hidden"],
                 root_entry(6),
             ),
+            (vec!["Add / URL or reference"], b"\x1b".to_vec()),
             (
-                vec!["Add repository is unavailable in this build"],
+                vec!["Add cancelled · nothing changed", "absent: Add /"],
                 root_entry(7),
             ),
             (
@@ -4865,6 +4869,447 @@ fn inventory_cancelled_preview_changes_nothing_and_keeps_query_cursor_and_marks(
         132,
     );
     assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_add_rejects_wildcards_and_credentials_without_showing_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    init_repo(
+        &root.join("org/alpha"),
+        "git@github.com:org/alpha.git",
+        true,
+    );
+    let tree = checkout_tree(&root);
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"a".to_vec()),
+            (
+                vec![
+                    "INPUT · 1 row",
+                    "Add / URL or reference",
+                    "Repository reference",
+                    "Enter preview · Esc back",
+                    "absent: marked row",
+                ],
+                b"acme/*\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Rejected: wildcards are not accepted",
+                    "acme/*█",
+                    "absent: Add / preview",
+                ],
+                [vec![0x7f; 6], b"org/*/repo\r".to_vec()].concat(),
+            ),
+            (
+                vec![
+                    "Rejected: wildcards are not accepted",
+                    "org/*/repo█",
+                    "absent: acme/*",
+                    "absent: Add / preview",
+                ],
+                [
+                    vec![0x7f; 10],
+                    b"https://user:hunter2@github.com/org/beta.git\r".to_vec(),
+                ]
+                .concat(),
+            ),
+            (
+                vec![
+                    "Rejected: repository reference is malformed",
+                    "absent: hunter2",
+                    "absent: user:",
+                    "absent: org/*/repo",
+                    "absent: Add / preview",
+                ],
+                b"org/beta?token=s3cr3t".to_vec(),
+            ),
+            (
+                vec!["org/beta?token=s3cr3t", "absent: Rejected:"],
+                b"\r".to_vec(),
+            ),
+            (
+                vec!["Rejected:", "absent: s3cr3t", "absent: token"],
+                b"git@github.com:org/beta.git#frag".to_vec(),
+            ),
+            (
+                vec!["git@github.com:org/beta.git#frag", "absent: Rejected:"],
+                b"\r".to_vec(),
+            ),
+            (
+                vec!["Rejected:", "absent: #frag", "absent: Add / preview"],
+                b"https://user:secret-token-123@github.com/org/*".to_vec(),
+            ),
+            (
+                vec![
+                    "https://user:secret-token-123@github.com/org/*",
+                    "absent: Rejected:",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Rejected: repository reference is malformed",
+                    "absent: secret-token-123",
+                    "absent: user",
+                    "absent: Add / preview",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL",
+                    "Add cancelled · nothing changed",
+                    "absent: Add /",
+                    "absent: problem",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_cancelled_add_changes_nothing_and_keeps_query_cursor_and_marks() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    for name in ["alpha1", "alpha2", "zeta"] {
+        init_repo(
+            &root.join("org").join(name),
+            &format!("git@github.com:org/{name}.git"),
+            true,
+        );
+    }
+    let tree = checkout_tree(&root);
+    let kept = vec![
+        "NORMAL · 2 rows",
+        "Add cancelled · nothing changed",
+        "absent: Add /",
+        "1 marked · 1 hidden",
+        "/ github.com/org/alpha",
+        "selected: alpha2",
+        "absent: problem",
+        "absent: Batch /",
+    ];
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 3 rows", "absent: Scanning"],
+                b"kkjj /github.com/org/alpha\r".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 2 rows", "1 marked · 1 hidden", "selected: alpha2"],
+                b"a".to_vec(),
+            ),
+            (
+                vec![
+                    "Add / URL or reference",
+                    "1 marked row is not a target of Add.",
+                ],
+                b"qam/new\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Add / preview",
+                    "pair: Reference qam/new",
+                    "pair: Identity github.com/qam/new",
+                    "~/repos/qam/new",
+                    "pair: Checkout missing",
+                    "pair: Registration unregistered",
+                    "pair: hook none",
+                    "1 · unaffected by this action",
+                    "Register only",
+                    "Clone only",
+                    "Clone + register",
+                    "Back to reference",
+                    "j/k ↑/↓ select · Enter choose · Esc back",
+                ],
+                b"kkkkj\r".to_vec(),
+            ),
+            (
+                vec!["Add / preview", "Clone only is unavailable in this build"],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Add / preview",
+                    "Clone + register is unavailable in this build",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec!["Add / URL or reference", "qam/new", "absent: Add / preview"],
+                b"\x1b".to_vec(),
+            ),
+            (kept.clone(), b"mjjjjjj\r".to_vec()),
+            (
+                vec!["Add / URL or reference", "absent: qam/new"],
+                b"x/y\r".to_vec(),
+            ),
+            (vec!["Add / preview", "pair: Reference x/y"], b"q".to_vec()),
+            (
+                vec!["Add / URL or reference", "x/y", "absent: Add / preview"],
+                b"\x1b".to_vec(),
+            ),
+            (kept, b"q".to_vec()),
+        ],
+        32,
+        132,
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_add_never_offers_an_unknown_destination_as_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    fs::create_dir_all(root.join("org/plain")).unwrap();
+    fs::write(root.join("org/plain/notes"), "kept\n").unwrap();
+    fs::create_dir_all(temp.path().join("elsewhere")).unwrap();
+    std::os::unix::fs::symlink(temp.path().join("elsewhere"), root.join("org/link")).unwrap();
+    init_repo(
+        &root.join("org/other"),
+        "git@github.com:org/elsewhere.git",
+        true,
+    );
+    init_repo(
+        &root.join("org/alpha"),
+        "git@github.com:org/alpha.git",
+        true,
+    );
+    let tree = checkout_tree(&root);
+    let mut actions = vec![(vec!["NORMAL · 2 rows", "absent: Scanning"], b"a".to_vec())];
+    for (reference, checkout, clone_only, clone_register) in [
+        (
+            "org/plain",
+            "unknown · no checkout observed here",
+            "Clone only unavailable: the destination exists and holds no observed checkout",
+            "Clone + register unavailable: the destination exists and holds no observed checkout",
+        ),
+        (
+            "org/link",
+            "pair: Checkout unreadable",
+            "Clone only unavailable: destination is unreadable",
+            "Clone + register unavailable: destination is unreadable",
+        ),
+        (
+            "org/other",
+            "pair: Checkout conflict",
+            "Clone only unavailable: destination conflicts with repository",
+            "Clone + register unavailable: destination conflicts with repository",
+        ),
+        (
+            "org/alpha",
+            "pair: Checkout cloned",
+            "Clone only is unavailable in this build",
+            "Clone + register is unavailable in this build",
+        ),
+        (
+            "org/fresh",
+            "pair: Checkout missing",
+            "Clone only is unavailable in this build",
+            "Clone + register is unavailable in this build",
+        ),
+    ] {
+        actions.extend([
+            (
+                vec!["Add / URL or reference"],
+                format!("{reference}\r").into_bytes(),
+            ),
+            (vec!["Add / preview", checkout], b"kkkkj\r".to_vec()),
+            (vec!["Add / preview", clone_only], b"j\r".to_vec()),
+            (vec!["Add / preview", clone_register], b"\x1b".to_vec()),
+            (
+                vec!["Add / URL or reference", "absent: Add / preview"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "Add cancelled · nothing changed"],
+                b"a".to_vec(),
+            ),
+        ]);
+    }
+    actions.pop();
+    actions.push((
+        vec![
+            "NORMAL",
+            "Add cancelled · nothing changed",
+            "absent: problem",
+        ],
+        b"q".to_vec(),
+    ));
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &actions,
+        32,
+        132,
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_add_stays_usable_while_a_probe_is_pending_and_keeps_its_state_unknown() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    init_repo(
+        &root.join("org/arrives"),
+        "git@github.com:org/arrives.git",
+        true,
+    );
+    let tree = checkout_tree(&root);
+    let tools = temp.path().join("delayed-tools");
+    fs::create_dir_all(&tools).unwrap();
+    let wrapper = tools.join("git");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\n/bin/sleep 6\nexec {} \"$@\"\n",
+            shell_word(support::real_tool("git").as_path())
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+
+    run_inventory_pty_actions(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        &[
+            (
+                vec!["Scanning local repositories", "arrives", "pending"],
+                b"a".to_vec(),
+            ),
+            (vec!["Add / URL or reference"], b"org/arrives\r".to_vec()),
+            (
+                vec![
+                    "Add / preview",
+                    "pair: Checkout unknown",
+                    "unknown · not observed yet",
+                    "pending",
+                    "checkout state is unknown until it is observed",
+                ],
+                b"kkkkj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Clone only unavailable: checkout state is unknown until it is observed",
+                    "pending",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["Add / URL or reference"], b"\x1b".to_vec()),
+            (
+                vec!["NORMAL", "Add cancelled · nothing changed", "pending"],
+                b"q".to_vec(),
+            ),
+        ],
+        40,
+        132,
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_add_registers_a_typed_reference_through_the_batch_and_keeps_marks() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    init_repo(
+        &root.join("org/alpha"),
+        "git@github.com:org/alpha.git",
+        true,
+    );
+    let tree = checkout_tree(&root);
+    let reference = "https://github.com/org/beta.git";
+
+    run_inventory_pty_actions_with_hook(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"kk a".to_vec()),
+            (
+                vec![
+                    "Add / URL or reference",
+                    "1 marked row is not a target of Add.",
+                ],
+                format!("{reference}\r").into_bytes(),
+            ),
+            (
+                vec![
+                    "Add / preview",
+                    "pair: Identity github.com/org/beta",
+                    "pair: Checkout missing",
+                    "pair: Registration unregistered",
+                    "pair: only configuration",
+                ],
+                b"kkkk\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Register",
+                    "1 / 1 processed",
+                    "pair: SUCCEEDED github.com/org/beta",
+                    "Register: 1 succeeded",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL · 2 rows",
+                    "absent: Batch /",
+                    "absent: Add /",
+                    "1 marked · 0 hidden",
+                    "absent: problem",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        |action| {
+            if action == 2 {
+                assert_eq!(fs::read_to_string(&config).unwrap(), original);
+            }
+        },
+    );
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        cli_config(&home, original, &["register", reference])
+    );
     assert_eq!(checkout_tree(&root), tree);
 }
 

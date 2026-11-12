@@ -91,6 +91,7 @@ impl Action {
                     | Self::Inspect
                     | Self::Menu
                     | Self::Mark
+                    | Self::Add
             ),
             Mode::Menu => matches!(
                 self,
@@ -107,7 +108,9 @@ impl Action {
                     | Self::Refresh
                     | Self::ClearSearch
             ),
-            Mode::Search => matches!(self, Self::Accept | Self::Cancel | Self::Help | Self::Quit),
+            Mode::Search | Mode::Input => {
+                matches!(self, Self::Accept | Self::Cancel | Self::Help | Self::Quit)
+            }
             Mode::Confirmation => matches!(
                 self,
                 Self::Up
@@ -131,7 +134,6 @@ impl Action {
                     | Self::Help
                     | Self::Quit
             ),
-            _ => false,
         }
     }
 }

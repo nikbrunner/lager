@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use crate::application::inventory::{InventoryRow, RowKey, wildcard_relative};
+use crate::application::inventory::{
+    CheckoutState, InventoryFilesystem, InventoryRow, RowKey, configured_destination,
+    wildcard_relative,
+};
 use crate::application::ports::{
     AtomicRegistrationStore, GitRemoval, Interaction, InteractionError, Mutation,
 };
@@ -59,6 +62,19 @@ impl Registration {
         registration
     }
 
+    /// The registration label the table shows: explicit, wildcard, excluded or unregistered.
+    pub fn label(&self) -> &'static str {
+        if self.explicit {
+            "explicit"
+        } else if self.exclusions.iter().any(|excluded| !excluded) {
+            "wildcard"
+        } else if !self.exclusions.is_empty() {
+            "excluded"
+        } else {
+            "unregistered"
+        }
+    }
+
     fn noop(&self, action: BatchAction) -> Option<&'static str> {
         let excluded = self.exclusions.iter().any(|excluded| *excluded);
         match action {
@@ -73,6 +89,148 @@ impl Registration {
                 Some("identity is not registered")
             }
             _ => None,
+        }
+    }
+}
+
+/// One concrete reference typed into Add, with its configured destination and the checkout
+/// state observed there when the preview opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddPreview {
+    pub reference: String,
+    pub identity: String,
+    pub destination: PathBuf,
+    pub checkout: CheckoutState,
+    /// An unknown destination may still be observed: the scan is running or its probe there
+    /// has not finished.
+    pub pending: bool,
+    pub registration: Registration,
+    pub hook: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddChoice {
+    Register,
+    Clone,
+    CloneRegister,
+}
+
+impl AddChoice {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Register => "Register only",
+            Self::Clone => "Clone only",
+            Self::CloneRegister => "Clone + register",
+        }
+    }
+}
+
+/// Parses `input` as the CLI does and observes its configured destination. Only a destination
+/// that does not exist is missing; a directory is cloned or a conflict only when the scan has
+/// observed a checkout there, and otherwise stays unknown. Errors never contain the input.
+pub fn add_preview(
+    input: &str,
+    config: &Config,
+    root: &Path,
+    rows: &[InventoryRow],
+    scan_complete: bool,
+    filesystem: &impl InventoryFilesystem,
+) -> Result<AddPreview, String> {
+    let parsed = RepositoryRef::parse(input).map_err(|error| error.to_string())?;
+    // The parser keeps only a trailing `/*` as a pattern; any other `*` is no repository either.
+    if parsed.is_wildcard() || input.contains('*') {
+        return Err("wildcards are not accepted; Add takes one concrete repository".to_owned());
+    }
+    let identity = parsed.identity();
+    let destination = configured_destination(config, &parsed, root);
+    let checkout = match filesystem.destination_state(&destination) {
+        CheckoutState::Unknown => rows
+            .iter()
+            .filter(|row| {
+                row.observed_path.as_ref() == Some(&destination)
+                    && row.checkout == CheckoutState::Cloned
+            })
+            .map(|row| match &row.key {
+                RowKey::Checkout {
+                    identity: found, ..
+                }
+                | RowKey::Declaration {
+                    identity: found, ..
+                } if *found == identity => CheckoutState::Cloned,
+                _ => CheckoutState::Conflict,
+            })
+            .next()
+            .unwrap_or(CheckoutState::Unknown),
+        state => state,
+    };
+    let hook = config.repositories.iter().find_map(|declaration| {
+        RepositoryRef::parse(&declaration.url)
+            .ok()
+            .filter(|reference| !reference.is_wildcard() && reference.identity() == identity)
+            .and(declaration.post_clone.clone())
+    });
+    let pending = !scan_complete
+        || rows
+            .iter()
+            .any(|row| row.observed_path.as_ref() == Some(&destination));
+    Ok(AddPreview {
+        reference: input.trim().to_owned(),
+        pending,
+        registration: Registration::of(&identity, config),
+        identity,
+        destination,
+        checkout,
+        hook,
+    })
+}
+
+impl AddPreview {
+    /// Cloning needs a destination observed as missing; a matching checkout makes it a no-op.
+    pub fn eligibility(&self, choice: AddChoice) -> Eligibility {
+        let registered = self.registration.noop(BatchAction::Register);
+        let clone = match self.checkout {
+            CheckoutState::Missing => Ok(false),
+            CheckoutState::Cloned => Ok(true),
+            CheckoutState::Conflict => Err("destination conflicts with repository"),
+            CheckoutState::Unreadable => Err("destination is unreadable"),
+            _ if self.pending => Err("checkout state is unknown until it is observed"),
+            _ => Err("the destination exists and holds no observed checkout"),
+        };
+        match (choice, clone) {
+            (AddChoice::Register, _) => {
+                registered.map_or(Eligibility::Available, Eligibility::Noop)
+            }
+            (_, Err(reason)) => Eligibility::Unavailable(reason),
+            (AddChoice::Clone, Ok(true)) => {
+                Eligibility::Noop("a matching checkout is at the destination")
+            }
+            (AddChoice::CloneRegister, Ok(true)) if registered.is_some() => {
+                Eligibility::Noop("checkout and registration are already in place")
+            }
+            _ => Eligibility::Available,
+        }
+    }
+
+    /// The Register target, frozen like a row's: a checkout observed at the destination must
+    /// still be there when the target runs.
+    pub fn target(&self, name: String) -> BatchTarget {
+        BatchTarget {
+            key: RowKey::Declaration {
+                identity: self.identity.clone(),
+                destination: self.destination.clone(),
+            },
+            name,
+            identity: Some(self.identity.clone()),
+            path: Some(self.destination.clone()),
+            found: self.checkout == CheckoutState::Cloned,
+            reference: Some(self.reference.clone()),
+            hidden: false,
+            blocked: None,
+            noop: self
+                .registration
+                .noop(BatchAction::Register)
+                .map(str::to_owned),
+            registration: self.registration.clone(),
         }
     }
 }
@@ -363,6 +521,40 @@ impl Interaction for NoPrompts {
 mod tests {
     use std::cell::RefCell;
     use std::path::Path;
+
+    #[test]
+    fn add_rejects_every_wildcard_without_quoting_it() {
+        struct Absent;
+        impl crate::application::inventory::InventoryFilesystem for Absent {
+            fn destination_state(&self, _: &Path) -> crate::application::inventory::CheckoutState {
+                crate::application::inventory::CheckoutState::Missing
+            }
+            fn config_revision(&self, _: &Path) -> String {
+                String::new()
+            }
+        }
+        let config = Config {
+            root: "repos".into(),
+            providers: Default::default(),
+            repositories: Vec::new(),
+        };
+        for input in [
+            "org/*",
+            "org/*/repo",
+            "github.com/org/*/repo",
+            "git@github.com:*/x.git",
+        ] {
+            let error = super::add_preview(input, &config, Path::new("/r"), &[], true, &Absent)
+                .unwrap_err();
+            assert_eq!(
+                error, "wildcards are not accepted; Add takes one concrete repository",
+                "{input}"
+            );
+        }
+        assert!(
+            super::add_preview("org/repo", &config, Path::new("/r"), &[], true, &Absent).is_ok()
+        );
+    }
 
     use super::{Batch, BatchAction, BatchTarget, Outcome, Registration};
     use crate::application::inventory::RowKey;
