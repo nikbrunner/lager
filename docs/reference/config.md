@@ -138,7 +138,13 @@ page_down = ["x", "PageDown"]
 ```
 
 Normal actions are `up`, `down`, `refresh`, `search`, `clear_search`, `inspect`,
-`menu`, `mark`, `add`, `remove`, `help` and `quit`. Menu uses navigation, paging, accept, cancel, help,
+`menu`, `mark`, `add`, `remove`, `help` and `quit`. `register`, `unregister`,
+`clone`, `clone_register`, `remove_unregister`, `copy`, `open`, `remote`, `retry`
+and `archives` have no default key. Bound to a key, each runs its menu entry on
+the marked rows or the current row, with the same previews, eligibility and
+outcomes; a disabled entry reports its reason instead. `copy` opens the Copy
+value menu. `remote`, `retry` and `archives` report that remote discovery is
+unavailable in this build. Menu uses navigation, paging, accept, cancel, help,
 quit, Search, Inspect, Refresh and Clear search. It inherits those last four
 normal shortcuts unless a menu override or a menu-local binding takes precedence.
 Inspection uses navigation, paging, `copy` (default `c`), accept, cancel, help
@@ -160,8 +166,35 @@ Input settings drive the Add reference form: accept previews the reference,
 cancel closes the form, plus help and quit, with Enter, Esc, F1 and Ctrl-Q as
 defaults; its letters remain text. The Add preview uses the confirmation
 settings: up and down move between its choices, accept chooses and cancel returns
-to the reference. Known future normal actions can
-be configured but remain unavailable until implemented.
+to the reference.
+
+Every mode is validated when the inventory starts and on every refresh. An
+unknown mode or action name, a key bound to two actions in one mode, an explicit
+empty list for accept, cancel, help or quit, and a typing-mode key that would
+swallow ordinary text are errors. A collision names the mode, the key and both
+actions:
+
+```text
+[inventory.keys.normal] binds x to remove and to clone
+```
+
+Four defaults give way to an explicit key of the same mode instead of colliding:
+`copy` (`c`) in inspection, and `acknowledge` (Space), cancel's `q` and quit's
+Ctrl-Q in confirmation. `copy` and `acknowledge` then have no key in that mode,
+and Help says so. When Ctrl-Q goes to another confirmation action and quit has no
+explicit list, quit moves to `q` and cancel keeps Esc; if `q` is taken as well,
+the map is rejected because quit is unreachable.
+
+At startup an invalid map stops the inventory before raw mode. On refresh (`R`)
+the configuration and bindings are installed together or not at all: an invalid
+map keeps the previous map active, the status line shows `! Config refresh
+failed: … · previous bindings stay active`, and the failure is listed in Session
+problems and counted in the header.
+
+Help lists the mode it was opened from with the effective keys, adds
+`(config: action = [...])` next to each overridden action, shows one line per
+other mode, and names the normal actions without a key. It scrolls with the
+inspection bindings and leaves the status line visible.
 
 Keys include single characters, Enter, Esc, arrows, Home, End, PageUp, PageDown,
 Tab, Shift+Tab, Backspace, Delete, Space, F1 and Ctrl combinations. Ctrl-letter

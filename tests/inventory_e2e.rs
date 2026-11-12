@@ -2611,12 +2611,18 @@ fn inventory_bindings_refresh_atomically_and_keep_failures_sticky() {
                 vec!["selected: alpha", "pair: n/k rows", "pair: x refresh"],
                 b"j?".to_vec(),
             ),
-            (vec!["HELP", "n/k Up", "pair: x refresh"], b"\x1b".to_vec()),
+            (
+                vec!["HELP", "n ↓ · k/Up ↑", "pair: x refresh"],
+                b"\x1b".to_vec(),
+            ),
             (vec!["NORMAL", "selected: alpha"], b"n".to_vec()),
             (vec!["selected: beta"], b"Rx".to_vec()),
             (vec!["pair: y refresh", "selected: beta"], b"y".to_vec()),
             (
-                vec!["refresh failed:", "collision", "pair: y refresh"],
+                vec![
+                    "! Config refresh failed: [inventory.keys.normal] binds j to down and to refresh",
+                    "pair: y refresh",
+                ],
                 b"y".to_vec(),
             ),
             (vec!["pair: z refresh", "selected: beta"], b"q".to_vec()),
@@ -2761,13 +2767,13 @@ fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
                 vec![17],
             ),
         ],
-        10,
+        12,
         100,
         0,
         |action, writer, frame| match action {
             4 => {
                 frames.push(frame.to_owned());
-                resize_pty(writer, 20, 100);
+                resize_pty(writer, 32, 100);
             }
             5 => frames.push(frame.to_owned()),
             _ => {}
@@ -2777,14 +2783,14 @@ fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
     let [scrolled_frame, resized_frame] = frames.as_slice() else {
         panic!("expected a scrolled and resized help frame: {frames:?}");
     };
-    let scrolled = screen_text(scrolled_frame, 10, 100);
+    let scrolled = screen_text(scrolled_frame, 12, 100);
     assert!(scrolled.contains("? / q/Esc"), "{scrolled}");
     assert!(
         !scrolled.contains("j/k ↑/↓"),
         "custom page-down did not scroll help: {scrolled}"
     );
 
-    let resized = screen_text(resized_frame, 20, 100);
+    let resized = screen_text(resized_frame, 32, 100);
     assert!(
         resized.contains("Keyboard / effective bindings"),
         "{resized}"
@@ -2856,7 +2862,10 @@ fn inventory_validates_all_binding_modes_before_entering_raw_mode() {
             "[inventory.keys.normal]\ntypo = [\"x\"]",
             "unknown inventory action",
         ),
-        ("[inventory.keys.normal]\nrefresh = [\"j\"]", "collision"),
+        (
+            "[inventory.keys.normal]\nrefresh = [\"j\"]",
+            "[inventory.keys.normal] binds j to down and to refresh",
+        ),
         (
             "[inventory.keys.normal]\nquit = []",
             "must remain reachable",
@@ -2875,6 +2884,10 @@ fn inventory_validates_all_binding_modes_before_entering_raw_mode() {
         ),
         (
             "[inventory.keys.confirmation]\nquit = []",
+            "must remain reachable",
+        ),
+        (
+            "[inventory.keys.confirmation]\ndown = [\"Ctrl+q\"]\nhelp = [\"q\"]",
             "must remain reachable",
         ),
         (
@@ -2913,7 +2926,7 @@ fn inventory_validates_all_binding_modes_before_entering_raw_mode() {
 
 #[cfg(unix)]
 #[test]
-fn inventory_bindings_survive_symlinked_registration_and_hide_planned_actions() {
+fn inventory_bindings_survive_symlinked_registration_and_show_direct_actions() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let target = temp.path().join("settings.toml");
@@ -2936,9 +2949,13 @@ fn inventory_bindings_survive_symlinked_registration_and_hide_planned_actions() 
         &[
             (
                 vec!["No repositories found", "pair: x refresh"],
-                b"g?".to_vec(),
+                b"g".to_vec(),
             ),
-            (vec!["HELP", "pair: Backspace close"], vec![127]),
+            (vec!["Register unavailable: no row"], b"?".to_vec()),
+            (
+                vec!["HELP", "pair: Backspace close", "pair: g Register"],
+                vec![127],
+            ),
             (vec!["NORMAL", "pair: x refresh"], b"q".to_vec()),
         ],
         24,
@@ -3113,7 +3130,10 @@ fn inventory_terminal_equivalent_keys_share_reachability_and_collision_checks() 
         );
     }
     for (settings, expected) in [
-        ("[inventory.keys.normal]\nquit = [\"Ctrl+m\"]", "collision"),
+        (
+            "[inventory.keys.normal]\nquit = [\"Ctrl+m\"]",
+            "[inventory.keys.normal] binds Ctrl+m to quit and to inspect",
+        ),
         (
             "[inventory.keys.search]\naccept = [\"Ctrl+0\"]",
             "unsupported Ctrl binding",
@@ -3124,7 +3144,7 @@ fn inventory_terminal_equivalent_keys_share_reachability_and_collision_checks() 
         ),
         (
             "[inventory.keys.search]\naccept = [\"Ctrl+[\"]",
-            "collision",
+            "[inventory.keys.search] binds Ctrl+[ to accept and to cancel",
         ),
         (
             "[inventory.keys.search]\naccept = [\"Ctrl+?\"]",
@@ -4561,6 +4581,608 @@ fn inventory_registers_and_unregisters_the_current_row_without_touching_files() 
     assert_eq!(configs, [registered, &unregistered, &unregistered]);
     assert_eq!(fs::read_to_string(&config).unwrap(), unregistered);
     assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_direct_bindings_run_their_menu_actions_on_the_current_row() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let keys = "[inventory.keys.normal]\nregister = [\"g\"]\nunregister = [\"u\"]\n";
+    fs::write(&config, format!("root = \"repos\"\n{keys}")).unwrap();
+    init_repo(&root.join("org/beta"), "git@github.com:org/beta.git", false);
+    let tree = checkout_tree(&root);
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "unregistered"],
+                b"kk?".to_vec(),
+            ),
+            (
+                vec![
+                    "Keyboard / effective bindings",
+                    "pair: g Register",
+                    "pair: u Unregister",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Keyboard /"], b"u".to_vec()),
+            (
+                vec![
+                    "Batch / Unregister",
+                    "pair: NO-OP beta",
+                    "Unregister: 1 no-op",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "absent: Batch /", "absent: Scanning"],
+                b"g".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Register",
+                    "pair: SUCCEEDED beta",
+                    "Register: 1 succeeded",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "absent: Batch /", "absent: Scanning", "explicit"],
+                b"u".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Unregister",
+                    "pair: SUCCEEDED beta",
+                    "Unregister: 1 succeeded",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL",
+                    "absent: Batch /",
+                    "absent: Scanning",
+                    "unregistered",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        format!("root = \"repos\"\n{keys}")
+    );
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_direct_bindings_cover_marks_copy_open_and_unbuilt_remote_actions() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n[inventory.keys.normal]\nregister = [\"g\"]\ncopy = [\"y\"]\n\
+                    open = [\"o\"]\nremote = [\"e\"]\nretry = [\"t\"]\narchives = [\"v\"]\n";
+    fs::write(&config, original).unwrap();
+    init_repo(
+        &root.join("org/alpha"),
+        "git@github.com:org/alpha.git",
+        true,
+    );
+    let tree = checkout_tree(&root);
+    let tools = temp.path().join("tools");
+    let opened = temp.path().join("opened");
+    desktop_stubs(
+        &tools,
+        &["open", "xdg-open"],
+        &format!("printf '%s\\n' \"$@\" > {}", shell_word(&opened)),
+    );
+    let unavailable = "Remote discovery is unavailable in this build";
+    let cleared = vec!["NORMAL", "absent: Remote discovery is", "absent: problem"];
+
+    run_inventory_pty_actions_with_hook(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"kko".to_vec()),
+            (
+                vec!["Opening https://github.com/org/alpha in the browser"],
+                b"y".to_vec(),
+            ),
+            // Copy opens the Copy value menu alone; cancelling it returns to the table.
+            (vec!["Copy value / alpha", "Identity"], b"\x1b".to_vec()),
+            (
+                vec!["NORMAL", "absent: Copy value /", "absent: All actions"],
+                b"e".to_vec(),
+            ),
+            (vec![unavailable, "absent: problem"], b"j".to_vec()),
+            (cleared.clone(), b"t".to_vec()),
+            (vec![unavailable, "absent: problem"], b"j".to_vec()),
+            (cleared.clone(), b"v".to_vec()),
+            (vec![unavailable, "absent: problem"], b" ".to_vec()),
+            // With a mark the direct key previews, and Cancel is the default.
+            (vec!["1 marked"], b"g".to_vec()),
+            (
+                vec!["Register / preview", "ELIGIBLE alpha", "Register 1 target"],
+                b"\r".to_vec(),
+            ),
+            (
+                vec!["Register cancelled · nothing changed", "absent: problem"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        |action| {
+            if action == 1 {
+                wait_for_file(&opened);
+                assert_eq!(
+                    fs::read_to_string(&opened).unwrap(),
+                    "https://github.com/org/alpha\n"
+                );
+            }
+        },
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+/// Issue #16 remap acceptance: in every mode the rebound key works, the default key it replaced
+/// is dead, and the hints and Help show the new key. A dead key is sent together with a marker
+/// key whose effect differs depending on whether the dead key acted.
+#[cfg(unix)]
+#[test]
+fn inventory_remapped_keys_work_in_every_mode_and_their_defaults_are_dead() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n\
+        [inventory.keys.normal]\nremove = [\"x\"]\nmenu = [\"M\"]\n\
+        [inventory.keys.menu]\ncancel = [\"b\"]\n\
+        [inventory.keys.search]\naccept = [\"Ctrl+a\"]\n\
+        [inventory.keys.input]\naccept = [\"Ctrl+p\"]\n\
+        [inventory.keys.confirmation]\ncancel = [\"n\"]\n\
+        [inventory.keys.inspection]\ncancel = [\"h\"]\n";
+    fs::write(&config, original).unwrap();
+    init_repo(&root.join("org/beta"), "git@github.com:org/beta.git", true);
+    let tree = checkout_tree(&root);
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            // Normal: r and m are dead, so ? opens Help on the normal map.
+            (
+                vec![
+                    "NORMAL · 1 row",
+                    "absent: Scanning",
+                    "pair: x remove",
+                    "pair: M menu",
+                ],
+                b"kkrm?".to_vec(),
+            ),
+            (
+                vec![
+                    "Keyboard / effective bindings",
+                    "Normal mode",
+                    "Remove checkout, keep registration (config: remove = [\"x\"])",
+                    "all actions (config: menu = [\"M\"])",
+                    "pair: x Remove",
+                    "pair: M all",
+                    "Other modes",
+                    "pair: b back",
+                    "search    Ctrl+a / Esc keep the filter",
+                    "pair: Ctrl+p accept",
+                    "pair: n cancel",
+                    "pair: h close",
+                ],
+                // Inspection: q is dead, so ? closes Help instead of reopening it.
+                b"q?".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Keyboard /"], b"x".to_vec()),
+            // Confirmation: q is dead, so ? opens Help on the confirmation map.
+            (
+                vec!["Remove checkouts / keep registration", "pair: n cancel"],
+                b"q?".to_vec(),
+            ),
+            (
+                vec![
+                    "Confirmation mode",
+                    "cancel (config: cancel = [\"n\"])",
+                    "pair: M all",
+                ],
+                b"h".to_vec(),
+            ),
+            (
+                vec!["Remove checkouts / keep registration", "absent: Keyboard /"],
+                b"n".to_vec(),
+            ),
+            (
+                vec!["Remove only cancelled · nothing changed"],
+                b"M".to_vec(),
+            ),
+            // Menu: q is dead, so ? opens Help on the menu map.
+            (vec!["All actions", "pair: b back"], b"q?".to_vec()),
+            (
+                vec!["Menu mode", "back (config: cancel = [\"b\"])"],
+                b"h".to_vec(),
+            ),
+            (vec!["All actions", "absent: Keyboard /"], b"\r".to_vec()),
+            (vec!["Repository actions / beta"], b"b".to_vec()),
+            (
+                vec!["All actions", "absent: Repository actions /"],
+                b"b".to_vec(),
+            ),
+            // Inspection: q is dead, so c opens the copy menu over Inspect.
+            (vec!["NORMAL", "absent: All actions"], b"\r".to_vec()),
+            (vec!["Inspect / beta", "pair: h close"], b"qc".to_vec()),
+            (vec!["Copy value / beta", "pair: b back"], b"b".to_vec()),
+            (
+                vec!["Inspect / beta", "absent: Copy value /"],
+                b"h".to_vec(),
+            ),
+            // Search: Enter is dead, so a is typed into the query.
+            (vec!["NORMAL", "absent: Inspect /"], b"/bet".to_vec()),
+            (vec!["SEARCH ·", "pair: Ctrl+a accept"], b"\ra".to_vec()),
+            (vec!["SEARCH ·", "/ beta"], vec![1]),
+            (vec!["NORMAL ·", "/ beta"], vec![127]),
+            // Input: Enter is dead, so a is typed into the reference.
+            (vec!["NORMAL ·", "absent: / beta"], b"a".to_vec()),
+            (
+                vec!["Add / URL or reference", "pair: Ctrl+p preview"],
+                b"github.com/org/gamm\ra".to_vec(),
+            ),
+            (
+                vec!["github.com/org/gamma", "absent: Add / preview"],
+                vec![16],
+            ),
+            (vec!["Add / preview", "pair: n back"], b"n".to_vec()),
+            (
+                vec!["Add / URL or reference", "absent: Add / preview"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["Add cancelled · nothing changed"], b"q".to_vec()),
+        ],
+        32,
+        132,
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+/// Inspection `copy` and the confirmation Space and Ctrl-Q defaults give way to an explicit key
+/// of the same mode. With Ctrl-Q taken, confirmation quit sits on `q`.
+#[cfg(unix)]
+#[test]
+fn inventory_later_defaults_yield_and_confirmation_quit_falls_back_to_q() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::write(
+        &config,
+        "root = \"repos\"\n\
+         [inventory.keys.inspection]\nup = [\"c\"]\n\
+         [inventory.keys.confirmation]\ndown = [\"Ctrl+q\"]\naccept = [\"Space\"]\n",
+    )
+    .unwrap();
+    for name in ["alpha", "beta"] {
+        tracked_repo(
+            &root.join("org").join(name),
+            &format!("git@github.com:org/{name}.git"),
+        );
+    }
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 2 rows", "absent: Scanning"],
+                b"kk\r".to_vec(),
+            ),
+            // c moves up in Inspect instead of opening the copy menu.
+            (vec!["Inspect /", "absent: c copy"], b"c?".to_vec()),
+            (
+                vec![
+                    "Inspect mode",
+                    "absent: Copy value /",
+                    "No key in inspection mode: copy.",
+                    "No key in confirmation mode: acknowledge.",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["Inspect /", "absent: Keyboard /"], b"\x1b".to_vec()),
+            (vec!["NORMAL", "absent: Inspect /"], b"r".to_vec()),
+            (vec!["Remove checkouts / keep registration"], b"?".to_vec()),
+            (
+                vec![
+                    "Confirmation mode",
+                    "Ctrl+q ↓ · k/Up/Shift+Tab ↑ move focus",
+                    "pair: Space choose",
+                    "? / q",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            // Ctrl-Q moves focus from Cancel to Remove and Space accepts it.
+            (
+                vec!["Remove checkouts / keep registration", "absent: Keyboard /"],
+                vec![17, b' '],
+            ),
+            (
+                vec![
+                    "Remove only: 1 succeeded",
+                    "RESULTS · 1 row",
+                    "absent: Scanning",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Batch /"], b"r".to_vec()),
+            // q quits from a confirmation.
+            (vec!["Remove checkouts / keep registration"], b"q".to_vec()),
+        ],
+        32,
+        132,
+    );
+    let left = ["alpha", "beta"]
+        .into_iter()
+        .filter(|name| root.join("org").join(name).exists())
+        .count();
+    assert_eq!(left, 1);
+}
+
+/// Configured key lists show which keys go which way, and an emptied default action is named
+/// as keyless rather than as an action without a default.
+#[cfg(unix)]
+#[test]
+fn inventory_help_shows_configured_directions_and_emptied_actions() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::write(
+        &config,
+        "root = \"repos\"\n[inventory.keys.normal]\nmark = []\n\
+         [inventory.keys.inspection]\ndown = [\"c\", \"j\"]\n",
+    )
+    .unwrap();
+    init_repo(&root.join("org/beta"), "git@github.com:org/beta.git", true);
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"kk\r".to_vec()),
+            (vec!["Inspect / beta"], b"?".to_vec()),
+            (
+                vec![
+                    "Inspect mode",
+                    "c/j ↓ · k/Up/Shift+Tab ↑",
+                    "scroll (config: down = [\"c\", \"j\"])",
+                    "No key in normal mode: mark.",
+                    "No default key: Register,",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Inspect / beta", "absent: Keyboard /"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Inspect /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+    );
+}
+
+/// Help is drawn above every status line, so a third one never hides the failure notice.
+#[cfg(unix)]
+#[test]
+fn inventory_help_keeps_the_refresh_failure_visible_above_three_status_lines() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    run_git(
+        temp.path(),
+        &["init", "--bare", root.join("bare.git").to_str().unwrap()],
+    );
+
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["ignored repositories:", "absent: Scanning"],
+                b"R".to_vec(),
+            ),
+            (
+                vec!["! Config refresh failed:", "ignored repositories:"],
+                b"?".to_vec(),
+            ),
+            (
+                vec![
+                    "Keyboard / effective bindings",
+                    "! Config refresh failed:",
+                    "ignored repositories:",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Keyboard /"], b"q".to_vec()),
+        ],
+        24,
+        80,
+        1,
+        |action| {
+            if action == 0 {
+                fs::write(
+                    &config,
+                    "root = \"repos\"\n[inventory.keys.normal]\nremove = [\"x\"]\nclone = [\"x\"]\n",
+                )
+                .unwrap();
+            }
+        },
+    );
+}
+
+/// Confirmation cancel keeps Esc when its `q` goes to an explicit binding.
+#[cfg(unix)]
+#[test]
+fn inventory_confirmation_cancel_q_yields_to_an_explicit_help_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::write(
+        &config,
+        "root = \"repos\"\n[inventory.keys.confirmation]\nhelp = [\"q\"]\n",
+    )
+    .unwrap();
+    init_repo(&root.join("org/beta"), "git@github.com:org/beta.git", true);
+    let tree = checkout_tree(&root);
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"kkr".to_vec()),
+            (vec!["Remove checkouts / keep registration"], b"q".to_vec()),
+            (
+                vec![
+                    "Confirmation mode",
+                    "q / Ctrl+q",
+                    "help / quit (config: help = [\"q\"])",
+                    "pair: Esc cancel",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Remove checkouts / keep registration", "absent: Keyboard /"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Remove only cancelled · nothing changed"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_help_scrolls_to_every_mode_and_the_keyless_actions_at_80_columns() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["No repositories found.", "Path and origin:"],
+                b"?".to_vec(),
+            ),
+            (
+                vec![
+                    "Normal mode",
+                    "absent: No default key:",
+                    "No active operation",
+                ],
+                b"\x1b[6~".to_vec(),
+            ),
+            (
+                vec![
+                    "Other modes",
+                    "pair: confirm j/k",
+                    "No default key: Register, Unregister",
+                    "absent: No key in",
+                    "No active operation",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Keyboard /"], b"q".to_vec()),
+        ],
+        24,
+        80,
+    );
+}
+
+/// The Help board: a refresh that binds one key to two actions keeps the previous map, says so
+/// on the status line and counts as a session problem.
+#[cfg(unix)]
+#[test]
+fn inventory_invalid_binding_refresh_keeps_the_previous_map_and_is_a_session_problem() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let valid = "root = \"repos\"\n[inventory.keys.normal]\nremove = [\"x\"]\n";
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    init_repo(&root.join("org/beta"), "git@github.com:org/beta.git", true);
+
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "pair: r remove"],
+                b"R".to_vec(),
+            ),
+            // The valid map is installed whole: x removes and r is dead.
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "pair: x remove"],
+                b"kkr?".to_vec(),
+            ),
+            (
+                vec!["Normal mode", "(config: remove = [\"x\"])"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Keyboard /"], b"R".to_vec()),
+            (
+                vec![
+                    "! Config refresh failed: [inventory.keys.normal] binds x to remove and to clone · previous bindings stay active",
+                    "NORMAL · 1 row · 1 problem",
+                    "pair: x remove",
+                ],
+                b"x".to_vec(),
+            ),
+            (
+                vec!["Remove checkouts / keep registration"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["Remove only cancelled"], b"m".to_vec()),
+            (
+                vec!["All actions", "pair: 1 problem"],
+                b"jjjjjjjjj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Session problems /",
+                    "refresh         [inventory.keys.normal] binds x to remove and to clone",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Session problems /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        1,
+        |action| match action {
+            0 => fs::write(&config, valid).unwrap(),
+            3 => fs::write(&config, format!("{valid}clone = [\"x\"]\n")).unwrap(),
+            _ => {}
+        },
+    );
 }
 
 #[cfg(unix)]
@@ -7414,6 +8036,64 @@ fn inventory_remove_unregister_waits_for_a_complete_scan_and_then_previews_every
         132,
         |action| {
             if action == 2 {
+                fs::write(&release, "go").unwrap();
+            }
+        },
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_direct_remove_unregister_is_blocked_while_the_scan_is_incomplete() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let tools = temp.path().join("tools");
+    let release = temp.path().join("release");
+    fs::create_dir_all(&tools).unwrap();
+    let original = "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n\
+                    [inventory.keys.normal]\nremove_unregister = [\"U\"]\n";
+    fs::write(&config, original).unwrap();
+    for directory in ["org", "zeta"] {
+        tracked_repo(
+            &root.join(directory).join("alpha"),
+            "git@github.com:org/alpha.git",
+        );
+    }
+    let tree = checkout_tree(&root);
+    // The second checkout of the identity stays unobserved until the release.
+    fs::write(
+        tools.join("git"),
+        format!(
+            "#!/bin/sh\ncase \"$2\" in */zeta/alpha) while [ ! -f {} ]; do /bin/sleep 0.02; done;; esac\nexec {} \"$@\"\n",
+            shell_word(&release),
+            shell_word(&support::real_tool("git")),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+
+    run_inventory_pty_actions_with_hook(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        &[
+            (vec!["Scanning", "pair: main clean"], b"kkU".to_vec()),
+            (
+                vec![
+                    "Remove + unregister unavailable: the scan is not complete",
+                    "Scanning",
+                    "absent: Remove checkouts /",
+                ],
+                Vec::new(),
+            ),
+            (vec!["NORMAL", "absent: Scanning"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        |action| {
+            if action == 1 {
                 fs::write(&release, "go").unwrap();
             }
         },

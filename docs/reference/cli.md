@@ -267,6 +267,11 @@ In Menu, Inspect, Help, the batch preview, the removal confirmation and the Add 
 the current popup (the Add preview returns to its reference);
 Ctrl-Q quits the app. Normal-mode q and Esc quit.
 Configure shortcuts through [inventory key maps](config.md#inventory-key-maps).
+Register, Unregister, Clone only, Clone + register, Remove + unregister, Copy value
+and Open origin have no default key; a configured key runs the same entry as the
+menu. Hints and Help show the effective keys, and Help names the actions without
+one. A refresh with an invalid key map keeps the previous bindings and records a
+session problem.
 
 Register, Unregister, Clone only and Clone + register, from the menu or from Add,
 and Remove only and Remove + unregister are the repository mutations; remote

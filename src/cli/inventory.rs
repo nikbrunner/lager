@@ -271,13 +271,16 @@ impl InventorySession {
         }
     }
 
-    fn refresh(&mut self) -> Result<(), String> {
+    /// Installs the configuration and bindings together, or neither. The error names what
+    /// stays active.
+    fn refresh(&mut self) -> Result<(), (String, &'static str)> {
+        let kept = |error: String| (error, "configuration stays");
         let (config, overrides, warnings) =
-            load_inventory(&self.config_path).map_err(|error| error.to_string())?;
-        let bindings = Bindings::load(overrides)?;
+            load_inventory(&self.config_path).map_err(|error| kept(error.to_string()))?;
+        let bindings = Bindings::load(overrides).map_err(|error| (error, "bindings stay"))?;
         let root = config
             .resolve_root(&self.home)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| kept(error.to_string()))?;
         // Do not install a new config while the old worker can still emit against it.
         self.worker.cancel_and_join();
         self.receive_events();
@@ -583,6 +586,8 @@ where
 struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     restore: TerminalRestore,
+    /// Rows below Help in the last frame: the status lines and the footer.
+    below_help: u16,
 }
 
 struct TerminalRestore {
@@ -631,7 +636,11 @@ impl TerminalSession {
             let backend = CrosstermBackend::new(io::stdout());
             Terminal::new(backend).map_err(|error| error.to_string())
         })?;
-        Ok(Self { terminal, restore })
+        Ok(Self {
+            terminal,
+            restore,
+            below_help: 2,
+        })
     }
 
     /// Hands the terminal to a native child: cooked mode, main screen, cursor shown.
@@ -832,7 +841,9 @@ impl TerminalSession {
                             Some(Action::Add) if view == View::Normal => {
                                 selection.add = Some(AddForm::default());
                             }
-                            Some(Action::Remove) if view == View::Normal => {
+                            Some(action @ (Action::Remove | Action::RemoveUnregister))
+                                if view == View::Normal =>
+                            {
                                 let row = selection.selected_row(&visible_rows);
                                 confirm_removal(
                                     session,
@@ -840,8 +851,33 @@ impl TerminalSession {
                                     &report,
                                     &visible_rows,
                                     row,
-                                    BatchAction::Remove,
+                                    if action == Action::Remove {
+                                        BatchAction::Remove
+                                    } else {
+                                        BatchAction::RemoveUnregister
+                                    },
                                 );
+                            }
+                            Some(
+                                action @ (Action::Register
+                                | Action::Unregister
+                                | Action::Clone
+                                | Action::CloneRegister
+                                | Action::Copy
+                                | Action::Open
+                                | Action::Remote
+                                | Action::Retry
+                                | Action::Archives),
+                            ) if view == View::Normal => {
+                                if let Some(code) = run_direct(
+                                    session,
+                                    &mut selection,
+                                    &report,
+                                    &visible_rows,
+                                    action,
+                                ) {
+                                    return code;
+                                }
                             }
                             Some(Action::Accept) if view == View::AddInput => {
                                 let form = selection.add.as_mut().expect("Add is open");
@@ -1196,7 +1232,7 @@ impl TerminalSession {
 
     fn help_scroll_limit(&self, session: &InventorySession, mode: Mode) -> u16 {
         popup_scroll_limit(
-            self.area(),
+            above_status(self.area(), self.below_help),
             WIDE_POPUP,
             &help_widget(&session.bindings, mode),
         )
@@ -1359,6 +1395,7 @@ impl TerminalSession {
                 session.marks.hidden(visible_rows)
             )
         });
+        let mut below_help = self.below_help;
         let result = self
             .terminal
             .draw(|frame| {
@@ -1377,6 +1414,7 @@ impl TerminalSession {
                         Constraint::Length(footer_height),
                     ])
                     .areas(area);
+                below_help = area.bottom().saturating_sub(status_area.y);
                 frame.render_widget(
                     bar(
                         "LAGER / inventory",
@@ -1454,8 +1492,9 @@ impl TerminalSession {
                 frame.render_widget(footer.style(footer_style()), padded(footer_area));
                 let close = first_key_hint(bindings, Mode::Inspection, Action::Cancel, "close");
                 match view {
-                    View::Help => draw_popup(
+                    View::Help => draw_popup_in(
                         frame,
+                        above_status(frame.area(), below_help),
                         WIDE_POPUP,
                         "Keyboard / effective bindings",
                         help_widget(bindings, shown.help_mode).scroll((shown.help_scroll, 0)),
@@ -1771,6 +1810,7 @@ impl TerminalSession {
             })
             .map(|_| ())
             .map_err(|error| error.to_string());
+        self.below_help = below_help;
         selection.table = table_state;
         result
     }
@@ -1818,6 +1858,7 @@ impl View {
     }
 }
 
+const REMOTE_UNAVAILABLE: &str = "Remote discovery is unavailable in this build";
 const POPUP: u16 = 66;
 const WIDE_POPUP: u16 = 100;
 /// Terminal width at which the table shows all seven columns of the wide grid.
@@ -2174,7 +2215,26 @@ fn draw_popup(
     body: Paragraph<'static>,
     footer: String,
 ) {
-    let [popup, title_area, content, footer_area] = popup_regions(frame.area(), cap, &body);
+    draw_popup_in(frame, frame.area(), cap, title, body, footer);
+}
+
+/// Help leaves the status and footer rows visible, so a configuration failure stays readable.
+fn above_status(area: Rect, below: u16) -> Rect {
+    Rect {
+        height: area.height.saturating_sub(below),
+        ..area
+    }
+}
+
+fn draw_popup_in(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    cap: u16,
+    title: &str,
+    body: Paragraph<'static>,
+    footer: String,
+) {
+    let [popup, title_area, content, footer_area] = popup_regions(area, cap, &body);
     frame.render_widget(Clear, popup);
     frame.render_widget(Block::bordered().border_style(focus()), popup);
     frame.render_widget(bar(title, "lager", title_area.width), title_area);
@@ -2185,7 +2245,26 @@ fn draw_popup(
 fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
     use Action::*;
     let keys = |action| bindings.keys(mode, action);
-    let pair = |first, second| paired_keys(&keys(first), &keys(second));
+    // Default lists pair up by position (`j/k ↑/↓`); configured lists show their direction.
+    let pair = |first, second| {
+        if bindings.configured(mode, first).is_none() && bindings.configured(mode, second).is_none()
+        {
+            return paired_keys(&keys(first), &keys(second));
+        }
+        [first, second]
+            .into_iter()
+            .filter(|action| !keys(*action).is_empty())
+            .map(|action| {
+                let arrow = if matches!(action, Up | PageUp) {
+                    "↑"
+                } else {
+                    "↓"
+                };
+                format!("{} {arrow}", keys(action).join("/"))
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
     let single = |action| keys(action).join("/");
     let help_quit = || {
         [single(Help), single(Quit)]
@@ -2194,54 +2273,109 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
             .collect::<Vec<_>>()
             .join(" / ")
     };
-    let entries: Vec<(String, &str)> = match mode {
-        Mode::Normal => vec![
-            (pair(Down, Up), "previous / next row"),
-            (single(Search), "live fuzzy search"),
-            (single(Mark), "toggle mark"),
-            (single(Add), "add a repository by reference"),
-            (single(Remove), "remove the checkout, keep registration"),
-            (single(ClearSearch), "clear filter"),
-            (single(Inspect), "Inspect repository"),
-            (single(Refresh), "refresh local/config state"),
-            (single(Menu), "all actions"),
-            (help_quit(), "help / quit"),
-        ],
+    let entry = |keys: String, description: &str, actions: &[Action]| {
+        let notes = actions
+            .iter()
+            .filter_map(|action| {
+                bindings.configured(mode, *action).map(|keys| {
+                    format!(
+                        "{} = [{}]",
+                        action.name(),
+                        keys.iter()
+                            .map(|key| format!("{key:?}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let description = if notes.is_empty() {
+            description.to_owned()
+        } else {
+            format!("{description} (config: {})", notes.join(", "))
+        };
+        (keys, description)
+    };
+    let entries: Vec<(String, String)> = match mode {
+        Mode::Normal => {
+            let mut entries = vec![
+                entry(pair(Down, Up), "previous / next row", &[Down, Up]),
+                entry(single(Search), "live fuzzy search", &[Search]),
+                entry(single(ClearSearch), "clear filter", &[ClearSearch]),
+                entry(single(Mark), "toggle current mark", &[Mark]),
+                entry(single(Add), "Add repository", &[Add]),
+                entry(
+                    single(Remove),
+                    "Remove checkout, keep registration",
+                    &[Remove],
+                ),
+            ];
+            entries.extend(
+                DIRECT_ACTIONS.map(|action| entry(single(action), direct_label(action), &[action])),
+            );
+            entries.extend([
+                entry(single(Inspect), "Inspect repository", &[Inspect]),
+                entry(single(Refresh), "refresh local/config state", &[Refresh]),
+                entry(single(Menu), "all actions", &[Menu]),
+                entry(help_quit(), "help / quit", &[Help, Quit]),
+            ]);
+            entries
+        }
         Mode::Menu => vec![
-            (pair(Down, Up), "previous / next entry"),
-            (pair(PageUp, PageDown), "page up / down"),
-            (single(Accept), "choose"),
-            (single(Cancel), "back"),
-            (single(Search), "live fuzzy search"),
-            (single(ClearSearch), "clear filter"),
-            (single(Inspect), "Inspect repository"),
-            (single(Refresh), "refresh local/config state"),
-            (help_quit(), "help / quit"),
+            entry(pair(Down, Up), "previous / next entry", &[Down, Up]),
+            entry(
+                pair(PageUp, PageDown),
+                "page up / down",
+                &[PageUp, PageDown],
+            ),
+            entry(single(Accept), "choose", &[Accept]),
+            entry(single(Cancel), "back", &[Cancel]),
+            entry(single(Search), "live fuzzy search", &[Search]),
+            entry(single(ClearSearch), "clear filter", &[ClearSearch]),
+            entry(single(Inspect), "Inspect repository", &[Inspect]),
+            entry(single(Refresh), "refresh local/config state", &[Refresh]),
+            entry(help_quit(), "help / quit", &[Help, Quit]),
         ],
         Mode::Search => vec![
-            (pair(Accept, Cancel).replace('/', " / "), "keep the filter"),
-            (help_quit(), "help / quit"),
+            entry(
+                [keys(Accept), keys(Cancel)].concat().join(" / "),
+                "keep the filter",
+                &[Accept, Cancel],
+            ),
+            entry(help_quit(), "help / quit", &[Help, Quit]),
         ],
         Mode::Inspection => vec![
-            (pair(Down, Up), "scroll"),
-            (pair(PageUp, PageDown), "page up / down"),
-            (single(Copy), "copy a value…"),
-            (single(Accept), "close"),
-            (single(Cancel), "close"),
-            (help_quit(), "help / quit"),
+            entry(pair(Down, Up), "scroll", &[Down, Up]),
+            entry(
+                pair(PageUp, PageDown),
+                "page up / down",
+                &[PageUp, PageDown],
+            ),
+            entry(single(Copy), "copy a value…", &[Copy]),
+            entry(single(Accept), "close", &[Accept]),
+            entry(single(Cancel), "close", &[Cancel]),
+            entry(help_quit(), "help / quit", &[Help, Quit]),
         ],
         Mode::Confirmation => vec![
-            (pair(Down, Up), "move focus"),
-            (pair(PageUp, PageDown), "page up / down"),
-            (single(Acknowledge), "acknowledge the listed losses"),
-            (single(Accept), "choose"),
-            (single(Cancel), "cancel"),
-            (help_quit(), "help / quit"),
+            entry(pair(Down, Up), "move focus", &[Down, Up]),
+            entry(
+                pair(PageUp, PageDown),
+                "page up / down",
+                &[PageUp, PageDown],
+            ),
+            entry(
+                single(Acknowledge),
+                "acknowledge the listed losses",
+                &[Acknowledge],
+            ),
+            entry(single(Accept), "choose", &[Accept]),
+            entry(single(Cancel), "cancel", &[Cancel]),
+            entry(help_quit(), "help / quit", &[Help, Quit]),
         ],
         Mode::Input => vec![
-            (single(Accept), "preview the reference"),
-            (single(Cancel), "back"),
-            (help_quit(), "help / quit"),
+            entry(single(Accept), "preview the reference", &[Accept]),
+            entry(single(Cancel), "back", &[Cancel]),
+            entry(help_quit(), "help / quit", &[Help, Quit]),
         ],
     };
     let entries = entries
@@ -2273,7 +2407,168 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
             Span::raw(format!("{}{description}", " ".repeat(padding))),
         ])
     }));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled("Other modes", dim()));
+    for other in [
+        Mode::Normal,
+        Mode::Search,
+        Mode::Menu,
+        Mode::Input,
+        Mode::Confirmation,
+        Mode::Inspection,
+    ] {
+        if other == mode {
+            continue;
+        }
+        let first = |action| first_key_hint(bindings, other, action, "");
+        let item = |keys: String, label: &str| {
+            (!keys.trim().is_empty()).then(|| format!("{} {label}", keys.trim_end()))
+        };
+        let rows = rows_hint(bindings, other, false);
+        let (name, items) = match other {
+            Mode::Normal => (
+                "normal",
+                vec![
+                    item(rows, "rows"),
+                    item(first(Menu), "all actions"),
+                    item(first(Quit), "quit"),
+                ],
+            ),
+            Mode::Search => (
+                "search",
+                vec![item(
+                    [first(Accept), first(Cancel)]
+                        .map(|key| key.trim().to_owned())
+                        .into_iter()
+                        .filter(|key| !key.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" / "),
+                    "keep the filter · letters are text",
+                )],
+            ),
+            Mode::Menu => (
+                "menu",
+                vec![
+                    item(rows, "select"),
+                    item(first(Accept), "choose"),
+                    item(first(Cancel), "back one level"),
+                ],
+            ),
+            Mode::Input => (
+                "input",
+                vec![item(first(Accept), "accept"), item(first(Cancel), "cancel")],
+            ),
+            Mode::Confirmation => (
+                "confirm",
+                vec![
+                    item(rows, "focus"),
+                    item(first(Acknowledge), "acknowledge"),
+                    item(first(Accept), "choose"),
+                    item(first(Cancel), "cancel"),
+                ],
+            ),
+            Mode::Inspection => (
+                "inspect",
+                vec![
+                    item(
+                        format!(
+                            "{rows} {}",
+                            paired_keys(
+                                &bindings.keys(other, PageUp),
+                                &bindings.keys(other, PageDown)
+                            )
+                        ),
+                        "scroll",
+                    ),
+                    item(first(Copy), "copy a value"),
+                    item(first(Cancel), "close"),
+                ],
+            ),
+        };
+        let items = items.into_iter().flatten().collect::<Vec<_>>();
+        lines.push(Line::from(vec![
+            Span::styled(format!("{name:<10}"), focus()),
+            Span::raw(items.join(" · ")),
+        ]));
+    }
+    let normal = bindings
+        .unbound(Mode::Normal)
+        .into_iter()
+        .filter(|action| {
+            DIRECT_ACTIONS.contains(action)
+                && !matches!(action, Retry | Archives)
+                && bindings.configured(Mode::Normal, *action).is_none()
+        })
+        .map(direct_label)
+        .collect::<Vec<_>>();
+    if !normal.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw(format!(
+            "No default key: {}. Reach them through the menu or bind them under \
+             [inventory.keys.normal].",
+            normal.join(", ")
+        )));
+    }
+    for (other, name) in [
+        (Mode::Normal, "normal"),
+        (Mode::Menu, "menu"),
+        (Mode::Search, "search"),
+        (Mode::Input, "input"),
+        (Mode::Confirmation, "confirmation"),
+        (Mode::Inspection, "inspection"),
+    ] {
+        // The menu borrows these normal keys only where its own keys leave them free.
+        let missing = bindings
+            .unbound(other)
+            .into_iter()
+            .filter(|action| match other {
+                Mode::Normal => {
+                    !DIRECT_ACTIONS.contains(action)
+                        || bindings.configured(other, *action).is_some()
+                }
+                Mode::Menu => !matches!(action, Search | Inspect | Refresh | ClearSearch),
+                _ => true,
+            })
+            .map(Action::name)
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            lines.push(Line::raw(format!(
+                "No key in {name} mode: {}.",
+                missing.join(", ")
+            )));
+        }
+    }
     Paragraph::new(lines).wrap(Wrap { trim: false })
+}
+
+/// Normal-mode actions that run a menu entry; none has a default key.
+const DIRECT_ACTIONS: [Action; 10] = [
+    Action::Register,
+    Action::Unregister,
+    Action::Clone,
+    Action::CloneRegister,
+    Action::RemoveUnregister,
+    Action::Copy,
+    Action::Open,
+    Action::Remote,
+    Action::Retry,
+    Action::Archives,
+];
+
+fn direct_label(action: Action) -> &'static str {
+    match action {
+        Action::Register => "Register",
+        Action::Unregister => "Unregister",
+        Action::Clone => "Clone only",
+        Action::CloneRegister => "Clone + register",
+        Action::RemoveUnregister => "Remove + unregister",
+        Action::Copy => "Copy",
+        Action::Open => "Open origin",
+        Action::Remote => "Remote",
+        Action::Retry => "Retry remote",
+        Action::Archives => "Remote archives",
+        other => other.name(),
+    }
 }
 
 fn identity(row: &model::InventoryRow) -> Option<&str> {
@@ -2716,7 +3011,7 @@ fn menu_lines(
                 heading("Session".to_owned()),
                 item(Entry::Add, "Add repository", key(Action::Add), true),
                 item(
-                    Entry::Unavailable("Remote discovery is unavailable in this build"),
+                    Entry::Unavailable(REMOTE_UNAVAILABLE),
                     "Remote discovery…",
                     "off".to_owned(),
                     true,
@@ -3087,6 +3382,53 @@ fn activate_menu_entry(
     None
 }
 
+/// Runs the menu entry of a direct key on the current row or the marks, with the entry's
+/// eligibility: a disabled entry reports its reason instead.
+fn run_direct(
+    session: &mut InventorySession,
+    selection: &mut Selection,
+    report: &InventoryReport,
+    visible_rows: &[&model::InventoryRow],
+    action: Action,
+) -> Option<i32> {
+    let (menu, entry) = match action {
+        Action::Register => (Menu::Repository, Entry::Run(BatchAction::Register)),
+        Action::Unregister => (Menu::Repository, Entry::Run(BatchAction::Unregister)),
+        Action::Clone => (Menu::Repository, Entry::Run(BatchAction::Clone)),
+        Action::CloneRegister => (Menu::Repository, Entry::Run(BatchAction::CloneRegister)),
+        Action::Copy => (Menu::Root, Entry::Open(Menu::Copy)),
+        Action::Open => (Menu::Root, Entry::OpenOrigin),
+        // Retry and archives belong to remote discovery, which this build does not have.
+        _ => (Menu::Root, Entry::Unavailable(REMOTE_UNAVAILABLE)),
+    };
+    selection.open_menu(menu, visible_rows);
+    let row = selection.menu_target_row(&report.rows);
+    let name = row
+        .map(|row| short_names(&report.rows)[&row.key].clone())
+        .unwrap_or_default();
+    let lines = menu_lines(menu, row, &name, session, visible_rows, &report.rows)
+        .into_iter()
+        .filter(|line| line.entry.is_some())
+        .collect::<Vec<_>>();
+    let index = lines.iter().position(|line| line.entry == Some(entry))?;
+    let line = &lines[index];
+    if !line.enabled {
+        selection.menu.clear();
+        session.message = Some(format!(
+            "{} unavailable: {}",
+            line.label.trim_end_matches('…'),
+            line.hint
+        ));
+        return None;
+    }
+    if let Entry::Open(submenu) = entry {
+        selection.menu = vec![(submenu, 0)];
+        return None;
+    }
+    selection.menu = vec![(menu, index)];
+    activate_menu_entry(session, selection, report, visible_rows)
+}
+
 /// A marked entry the inventory no longer lists: it stays in the batch, blocked.
 fn unlisted_target(key: model::RowKey, hidden: bool, home: &Path) -> BatchTarget {
     BatchTarget {
@@ -3447,7 +3789,7 @@ fn toggle_mark(
 }
 
 fn refresh(session: &mut InventorySession) {
-    if let Err(error) = session.refresh() {
+    if let Err((error, kept)) = session.refresh() {
         session.problems.record(
             "refresh",
             format!(
@@ -3455,7 +3797,10 @@ fn refresh(session: &mut InventorySession) {
                 escape(model::problem_reason(&error))
             ),
         );
-        session.notice = Some(format!("refresh failed: {}", escape(error)));
+        session.notice = Some(format!(
+            "Config refresh failed: {} · previous {kept} active",
+            escape(error)
+        ));
     }
 }
 

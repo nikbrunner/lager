@@ -95,6 +95,16 @@ impl Action {
                     | Self::Mark
                     | Self::Add
                     | Self::Remove
+                    | Self::Register
+                    | Self::Unregister
+                    | Self::Clone
+                    | Self::CloneRegister
+                    | Self::RemoveUnregister
+                    | Self::Copy
+                    | Self::Open
+                    | Self::Remote
+                    | Self::Retry
+                    | Self::Archives
             ),
             Mode::Menu => matches!(
                 self,
@@ -142,7 +152,19 @@ impl Action {
     }
 }
 
-pub(super) struct Bindings(BTreeMap<Mode, BTreeMap<Action, Vec<(KeyEvent, String)>>>);
+/// Defaults that yield to an explicit key of the same mode, as (mode, action, key).
+const LATE_DEFAULTS: [(Mode, Action, &str); 4] = [
+    (Mode::Inspection, Action::Copy, "c"),
+    (Mode::Confirmation, Action::Acknowledge, "Space"),
+    (Mode::Confirmation, Action::Cancel, "q"),
+    (Mode::Confirmation, Action::Quit, "Ctrl+q"),
+];
+
+/// The effective keys per mode and action, and the lists the configuration set explicitly.
+pub(super) struct Bindings(
+    BTreeMap<Mode, BTreeMap<Action, Vec<(KeyEvent, String)>>>,
+    BTreeMap<Mode, BTreeMap<Action, Vec<String>>>,
+);
 
 impl Bindings {
     pub(super) fn load(overrides: InventoryKeyOverrides) -> Result<Self, String> {
@@ -161,6 +183,7 @@ impl Bindings {
             }
         }
         let mut maps: BTreeMap<Mode, BTreeMap<Action, Vec<(KeyEvent, String)>>> = BTreeMap::new();
+        let mut config = BTreeMap::new();
         for (name, mode) in modes {
             let typing = matches!(mode, Mode::Search | Mode::Input);
             let popup = matches!(mode, Mode::Menu | Mode::Inspection | Mode::Confirmation);
@@ -232,6 +255,7 @@ impl Bindings {
                     )
                 })
                 .collect();
+            let mut explicit = BTreeMap::new();
             if let Some(custom) = overrides.get(name) {
                 for (action_name, keys) in custom {
                     let Some(action) = map
@@ -242,7 +266,36 @@ impl Bindings {
                         return Err(format!("unknown inventory action `{name}.{action_name}`"));
                     };
                     map.insert(action, keys.clone());
+                    explicit.insert(action, keys.clone());
                 }
+            }
+            // These defaults arrived after configurations were written against the earlier maps;
+            // they give way to an explicit key so those configurations keep loading.
+            let taken = explicit
+                .values()
+                .flatten()
+                .filter_map(|key| parse_key(key).ok())
+                .collect::<Vec<_>>();
+            for (late_mode, action, key) in LATE_DEFAULTS {
+                if late_mode == mode && !explicit.contains_key(&action) {
+                    let event = parse_key(key).expect("late defaults parse");
+                    map.entry(action)
+                        .or_default()
+                        .retain(|default| default != key || !taken.contains(&event));
+                }
+            }
+            // A configuration that takes Ctrl-Q keeps confirmation quit reachable: `q` moves from
+            // cancel to quit.
+            let q = parse_key("q").expect("q parses");
+            if mode == Mode::Confirmation
+                && !explicit.contains_key(&Quit)
+                && map[&Quit].is_empty()
+                && !taken.contains(&q)
+            {
+                if !explicit.contains_key(&Cancel) {
+                    map.entry(Cancel).or_default().retain(|key| key != "q");
+                }
+                map.insert(Quit, vec!["q".to_owned()]);
             }
             for required in if mode == Mode::Normal {
                 &[Help, Quit][..]
@@ -257,7 +310,7 @@ impl Bindings {
                 }
             }
             let mut parsed = BTreeMap::new();
-            let mut used = Vec::new();
+            let mut used: Vec<(KeyEvent, Action, String)> = Vec::new();
             for (action, keys) in map {
                 let mut bindings = Vec::new();
                 for key in keys {
@@ -279,10 +332,22 @@ impl Bindings {
                             "inventory {name} binding `{key}` must preserve ordinary input"
                         ));
                     }
-                    if used.contains(&event) {
-                        return Err(format!("inventory {name} key collision: `{key}`"));
+                    if let Some((_, other, spelling)) =
+                        used.iter().find(|(used, ..)| *used == event)
+                    {
+                        // Name the key as the configuration spells it.
+                        let key = if explicit.contains_key(&action) {
+                            &key
+                        } else {
+                            spelling
+                        };
+                        return Err(format!(
+                            "[inventory.keys.{name}] binds {key} to {} and to {}",
+                            other.name(),
+                            action.name()
+                        ));
                     }
-                    used.push(event);
+                    used.push((event, action, key.clone()));
                     bindings.push((event, key));
                 }
                 parsed.insert(action, bindings);
@@ -297,8 +362,8 @@ impl Bindings {
                     for (event, label) in &normal[&action] {
                         // Menu-local bindings win so a normal shortcut can never make an
                         // advertised menu action behave as navigation or acceptance instead.
-                        if !used.contains(event) {
-                            used.push(*event);
+                        if !used.iter().any(|(used, ..)| used == event) {
+                            used.push((*event, action, label.clone()));
                             parsed
                                 .get_mut(&action)
                                 .expect("menu action has an effective binding entry")
@@ -308,8 +373,9 @@ impl Bindings {
                 }
             }
             maps.insert(mode, parsed);
+            config.insert(mode, explicit);
         }
-        Ok(Self(maps))
+        Ok(Self(maps, config))
     }
 
     pub(super) fn action(&self, mode: Mode, key: KeyEvent) -> Option<Action> {
@@ -338,6 +404,20 @@ impl Bindings {
                     .join("/")
             })
             .unwrap_or_default()
+    }
+
+    /// Actions of `mode` that no key reaches.
+    pub(super) fn unbound(&self, mode: Mode) -> Vec<Action> {
+        self.0[&mode]
+            .iter()
+            .filter(|(action, keys)| action.available(mode) && keys.is_empty())
+            .map(|(action, _)| *action)
+            .collect()
+    }
+
+    /// The explicit configuration of `action` in `mode`, as written under `[inventory.keys]`.
+    pub(super) fn configured(&self, mode: Mode, action: Action) -> Option<&[String]> {
+        self.1.get(&mode)?.get(&action).map(Vec::as_slice)
     }
 
     pub(super) fn keys(&self, mode: Mode, action: Action) -> Vec<&str> {
