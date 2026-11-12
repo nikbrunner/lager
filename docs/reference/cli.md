@@ -24,7 +24,7 @@ Lager selects the configuration path in this order:
 | `ensure` | `ensure [--include-archived]` | Creates missing effective declarations sequentially. |
 | `hook` | `hook [REPOSITORY]...` | Runs hooks for explicit declarations. Without repositories, it selects explicit declarations. |
 | `list`, `ls` | `list [--remote] [--include-archived] [--json]` | Reports declarations and local state. `--remote` expands wildcards through providers. |
-| `inventory`, `inv` | `inventory` | Opens the offline overview with registration actions; requires TTY stdin and stdout. |
+| `tui` | `tui` | Opens the offline overview with registration actions; requires TTY stdin and stdout. |
 
 `ls` is a visible alias for `list`. Both names accept the same arguments, options, and configuration selection, and produce identical data output and exit statuses. Help and usage text reflect the invoked name.
 
@@ -76,7 +76,7 @@ all-or-nothing clone batches.
 
 ## Offline inventory
 
-`inventory` and `inv` have identical behavior. They show declarations and local
+`tui` shows declarations and local
 Git roots beneath the configured root without provider requests or configuration
 writes. Registration and checkout state are independent; duplicate origins keep
 separate rows for their exact paths. Originless checkouts display `No origin`.
@@ -294,7 +294,7 @@ Outside a terminal, Lager never prompts:
 - `init` requires `--root`, one root-creation choice, and one GitHub choice.
 - `add` requires exactly one of `--register` or `--no-register`, unless `--post-clone` supplies registration.
 - `remove` requires exactly one of `--unregister` or `--keep-registered`, plus `--yes`.
-- `inventory` requires TTY stdin and stdout; use `list --json` for automation.
+- `tui` requires TTY stdin and stdout; use `list --json` for automation.
 
 `--post-clone` conflicts with `--no-register`. `list --include-archived` requires `--remote`. Explicit repository arguments bypass the picker.
 

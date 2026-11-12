@@ -129,15 +129,15 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
   <span class="eyebrow">Lager 1.0 / proposal mockups</span>
   <p class="small"><a href="1.0.0.md">1.0 product requirements</a> · <a href="2.0.0-concepts.html">2.0 forklift and Herdr concepts</a> · Release scope approved; detailed interaction review pending. These mockups are proposals, not implementation approval.</p>
   <h1>Know your repositories.<br>Manage worktrees independently.</h1>
-  <div class="brief"><p>1.0 keeps all existing Lager functionality and adds inventory and standalone worktrees. These two experiments focus on the new surfaces, not the complete release scope. Inventory uses <code>lager inventory</code> / <code>lager inv</code>, with <code>lager list</code> retained as an alias.</p><p class="small">All data is simulated. Buttons change only this page’s memory. No Git, filesystem, configuration, or external application operations. Standalone worktrees require no terminal-host integration.</p></div>
+  <div class="brief"><p>1.0 keeps all existing Lager functionality and adds inventory and standalone worktrees. These two experiments focus on the new surfaces, not the complete release scope. Inventory uses <code>lager tui</code>, with <code>lager list</code> retained as an alias.</p><p class="small">All data is simulated. Buttons change only this page’s memory. No Git, filesystem, configuration, or external application operations. Standalone worktrees require no terminal-host integration.</p></div>
   <nav aria-label="Concept sections"><a href="#inventory">01 Inventory</a><a href="#cleanup">02 Standalone worktree cleanup</a></nav>
 </header>
 <section id="inventory" aria-labelledby="inv-title">
   <div class="section-heading"><span class="number">01 / inventory</span><h2 id="inv-title">Repositories, declarations, and checkouts</h2></div>
-  <p class="description">A proposed persistent inventory table for <code>lager inventory</code> / <code>lager inv</code> / <code>lager list</code>. Browse local repository roots and declarations; include remote candidates when you want to add one. Linked worktrees are not inventory entries; their management belongs to the separate standalone commands.</p>
+  <p class="description">A proposed persistent inventory table for <code>lager tui</code> / <code>lager list</code>. Browse local repository roots and declarations; include remote candidates when you want to add one. Linked worktrees are not inventory entries; their management belongs to the separate standalone commands.</p>
   <div class="toolbar"><span class="small">Sources and actions agreed · table interaction proposed</span><label class="preview" for="inv-palette">Terminal preview <select id="inv-palette" data-testid="inv-palette"><option value="dark">Dark</option><option value="light">Light</option></select></label></div>
   <div class="terminal" data-testid="inv-demo">
-    <div class="term-head"><strong id="inv-command">lager inventory</strong><span>fixture data · simulated</span></div>
+    <div class="term-head"><strong id="inv-command">lager tui</strong><span>fixture data · simulated</span></div>
     <div class="search-bar"><label for="inv-search">Search</label><input id="inv-search" data-testid="inv-search" type="search" placeholder="Repository, exact path, state…" autocomplete="off"><button id="inv-clear" data-testid="inv-clear">Clear search</button></div>
     <div class="search-bar">
       <label for="inv-registration">Registration</label><select id="inv-registration" data-testid="inv-registration"><option value="all">All</option><option>explicit</option><option>wildcard</option><option>unregistered</option></select>
@@ -167,7 +167,7 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
     <p class="hint" id="inv-help">Proposed keys: focus the table and use <kbd>↑ ↓</kbd> to select, or click a row. Actions stay in this view. Dirty/conflict fixtures illustrate blocks; production removal has full guards, not just these examples.</p>
   </div>
   <p id="inv-status" data-testid="inv-status" class="status" role="status" aria-live="polite"></p>
-  <div class="notes"><p><strong>Agreed:</strong> local + declared sources; optional <code>inventory --remote</code>. Register declares without cloning; unregister preserves files. Wildcard unregister creates an exclusion, not removal of the wildcard.</p><p><strong>Proposal:</strong> exact columns, state mappings, layout, and keyboard behavior. Remote provider requests and all actions are simulated in memory; no loading from real sources.</p></div>
+  <div class="notes"><p><strong>Agreed:</strong> local + declared sources; optional <code>tui --remote</code>. Register declares without cloning; unregister preserves files. Wildcard unregister creates an exclusion, not removal of the wildcard.</p><p><strong>Proposal:</strong> exact columns, state mappings, layout, and keyboard behavior. Remote provider requests and all actions are simulated in memory; no loading from real sources.</p></div>
 </section>
 <section id="cleanup" aria-labelledby="cleanup-title">
   <div class="section-heading"><span class="number">02 / standalone worktree</span><h2 id="cleanup-title">Inspect facts before removing a worktree</h2></div>
@@ -272,7 +272,7 @@ function invRender(message) {
   $('inv-empty').hidden = invVisible.length > 0;
   $('inv-detail').hidden = !invSelected;
   $('inv-table').setAttribute('aria-label', `Inventory repositories; ${invVisible.length} visible; selected ${invSelected || 'none'}`);
-  $('inv-command').textContent = `lager inventory${$('inv-remote').checked ? ' --remote' : ''}`;
+  $('inv-command').textContent = `lager tui${$('inv-remote').checked ? ' --remote' : ''}`;
   $('inv-providers').textContent = $('inv-remote').checked
     ? Object.entries(invProviders).map(([provider, state]) => `${provider}: ${state}`).join(' · ')
     : 'Local + declared fixtures. Enable --remote to discover missing repositories to Add + register.';

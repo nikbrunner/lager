@@ -35,7 +35,7 @@ fn inventory_inspect_shows_current_declaration_and_action_reason_after_resize_an
     let selected = "selected: org/*";
     let mut scrolled_frames = Vec::new();
     run_inventory_pty_with_exit_observing(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["selected: alpha"], b"j\r".to_vec()),
             (
@@ -114,7 +114,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
     ] {
         let mut frames = Vec::new();
         let mut command = support::lager(&home, &config);
-        command.arg("inventory");
+        command.arg("tui");
         if no_color {
             command.env("NO_COLOR", "1");
         }
@@ -514,7 +514,7 @@ fn inventory_keeps_duplicate_and_same_named_rows_distinct_at_both_sizes() {
 
     for (cols, no_color) in [(80, true), (132, false)] {
         let mut command = support::lager(&home, &config);
-        command.arg("inventory");
+        command.arg("tui");
         if no_color {
             command.env("NO_COLOR", "1");
         }
@@ -616,7 +616,7 @@ fn inventory_keeps_long_named_copies_and_cross_host_rows_distinct_at_80_columns(
     );
 
     let mut command = support::lager(&home, &config);
-    command.arg("inventory").env("NO_COLOR", "1");
+    command.arg("tui").env("NO_COLOR", "1");
     let transcript = run_inventory_pty_with_size(
         &mut command,
         &["NORMAL · 5 rows", "(copy 2)", "absent: Scanning"],
@@ -663,7 +663,7 @@ fn inventory_root_menu_uses_effective_hints_and_preserves_search_and_selection()
     .unwrap();
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["Path and origin:", "selected: alpha"],
@@ -714,7 +714,7 @@ fn inventory_search_matches_full_origins_and_keeps_text_and_filters_safe() {
     );
     init_repo(&root.join("other"), "git@github.com:org/beta.git", true);
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["alpha", "beta"], b"/gto/rgap".to_vec()),
             (
@@ -764,7 +764,7 @@ fn inventory_search_matches_checkout_state_without_matching_contrasting_rows() {
     init_repo(&root.join("aid/beta"), "git@github.com:aid/beta.git", true);
 
     let transcript = run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["No active operation"], b"/missing\r".to_vec()),
             (
@@ -789,6 +789,31 @@ fn inventory_search_matches_checkout_state_without_matching_contrasting_rows() {
 }
 
 #[test]
+fn tui_is_the_only_command_that_opens_the_inventory() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+
+    let help = output(support::lager(&home, &config).args(["tui", "--help"]));
+    assert!(help.status.success(), "{help:?}");
+    assert!(String::from_utf8_lossy(&help.stdout).contains("Usage: lager tui"));
+
+    for removed in ["inventory", "inv"] {
+        let rejected = output(support::lager(&home, &config).arg(removed));
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert_eq!(rejected.status.code(), Some(2), "{removed}: {rejected:?}");
+        assert!(
+            stderr.contains("unrecognized subcommand"),
+            "{removed}: {stderr}"
+        );
+        assert!(!stderr.contains("requires a TTY"), "{removed}: {stderr}");
+        assert!(rejected.stdout.is_empty());
+    }
+}
+
+#[test]
 fn inventory_aliases_reject_invalid_non_tty_entry_without_provider_requests() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
@@ -796,7 +821,8 @@ fn inventory_aliases_reject_invalid_non_tty_entry_without_provider_requests() {
     let config = temp.path().join("config.toml");
     fs::write(&config, "root = \"repos\"\n").unwrap();
 
-    for command_name in ["inventory", "inv"] {
+    {
+        let command_name = "tui";
         support::clear_outbound_requests();
         let archived =
             output(support::lager(&home, &config).args([command_name, "--include-archived"]));
@@ -853,7 +879,7 @@ fn inventory_keeps_an_origin_query_failure_when_a_later_probe_is_cancelled() {
     let processes = FixtureProcesses(marker);
     let mut cancelled_at = None;
     run_inventory_pty_with_exit(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inv"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[(vec!["checkout", "pending"], b"q".to_vec())],
         24,
         200,
@@ -889,7 +915,7 @@ fn inventory_keeps_real_failures_when_cancelling_a_changed_target_or_config() {
         let processes = FixtureProcesses(marker);
         let mut cancelled_at = None;
         run_inventory_pty_with_exit(
-            support::lager_with_path(&home, &config, Some(&tools)).arg("inv"),
+            support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
             &[(vec!["checkout", "pending"], b"q".to_vec())],
             24,
             200,
@@ -939,7 +965,7 @@ fn inventory_pending_checkout_does_not_assert_a_conflicting_origin() {
     fs::write(tools.join("git"), "#!/bin/sh\n/bin/sleep 30\n").unwrap();
     fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
     let transcript = run_inventory_pty_with_size(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inv"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &["2 rows", "pending"],
         b"q",
         24,
@@ -970,7 +996,7 @@ fn inventory_refresh_reconciles_deleted_checkouts_without_turning_incomplete_int
         .unwrap();
         init_repo(&checkout, "git@github.com:org/checkout.git", true);
         let transcript = run_inventory_pty_with_exit(
-            support::lager(&home, &config).arg("inv"),
+            support::lager(&home, &config).arg("tui"),
             &[
                 (vec!["main", "clean", "No active operation"], b"R".to_vec()),
                 (
@@ -1027,7 +1053,7 @@ fn inventory_bare_probe_failure_is_partial_even_when_stderr_says_cancelled() {
     fs::write(tools.join("git"), "#!/bin/sh\necho cancelled >&2\nexit 1\n").unwrap();
     fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
     run_inventory_pty_with_exit(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inv"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[(
             vec![
                 "partial scan:",
@@ -1056,7 +1082,7 @@ fn inventory_detached_head_is_a_successful_observation() {
     init_repo(&checkout, "git@github.com:org/detached.git", true);
     run_git(&checkout, &["checkout", "--detach", "-q"]);
     run_inventory_pty_with_size(
-        support::lager(&home, &config).arg("inv"),
+        support::lager(&home, &config).arg("tui"),
         &["detached HEAD", "clean", "No active operation"],
         b"q",
         24,
@@ -1086,7 +1112,7 @@ fn inventory_cancels_an_active_originless_fallback_without_failure() {
     let processes = FixtureProcesses(marker);
     let mut cancelled_at = None;
     run_inventory_pty_actions_with_hook(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[(vec!["originless", "pending"], b"q".to_vec())],
         24,
         180,
@@ -1106,7 +1132,8 @@ fn inventory_validates_both_terminal_streams_and_startup_before_raw_mode() {
     let config = temp.path().join("config.toml");
     fs::create_dir_all(&home).unwrap();
     fs::write(&config, "invalid = [").unwrap();
-    for name in ["inventory", "inv"] {
+    {
+        let name = "tui";
         for tty_stdin in [false, true] {
             let pty = rustix_openpty::openpty(None, None).unwrap();
             let before = rustix_openpty::rustix::termios::tcgetattr(&pty.user).unwrap();
@@ -1194,7 +1221,7 @@ fn inventory_observation_failures_set_exit_status_even_after_successful_refresh(
                 vec![(vec!["injected probe failure"], b"q".to_vec())]
             };
             let transcript = run_inventory_pty_with_exit(
-                support::lager_with_path(&home, &config, Some(&tools)).arg("inv"),
+                support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
                 &actions,
                 24,
                 300,
@@ -1233,7 +1260,7 @@ fn inventory_discovery_failure_sets_exit_status_even_after_successful_refresh() 
             vec![(vec!["partial scan:", "scan is incomplete"], b"q".to_vec())]
         };
         let transcript = run_inventory_pty_with_exit(
-            support::lager(&home, &config).arg("inventory"),
+            support::lager(&home, &config).arg("tui"),
             &actions,
             24,
             180,
@@ -1258,7 +1285,8 @@ fn inventory_advertises_only_offline_capabilities_and_rejects_remote_before_raw_
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
     fs::write(&config, "root = \"repos\"\n").unwrap();
-    for name in ["inventory", "inv"] {
+    {
+        let name = "tui";
         let help = output(support::lager(&home, &config).args([name, "--help"]));
         assert!(String::from_utf8_lossy(&help.stdout).contains("Remote discovery is unavailable"));
         support::clear_outbound_requests();
@@ -1347,7 +1375,7 @@ exclude = ["repo"]
 
     let mut frames = Vec::new();
     run_inventory_pty_with_exit_observing(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["7 rows", "No active operation"],
@@ -1426,7 +1454,7 @@ fn inventory_unions_nested_wildcards_with_exclusions_in_each_declaration_order()
         );
 
         let transcript = run_inventory_pty_actions(
-            support::lager(&home, &config).arg("inventory"),
+            support::lager(&home, &config).arg("tui"),
             &[
                 (
                     vec!["No active operation", "github.com/group/sub/repo"],
@@ -1484,7 +1512,7 @@ fn inventory_shows_a_discovered_checkout_pending_before_a_delayed_probe_complete
     .unwrap();
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
     let transcript = run_inventory_pty_with_size(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &["arrives-early", "pending"],
         b"q",
         80,
@@ -1530,7 +1558,7 @@ fn inventory_refresh_cancels_delayed_probes_and_quit_remains_responsive() {
     let processes = FixtureProcesses(marker);
     let mut cancelled_at = None;
     let transcript = run_inventory_pty_actions_with_hook(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (vec!["pending"], b"R".to_vec()),
             (vec!["github.com/org/fresh"], b"q".to_vec()),
@@ -1595,7 +1623,7 @@ fn inventory_refresh_keeps_completed_observations_stale_until_reprobed() {
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
 
     let transcript = run_inventory_pty_actions_with_hook(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (vec!["github.com/org/stale", "main", "clean"], b"R".to_vec()),
             (vec!["stale: main", "stale: known clean"], b"q".to_vec()),
@@ -1643,7 +1671,7 @@ fn inventory_quit_reaps_a_probe_descendant_that_is_actually_running() {
     let processes = FixtureProcesses(marker);
     let mut cancelled_at = None;
     run_inventory_pty_actions_with_hook(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[(vec!["active-probe", "pending"], b"q".to_vec())],
         24,
         132,
@@ -1685,7 +1713,7 @@ fn inventory_quit_reaps_a_traversal_child_while_traversal_is_active() {
     let processes = FixtureProcesses(marker);
     let mut cancelled_at = None;
     let transcript = run_inventory_pty_actions_with_hook(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[(vec!["Scanning local repositories"], b"q".to_vec())],
         24,
         132,
@@ -1728,7 +1756,7 @@ fn inventory_rejects_a_probe_result_after_same_path_checkout_replacement() {
 
     let mut inspected = Vec::new();
     let transcript = run_inventory_pty_with_exit_observing(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (vec!["changed-target", "pending"], b" ".to_vec()),
             (vec!["changed-target", "stale observation"], b"\r".to_vec()),
@@ -1795,7 +1823,7 @@ fn inventory_rejects_a_probe_result_after_in_place_origin_config_change() {
 
     let mut inspected = Vec::new();
     let transcript = run_inventory_pty_with_exit_observing(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (vec!["origin-changed", "pending"], b" ".to_vec()),
             (vec!["origin-changed", "stale observation"], b"\r".to_vec()),
@@ -1861,7 +1889,7 @@ fn inventory_declared_rows_keep_wrong_corrupt_and_unreadable_facts_distinct() {
     fs::set_permissions(&destination, fs::Permissions::from_mode(0o000)).unwrap();
 
     let transcript = run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[(
             vec!["github.com/other/wrong", "origin error:", "unreadable"],
             b"q".to_vec(),
@@ -1918,7 +1946,7 @@ fn inventory_keeps_partial_summary_visible_when_rows_overflow_the_viewport() {
     fs::create_dir_all(&unreadable).unwrap();
     fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
     let transcript = run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[(vec!["partial scan:"], b"q".to_vec())],
         12,
         220,
@@ -1962,7 +1990,7 @@ fn inventory_informational_git_file_exclusions_do_not_make_scan_partial() {
         &["init", "--bare", root.join("bare.git").to_str().unwrap()],
     );
     let transcript = run_inventory_pty_with_size(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             "ignored repositories:",
             "bare repository ignored",
@@ -2081,7 +2109,7 @@ fn inventory_excludes_git_file_entries_reports_unreadable_paths_escapes_controls
     fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
 
     let transcript = run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[(
             vec![
                 "ignored repositories:",
@@ -2200,7 +2228,7 @@ exclude = ["skip"]
 
     support::clear_outbound_requests();
     let transcript = run_inventory_pty_with_size(
-        support::lager(&home, &config).arg("inv"),
+        support::lager(&home, &config).arg("tui"),
         &[
             "8 rows",
             "ignored repositories: bare.git: bare repository ignored",
@@ -2349,7 +2377,8 @@ fn inventory_navigates_every_row_without_shifting_columns() {
         ));
     }
     fs::write(&config, content).unwrap();
-    for alias in ["inventory", "inv"] {
+    {
+        let alias = "tui";
         let transcript = run_inventory_pty_actions(
             support::lager(&home, &config)
                 .arg(alias)
@@ -2409,7 +2438,7 @@ fn inventory_resizes_from_wide_to_compact_without_losing_whole_row_selection() {
     let mut frames = Vec::new();
     let transcript = run_inventory_pty_with_exit_observing(
         support::lager(&home, &config)
-            .arg("inventory")
+            .arg("tui")
             .env("NO_COLOR", "1"),
         &[
             (
@@ -2542,7 +2571,7 @@ fn inventory_navigation_remains_responsive_while_status_is_pending() {
     fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
 
     run_inventory_pty_actions_with_hook(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (vec!["alpha", "beta", "pending"], b"j".to_vec()),
             (vec!["selected: org/beta", "pending"], b"q".to_vec()),
@@ -2566,7 +2595,7 @@ fn inventory_shows_unknown_config_warnings_without_corrupting_the_terminal() {
     fs::create_dir_all(home.join("repos")).unwrap();
     fs::write(&config, "root = \"repos\"\nfuture_key = \"keep\"\n").unwrap();
     let transcript = run_inventory_pty_actions_with_hook(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec![
@@ -2605,7 +2634,7 @@ fn inventory_bindings_refresh_atomically_and_keep_failures_sticky() {
     )
     .unwrap();
     let transcript = run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["selected: alpha", "pair: n/k rows", "pair: x refresh"],
@@ -2668,7 +2697,7 @@ fn inventory_search_bindings_override_accept_and_retain_the_previous_map_on_refr
     .unwrap();
 
     run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL", "pair: x refresh", "alpha"],
@@ -2735,7 +2764,7 @@ fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
 
     let mut frames = Vec::new();
     let transcript = run_inventory_pty_with_exit_observing(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["Path and origin:", "pair: ? help"], b"?".to_vec()),
             (
@@ -2830,7 +2859,7 @@ fn inventory_selection_follows_a_pending_path_when_its_identity_arrives() {
     fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
     let selected_pending = "selected: z-pending".to_owned();
     run_inventory_pty_actions_with_hook(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (vec!["selected: zzz", "pending", "z-pending"], b"j".to_vec()),
             (vec![&selected_pending], b" ".to_vec()),
@@ -2909,7 +2938,7 @@ fn inventory_validates_all_binding_modes_before_entering_raw_mode() {
     ] {
         fs::write(&config, format!("root = \"repos\"\n{settings}\n")).unwrap();
         let transcript = run_inventory_pty_with_exit(
-            support::lager(&home, &config).arg("inventory"),
+            support::lager(&home, &config).arg("tui"),
             &[],
             24,
             80,
@@ -2945,7 +2974,7 @@ fn inventory_bindings_survive_symlinked_registration_and_show_direct_actions() {
         assert!(fs::read_to_string(&target).unwrap().contains(settings));
     }
     let transcript = run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["No repositories found", "pair: x refresh"],
@@ -3003,7 +3032,7 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
     let mut frames = Vec::new();
 
     run_inventory_pty_with_exit_observing(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (
                 vec!["No active operation", "3 rows"],
@@ -3119,7 +3148,7 @@ fn inventory_terminal_equivalent_keys_share_reachability_and_collision_checks() 
         )
         .unwrap();
         run_inventory_pty_actions(
-            support::lager(&home, &config).arg("inventory"),
+            support::lager(&home, &config).arg("tui"),
             &[
                 (vec!["No active operation"], b"/alpha".to_vec()),
                 (vec!["SEARCH ·", "/ alpha", binding], vec![input]),
@@ -3153,7 +3182,7 @@ fn inventory_terminal_equivalent_keys_share_reachability_and_collision_checks() 
     ] {
         fs::write(&config, format!("{base}\n{settings}\n")).unwrap();
         let transcript = run_inventory_pty_with_exit(
-            support::lager(&home, &config).arg("inventory"),
+            support::lager(&home, &config).arg("tui"),
             &[],
             24,
             80,
@@ -3188,7 +3217,7 @@ fn inventory_interruptions_restore_the_controlling_terminal_and_reap_active_prob
         let processes = FixtureProcesses(marker);
         let mut interrupted_at = None;
         let transcript = run_inventory_pty_with_exit_observing(
-            support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+            support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
             &[(
                 vec!["pending"],
                 if signal.is_none() {
@@ -3233,7 +3262,7 @@ fn inventory_menu_refresh_uses_effective_binding_and_preserves_filter() {
     };
     fs::write(&config, settings("x")).unwrap();
     run_inventory_pty_actions_with_hook(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["No active operation"], b"/alpha\rm".to_vec()),
             (
@@ -3278,7 +3307,7 @@ fn inventory_compact_hints_keep_actions_and_popup_exit_routes_visible() {
     )
     .unwrap();
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec![
@@ -3321,7 +3350,7 @@ fn inventory_help_uses_the_invoking_mode_and_returns_to_it() {
     fs::create_dir_all(home.join("repos")).unwrap();
     fs::write(&config, "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n[inventory.keys.search]\naccept = [\"Ctrl+a\"]\ncancel = [\"Ctrl+e\"]\n").unwrap();
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["Path and origin:"], b"/alpha\x1bOP".to_vec()),
             (
@@ -3374,7 +3403,7 @@ fn inventory_inspect_explains_unavailable_actions_without_changing_the_checkout(
     let head = fs::read(repository.join(".git/HEAD")).unwrap();
     let git_config = fs::read(repository.join(".git/config")).unwrap();
     let transcript = run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["Path and origin:"], b"\r".to_vec()),
             (vec!["Inspect / alpha"], vec![b'j'; 40]),
@@ -3422,7 +3451,7 @@ fn inventory_inspect_keeps_wildcard_relationships_on_exact_declarations() {
             );
         }
         run_inventory_pty_actions(
-            support::lager(&home, &config).arg("inventory"),
+            support::lager(&home, &config).arg("tui"),
             &[
                 (vec!["Path and origin:"], b"\r".to_vec()),
                 (
@@ -3454,7 +3483,7 @@ fn inventory_menu_scrolls_with_visible_title_and_hints_after_resize() {
     fs::write(&config, "root = \"repos\"\n").unwrap();
     let mut frames = Vec::new();
     run_inventory_pty_with_exit_observing(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["Path and origin:"], b"m".to_vec()),
             (
@@ -3516,7 +3545,7 @@ fn inventory_search_and_inspection_remain_live_during_a_controlled_probe() {
     )).unwrap();
     fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
     run_inventory_pty_actions_with_hook(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (vec!["pending"], b"/zphrtrgt".to_vec()),
             (
@@ -3565,7 +3594,7 @@ fn inventory_dialog_overrides_refresh_atomically_and_keep_all_exit_routes_reacha
     };
     fs::write(&config, settings("Ctrl+b", "\"Ctrl+a\"", "R")).unwrap();
     run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["Path and origin:"], b"m".to_vec()),
             (
@@ -3651,7 +3680,7 @@ fn inventory_inspect_keeps_originless_conflict_and_unreadable_facts_distinct() {
             "Path and origin:"
         };
         run_inventory_pty_with_exit(
-            support::lager(&home, &config).arg("inventory"),
+            support::lager(&home, &config).arg("tui"),
             &[
                 (vec![ready], b"\r".to_vec()),
                 (vec!["Inspect /", fact.as_str()], vec![17]),
@@ -3682,7 +3711,7 @@ fn inventory_no_color_applies_to_rows_and_popups() {
     .unwrap();
     let transcript = run_inventory_pty_actions(
         support::lager(&home, &config)
-            .arg("inventory")
+            .arg("tui")
             .env("NO_COLOR", "1"),
         &[
             (
@@ -3725,7 +3754,7 @@ fn inventory_help_wraps_long_effective_binding_lists() {
 down = ["Ctrl+a", "Ctrl+b", "Ctrl+d", "Ctrl+e", "Ctrl+f", "Ctrl+g", "Ctrl+h", "Ctrl+j", "Ctrl+k", "Ctrl+l", "Ctrl+n", "Ctrl+o", "Ctrl+p", "Ctrl+q", "Ctrl+r", "Ctrl+s", "Ctrl+t", "Ctrl+u", "Ctrl+v", "Ctrl+w", "Ctrl+x", "Ctrl+y"]
 "#).unwrap();
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["Path and origin:"], b"?".to_vec()),
             (vec!["Keyboard / effective bindings", "Ctrl+y"], vec![17]),
@@ -3805,7 +3834,7 @@ fn inventory_popup_q_returns_to_the_previous_view() {
     fs::create_dir_all(home.join("repos")).unwrap();
     fs::write(&config, "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n[[repositories]]\nurl = \"github.com/org/beta\"\n").unwrap();
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["Path and origin:"], b"/github.com/org/beta\r".to_vec()),
             (
@@ -3890,7 +3919,7 @@ fn inventory_popup_quit_routes_and_explicit_overrides_remain_effective() {
             (b"?", "Keyboard / effective bindings"),
         ] {
             let transcript = run_inventory_pty_actions(
-                support::lager(&home, &config).arg("inventory"),
+                support::lager(&home, &config).arg("tui"),
                 &[
                     (vec!["Path and origin:"], open.to_vec()),
                     (vec![title], quit.clone()),
@@ -3924,7 +3953,7 @@ fn inventory_marks_survive_filtering_and_refresh_and_report_vanished_entries() {
     init_repo_without_origin(&root.join("scratch/gone"));
 
     run_inventory_pty_actions_with_hook(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 4 rows", "absent: Scanning", "selected: alpha"],
@@ -4014,7 +4043,7 @@ fn inventory_copy_value_sends_the_full_original_value_to_the_clipboard() {
 
     let mut values = Vec::new();
     run_inventory_pty_with_exit(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (
                 vec!["NORMAL · 1 row", "absent: Scanning", "selected: alpha"],
@@ -4068,7 +4097,7 @@ fn inventory_copy_value_sends_the_full_original_value_to_the_clipboard() {
     );
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 1 row", "absent: Scanning", "selected: alpha"],
@@ -4116,7 +4145,7 @@ fn inventory_open_origin_opens_only_a_derived_https_address() {
     );
 
     run_inventory_pty_with_exit(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (
                 vec!["NORMAL · 2 rows", "absent: Scanning"],
@@ -4149,7 +4178,7 @@ fn inventory_open_origin_opens_only_a_derived_https_address() {
     assert!(!marker.exists(), "an origin scheme was executed");
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 2 rows", "absent: Scanning"],
@@ -4187,7 +4216,7 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
     let root_entry = |down: usize| format!("m{}\r", "j".repeat(down)).into_bytes();
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 1 row", "absent: Scanning", "selected: alpha"],
@@ -4373,7 +4402,7 @@ fn inventory_session_problems_list_every_failure_behind_exit_one() {
     let problems = format!("m{}\r", "j".repeat(9)).into_bytes();
 
     run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec![
@@ -4459,7 +4488,7 @@ fn inventory_keeps_drawing_while_the_opener_and_clipboard_hang() {
 
     let started = Instant::now();
     run_inventory_pty_actions(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (
                 vec!["NORMAL · 2 rows", "absent: Scanning"],
@@ -4500,7 +4529,7 @@ fn inventory_registers_and_unregisters_the_current_row_without_touching_files() 
     let mut configs = Vec::new();
 
     run_inventory_pty_actions_with_hook(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec![
@@ -4596,7 +4625,7 @@ fn inventory_direct_bindings_run_their_menu_actions_on_the_current_row() {
     let tree = checkout_tree(&root);
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 1 row", "absent: Scanning", "unregistered"],
@@ -4690,7 +4719,7 @@ fn inventory_direct_bindings_cover_marks_copy_open_and_unbuilt_remote_actions() 
     let cleared = vec!["NORMAL", "absent: Remote discovery is", "absent: problem"];
 
     run_inventory_pty_actions_with_hook(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (vec!["NORMAL · 1 row", "absent: Scanning"], b"kko".to_vec()),
             (
@@ -4757,7 +4786,7 @@ fn inventory_remapped_keys_work_in_every_mode_and_their_defaults_are_dead() {
     let tree = checkout_tree(&root);
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             // Normal: r and m are dead, so ? opens Help on the normal map.
             (
@@ -4882,7 +4911,7 @@ fn inventory_later_defaults_yield_and_confirmation_quit_falls_back_to_q() {
     }
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 2 rows", "absent: Scanning"],
@@ -4956,7 +4985,7 @@ fn inventory_help_shows_configured_directions_and_emptied_actions() {
     init_repo(&root.join("org/beta"), "git@github.com:org/beta.git", true);
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["NORMAL · 1 row", "absent: Scanning"], b"kk\r".to_vec()),
             (vec!["Inspect / beta"], b"?".to_vec()),
@@ -4997,7 +5026,7 @@ fn inventory_help_keeps_the_refresh_failure_visible_above_three_status_lines() {
     );
 
     run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["ignored repositories:", "absent: Scanning"],
@@ -5049,7 +5078,7 @@ fn inventory_confirmation_cancel_q_yields_to_an_explicit_help_key() {
     let tree = checkout_tree(&root);
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["NORMAL · 1 row", "absent: Scanning"], b"kkr".to_vec()),
             (vec!["Remove checkouts / keep registration"], b"q".to_vec()),
@@ -5087,7 +5116,7 @@ fn inventory_help_scrolls_to_every_mode_and_the_keyless_actions_at_80_columns() 
     fs::write(&config, "root = \"repos\"\n").unwrap();
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["No repositories found.", "Path and origin:"],
@@ -5132,7 +5161,7 @@ fn inventory_invalid_binding_refresh_keeps_the_previous_map_and_is_a_session_pro
     init_repo(&root.join("org/beta"), "git@github.com:org/beta.git", true);
 
     run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 1 row", "absent: Scanning", "pair: r remove"],
@@ -5207,7 +5236,7 @@ fn inventory_scan_leaves_a_stat_dirty_index_untouched() {
     let before = fs::metadata(&index).unwrap();
 
     run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[(
             vec!["NORMAL · 1 row", "absent: Scanning", "clean"],
             b"q".to_vec(),
@@ -5246,7 +5275,7 @@ fn inventory_registers_every_marked_row_including_hidden_ones_and_reports_each_o
     let mut configs = Vec::new();
 
     run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 3 rows", "absent: Scanning"],
@@ -5359,7 +5388,7 @@ fn inventory_registration_edits_wildcard_exclusions_and_keeps_patterns_inspect_o
     let mut configs = Vec::new();
 
     run_inventory_pty_actions_with_hook(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 3 rows", "absent: Scanning", "excluded"],
@@ -5477,7 +5506,7 @@ fn inventory_cancelled_preview_changes_nothing_and_keeps_query_cursor_and_marks(
     };
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 3 rows", "absent: Scanning"],
@@ -5544,7 +5573,7 @@ fn inventory_add_rejects_wildcards_and_credentials_without_showing_them() {
     let tree = checkout_tree(&root);
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["NORMAL · 1 row", "absent: Scanning"], b"a".to_vec()),
             (
@@ -5666,7 +5695,7 @@ fn inventory_cancelled_add_changes_nothing_and_keeps_query_cursor_and_marks() {
     ];
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 3 rows", "absent: Scanning"],
@@ -5814,12 +5843,7 @@ fn inventory_add_never_offers_an_unknown_destination_as_missing() {
         ],
         b"q".to_vec(),
     ));
-    run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
-        &actions,
-        32,
-        132,
-    );
+    run_inventory_pty_actions(support::lager(&home, &config).arg("tui"), &actions, 32, 132);
     assert_eq!(fs::read_to_string(&config).unwrap(), original);
     assert_eq!(checkout_tree(&root), tree);
 }
@@ -5853,7 +5877,7 @@ fn inventory_add_stays_usable_while_a_probe_is_pending_and_keeps_its_state_unkno
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
 
     run_inventory_pty_actions(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (
                 vec!["Scanning local repositories", "arrives", "pending"],
@@ -5908,7 +5932,7 @@ fn inventory_add_registers_a_typed_reference_through_the_batch_and_keeps_marks()
     let reference = "https://github.com/org/beta.git";
 
     run_inventory_pty_actions_with_hook(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["NORMAL · 1 row", "absent: Scanning"], b"kk a".to_vec()),
             (
@@ -6032,7 +6056,7 @@ fn inventory_clone_register_hands_the_terminal_to_git_and_returns_with_the_new_s
     let mut modes = Vec::new();
 
     let transcript = run_inventory_pty_with_exit_observing(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (vec!["NORMAL · 0 rows", "absent: Scanning"], b"a".to_vec()),
             (
@@ -6130,7 +6154,7 @@ fn inventory_clone_only_from_the_row_menu_runs_the_hook_on_the_terminal_and_keep
     fs::write(&config, &original).unwrap();
 
     let transcript = run_inventory_pty_actions(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (
                 vec!["NORMAL · 1 row", "absent: Scanning", "missing"],
@@ -6206,7 +6230,7 @@ fn inventory_clone_batch_reports_each_target_and_continues_past_a_failed_and_a_s
     let mut modes = Vec::new();
 
     let transcript = run_inventory_pty_with_exit_observing(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (
                 vec!["NORMAL · 4 rows", "absent: Scanning"],
@@ -6327,7 +6351,7 @@ fn inventory_ctrl_c_during_a_clone_handoff_exits_130_and_keeps_the_earlier_clone
     let mut modes = Vec::new();
 
     let transcript = run_inventory_pty_with_exit_observing(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (
                 vec!["NORMAL · 2 rows", "absent: Scanning", "absent: pending"],
@@ -6391,7 +6415,7 @@ fn inventory_clone_register_on_a_matching_checkout_registers_without_cloning() {
     let tree = checkout_tree(&root);
 
     let transcript = run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 1 row", "absent: Scanning", "absent: pending"],
@@ -6454,7 +6478,7 @@ fn inventory_add_blocks_a_clone_whose_destination_appeared_after_the_preview() {
     let reference = clone_source(temp.path(), "late");
 
     run_inventory_pty_with_exit(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (vec!["NORMAL · 0 rows", "absent: Scanning"], b"a".to_vec()),
             (
@@ -6528,7 +6552,7 @@ fn inventory_failed_hook_keeps_the_clone_skips_registration_and_lets_the_next_ta
     let mut modes = Vec::new();
 
     let transcript = run_inventory_pty_with_exit_observing(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (
                 vec!["NORMAL · 3 rows", "absent: Scanning"],
@@ -6608,7 +6632,7 @@ fn inventory_ctrl_c_during_a_hook_exits_130_and_keeps_the_clone() {
     fs::write(&config, &original).unwrap();
 
     let transcript = run_inventory_pty_with_exit(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (
                 vec!["NORMAL · 1 row", "absent: Scanning", "missing"],
@@ -6647,7 +6671,7 @@ fn inventory_ctrl_c_while_a_failed_clone_waits_for_enter_exits_130() {
     fs::write(&config, &original).unwrap();
 
     let transcript = run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 1 row", "absent: Scanning", "missing"],
@@ -6685,7 +6709,7 @@ fn inventory_keeps_keys_typed_at_it_when_a_suspend_starts_no_child() {
     let reference = clone_source(temp.path(), "late");
 
     run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["NORMAL · 0 rows", "absent: Scanning"], b"a".to_vec()),
             (
@@ -6755,7 +6779,7 @@ fn recheck_blocks_a_vanished_checkout(exported_git: bool) {
     }
 
     run_inventory_pty_with_exit(
-        command.arg("inventory"),
+        command.arg("tui"),
         &[
             (
                 vec!["NORMAL · 2 rows", "absent: Scanning"],
@@ -6825,7 +6849,7 @@ fn inventory_blocks_a_previewed_no_op_whose_registration_changed_before_its_writ
     let zeta = ["register", "git@github.com:org/zeta.git"];
 
     run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 2 rows", "absent: Scanning"],
@@ -6892,7 +6916,7 @@ fn inventory_long_preview_scrolls_its_targets_while_the_choices_stay_in_view() {
     let choices = ["pair: Cancel default", "Register 12 targets"];
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 12 rows", "absent: Scanning"],
@@ -6965,7 +6989,7 @@ fn inventory_failed_registration_write_is_one_problem_per_identity_and_keeps_col
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_inventory_pty_with_exit_observing(
-            support::lager(&home, &config).arg("inventory"),
+            support::lager(&home, &config).arg("tui"),
             &[
                 (
                     vec!["NORMAL · 2 rows", "absent: Scanning"],
@@ -7132,7 +7156,7 @@ fn inventory_removal_confirmation_lists_clean_loss_and_blocked_targets_and_cance
     };
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 4 rows", "absent: Scanning"],
@@ -7213,7 +7237,7 @@ fn inventory_remove_only_continues_past_blocked_targets_and_keeps_registration()
     ];
 
     run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 3 rows", "absent: Scanning"],
@@ -7285,7 +7309,7 @@ fn inventory_acknowledged_losses_are_removed_while_a_blocker_and_a_new_loss_stay
     let core = checkout_tree(&root.join("org/core"));
 
     run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 3 rows", "absent: Scanning"],
@@ -7380,7 +7404,7 @@ fn inventory_remove_unregister_reports_a_deleted_checkout_and_a_failed_config_wr
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_inventory_pty_with_exit(
-            support::lager(&home, &config).arg("inventory"),
+            support::lager(&home, &config).arg("tui"),
             &[
                 (
                     vec!["NORMAL · 3 rows", "absent: Scanning"],
@@ -7455,7 +7479,7 @@ fn inventory_remove_unregister_keeps_registration_while_a_selected_checkout_of_t
     let declared = checkout_tree(&root.join("org/alpha"));
 
     run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 2 rows", "absent: Scanning"],
@@ -7522,7 +7546,7 @@ fn inventory_remove_unregister_writes_once_per_identity_and_previews_the_unselec
     let mut configs = Vec::new();
 
     run_inventory_pty_actions_with_hook(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 4 rows", "absent: Scanning"],
@@ -7603,7 +7627,7 @@ fn inventory_removal_blocks_targets_whose_origin_path_or_registration_changed_af
     let mut changed = None;
 
     run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 4 rows", "absent: Scanning"],
@@ -7693,7 +7717,7 @@ fn inventory_remove_unregister_rechecks_that_a_known_missing_destination_is_stil
     fs::create_dir_all(&root).unwrap();
 
     run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 1 row", "absent: Scanning", "missing"],
@@ -7760,7 +7784,7 @@ fn inventory_keys_typed_before_a_confirmation_is_drawn_never_answer_it() {
     let tree = checkout_tree(&root);
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             // Acknowledge, move to the run choice, choose: all typed with the `r`.
             (
@@ -7837,7 +7861,7 @@ fn inventory_removal_never_deletes_a_checkout_that_replaced_the_confirmed_one() 
     let mut replacement = None;
 
     run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (vec!["NORMAL · 1 row", "absent: Scanning"], b"kkr".to_vec()),
             (
@@ -7904,7 +7928,7 @@ fn inventory_removal_never_follows_an_ancestor_that_became_a_symlink_to_another_
     ];
 
     run_inventory_pty_with_exit(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 2 rows", "absent: Scanning"],
@@ -7988,7 +8012,7 @@ fn inventory_remove_unregister_waits_for_a_complete_scan_and_then_previews_every
     fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
 
     run_inventory_pty_actions_with_hook(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (
                 vec!["Scanning", "pair: main clean", "selected: org/alpha"],
@@ -8077,7 +8101,7 @@ fn inventory_direct_remove_unregister_is_blocked_while_the_scan_is_incomplete() 
     fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
 
     run_inventory_pty_actions_with_hook(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (vec!["Scanning", "pair: main clean"], b"kkU".to_vec()),
             (
@@ -8115,7 +8139,7 @@ fn inventory_removal_names_the_declaration_whose_destination_a_found_checkout_oc
     let tree = checkout_tree(&root);
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             (
                 vec!["NORMAL · 2 rows", "absent: Scanning", "conflict"],
@@ -8221,7 +8245,7 @@ fn removal_held_at_its_second_target(
     actions.extend(tail);
 
     let transcript = run_inventory_pty_actions_with_hook(
-        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &actions,
         32,
         132,
@@ -8369,7 +8393,7 @@ fn inventory_alt_keys_outside_a_batch_do_nothing() {
     let tree = checkout_tree(&root);
 
     let transcript = run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             // Esc and `r` in one write are Alt+r, which no binding names: neither a quit
             // nor a removal. Alt+Enter is no Inspect either.
@@ -8405,7 +8429,7 @@ fn inventory_keys_typed_before_the_add_preview_is_drawn_never_choose_in_it() {
     fs::create_dir_all(&root).unwrap();
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("inventory"),
+        support::lager(&home, &config).arg("tui"),
         &[
             // The second Enter would choose the focused Clone + register.
             (

@@ -43,7 +43,7 @@ pub enum Command {
         about = "Show declarations and local repository state"
     )]
     List(ListArgs),
-    #[command(visible_alias = "inv", about = "Open the repository inventory")]
+    #[command(name = "tui", about = "Open the repository inventory")]
     Inventory(InventoryArgs),
 }
 

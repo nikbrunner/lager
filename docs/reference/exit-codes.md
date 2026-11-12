@@ -7,7 +7,7 @@
   native Git/hook child reported as interrupted by SIGINT or exiting with
   status `130`.
 
-For `inventory` / `inv`, normal-mode `q`/Esc or popup Ctrl-Q perform a normal
+For `tui`, normal-mode `q`/Esc or popup Ctrl-Q perform a normal
 quit: `1` if discovery, observation or another operational failure occurred in
 the session, including
 failures followed by successful refresh; otherwise `0`. Informational exclusions

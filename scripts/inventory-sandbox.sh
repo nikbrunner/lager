@@ -3,11 +3,6 @@ set -euo pipefail
 
 project="$(cd "$(dirname "$0")/.." && pwd)"
 binary="$project/target/debug/lager"
-alias_name="${1:-inventory}"
-case "$alias_name" in
-  inventory|inv) ;;
-  *) printf 'Usage: bash scripts/inventory-sandbox.sh [inventory|inv]\n' >&2; exit 2 ;;
-esac
 if [[ ! -x "$binary" ]]; then
   printf 'Build first, using your normal HOME: cargo build --locked\n' >&2
   exit 1
@@ -67,6 +62,6 @@ done
 printf 'Disposable sandbox: %s\nConfig for edits in a second terminal: %s\n' "$sandbox" "$config"
 printf 'The sandbox is removed when inventory exits. No real Lager config is used.\n'
 status=0
-"${runtime[@]}" "$binary" --config "$config" "$alias_name" || status=$?
+"${runtime[@]}" "$binary" --config "$config" tui || status=$?
 printf 'Inventory exit status: %s\n' "$status"
 exit "$status"

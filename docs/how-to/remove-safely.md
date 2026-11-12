@@ -35,7 +35,7 @@ Declining a warning or confirmation leaves the checkout and declaration unchange
 
 ## Remove from the inventory
 
-In `lager inventory`, `r` removes the current row's checkout and keeps its registration; the menu's Repository actions… also offers Remove + unregister. Both act on the marked rows when any are marked, and both run the guards above on each exact found path.
+In `lager tui`, `r` removes the current row's checkout and keeps its registration; the menu's Repository actions… also offers Remove + unregister. Both act on the marked rows when any are marked, and both run the guards above on each exact found path.
 
 The confirmation lists every target before anything is deleted: clean targets, targets with named local-state losses, and blocked targets with the guard that forbids them. Cancel is the default. Targets with losses are removed only after you tick the acknowledgment row, which covers the listed losses at the listed paths and nothing else. It never unblocks a guard.
 

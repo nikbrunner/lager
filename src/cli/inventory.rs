@@ -47,7 +47,7 @@ pub fn run(config_path: &Path, args: InventoryArgs, interrupted: impl Fn() -> Op
         return 2;
     }
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        eprintln!("lager: inventory requires a TTY on stdin and stdout");
+        eprintln!("lager: tui requires a TTY on stdin and stdout");
         return 2;
     }
     if args.remote {

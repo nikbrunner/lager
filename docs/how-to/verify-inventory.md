@@ -20,10 +20,9 @@ misplaced, originless and Unicode-path fixtures. Git global/system configuration
 is disabled and inventory uses only the sandbox root. The script prints the
 config path for edits from a second terminal and removes the sandbox on exit.
 
-For the alias or no-color pass:
+For the no-color pass:
 
 ```sh
-bash scripts/inventory-sandbox.sh inv
 NO_COLOR=1 bash scripts/inventory-sandbox.sh
 ```
 
