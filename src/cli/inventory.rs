@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -10,7 +10,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout, Margin, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -18,9 +18,12 @@ use ratatui::widgets::{
 };
 
 use crate::application::inventory::{
-    self as model, InventoryFilesystem, InventoryReport, LocalScan,
+    self as model, CopyField, InventoryFilesystem, InventoryReport, LocalScan, Marks,
+    SessionProblems,
 };
+use crate::application::ports::Desktop;
 use crate::infrastructure::config::load_inventory;
+use crate::infrastructure::desktop::NativeDesktop;
 use crate::infrastructure::inventory::{
     LocalInventoryFilesystem, ScanContext, ScanEvent, ScanHandle, start_local_scan_with_context,
 };
@@ -103,9 +106,12 @@ struct InventorySession {
     worker: ScanHandle,
     generation: u64,
     complete: bool,
-    had_failure: bool,
+    problems: SessionProblems,
+    marks: Marks,
     bindings: Bindings,
     notice: Option<String>,
+    /// The outcome of the last action; the next key press clears it.
+    message: Option<String>,
     cached_report: Option<InventoryReport>,
 }
 
@@ -130,9 +136,11 @@ impl InventorySession {
             worker,
             generation: 1,
             complete: false,
-            had_failure: false,
+            problems: SessionProblems::default(),
+            marks: Marks::default(),
             bindings: Bindings::load(Default::default()).expect("default bindings are valid"),
             notice: None,
+            message: None,
             cached_report: None,
         }
     }
@@ -168,10 +176,29 @@ impl InventorySession {
         let mut received = false;
         while let Ok(event) = self.worker.receiver.try_recv() {
             received = true;
-            if matches!(&event, ScanEvent::Failure)
-                || matches!(&event, ScanEvent::Diagnostic { diagnostic, .. } if diagnostic.incomplete)
-            {
-                self.had_failure = true;
+            match &event {
+                ScanEvent::Failure { path, message } => {
+                    let (field, error) = message.split_once(": ").unwrap_or(("status", message));
+                    self.problems.record(
+                        "scan",
+                        format!(
+                            "{}: {} · {field} not observed",
+                            home_relative(path, &self.home),
+                            escape(model::problem_reason(error))
+                        ),
+                    )
+                }
+                ScanEvent::Diagnostic { diagnostic, .. } if diagnostic.incomplete => {
+                    self.problems.record(
+                        "scan",
+                        format!(
+                            "{}: {} · the scan is incomplete",
+                            home_relative(&diagnostic.path, &self.home),
+                            escape(model::problem_reason(&diagnostic.message))
+                        ),
+                    )
+                }
+                _ => {}
             }
             match event {
                 ScanEvent::Discovered {
@@ -413,6 +440,14 @@ impl TerminalSession {
                     return 1;
                 }
             };
+            let dropped = session.marks.reconcile(&report.rows, session.complete);
+            if dropped > 0 {
+                session.message = Some(if dropped == 1 {
+                    "Removed 1 mark: its entry vanished".to_owned()
+                } else {
+                    format!("Removed {dropped} marks: their entries vanished")
+                });
+            }
             let visible_rows = matching_rows(&report, &selection.query);
             selection.reconcile(&visible_rows, session.complete);
             if let Err(error) = self.draw_report(&report, &visible_rows, session, &mut selection) {
@@ -432,46 +467,34 @@ impl TerminalSession {
                             session.worker.cancel_and_join();
                             return 130;
                         }
-                        let mode = if selection.help || selection.inspection {
-                            Mode::Inspection
-                        } else if selection.menu {
-                            Mode::Menu
-                        } else if selection.search {
-                            Mode::Search
-                        } else {
-                            Mode::Normal
-                        };
-                        let action = session.bindings.action(mode, key);
-                        let action = if mode == Mode::Menu && action == Some(Action::Accept) {
-                            root_menu_actions().get(selection.menu_index).copied()
-                        } else {
-                            action
-                        };
-                        match action {
-                            Some(Action::Quit) => {
-                                session.worker.cancel_and_join();
-                                session.receive_events();
-                                return i32::from(session.had_failure);
-                            }
-                            Some(Action::Refresh) => {
-                                selection.menu = false;
-                                if let Err(error) = session.refresh() {
-                                    session.had_failure = true;
-                                    session.notice =
-                                        Some(format!("refresh failed: {}", escape(error)));
+                        session.message = None;
+                        let view = selection.view();
+                        let mode = view.mode();
+                        match session.bindings.action(mode, key) {
+                            Some(Action::Quit) => return quit(session),
+                            Some(Action::Accept) if view == View::Menu => {
+                                if let Some(code) = activate_menu_entry(
+                                    session,
+                                    &mut selection,
+                                    &report,
+                                    &visible_rows,
+                                ) {
+                                    return code;
                                 }
                             }
-                            Some(Action::Menu) if !selection.search => {
-                                selection.menu = true;
-                                selection.menu_index = 0;
-                                selection.menu_scroll = 0;
+                            Some(Action::Refresh) => {
+                                selection.menu.clear();
+                                refresh(session);
+                            }
+                            Some(Action::Menu) if view == View::Normal => {
+                                selection.open_menu(Menu::Root, &visible_rows);
                             }
                             Some(Action::Search) => {
-                                selection.menu = false;
+                                selection.menu.clear();
                                 selection.search = true;
                             }
                             Some(Action::ClearSearch) => {
-                                selection.menu = false;
+                                selection.menu.clear();
                                 selection.query.clear();
                             }
                             Some(Action::Help) => {
@@ -481,48 +504,80 @@ impl TerminalSession {
                                 selection.help = !selection.help;
                                 selection.help_scroll = 0;
                             }
-                            Some(Action::Cancel | Action::Accept) if selection.help => {
+                            Some(Action::Cancel | Action::Accept) if view == View::Help => {
                                 selection.help = false;
                             }
-                            Some(Action::Cancel | Action::Accept) if selection.inspection => {
+                            Some(Action::Cancel) if view == View::Menu => {
+                                selection.menu.pop();
+                                selection.menu_scroll = 0;
+                            }
+                            Some(Action::Cancel | Action::Accept) if view == View::Problems => {
+                                selection.problems = false;
+                            }
+                            Some(Action::Cancel | Action::Accept) if view == View::Inspect => {
                                 selection.close_inspection();
                             }
-                            Some(Action::Cancel) if selection.menu => {
-                                selection.menu = false;
-                                selection.menu_scroll = 0;
-                            }
-                            Some(Action::Cancel | Action::Accept) if selection.search => {
+                            Some(Action::Cancel | Action::Accept) if view == View::Search => {
                                 selection.search = false;
                             }
-                            Some(Action::Inspect) if !selection.search => {
-                                selection.menu = false;
-                                selection.menu_scroll = 0;
+                            Some(Action::Inspect) if view != View::Search => {
+                                selection.menu.clear();
                                 selection.open_inspection(&visible_rows);
                             }
+                            Some(Action::Copy) if view == View::Inspect => {
+                                selection.menu = vec![(Menu::Copy, 0)];
+                                selection.menu_target = selection.inspection_key.clone();
+                                selection.menu_scroll = 0;
+                            }
+                            Some(Action::Mark) if view == View::Normal => {
+                                if let Some(row) = selection.selected_row(&visible_rows) {
+                                    toggle_mark(session, row, &report.rows);
+                                }
+                            }
                             Some(Action::Cancel | Action::Accept) => {}
-                            Some(Action::Up) if selection.help => {
+                            Some(Action::Up) if view == View::Help => {
                                 selection.help_scroll = selection.help_scroll.saturating_sub(1);
                             }
-                            Some(Action::Down) if selection.help => {
+                            Some(Action::Down) if view == View::Help => {
                                 selection.help_scroll = selection
                                     .help_scroll
                                     .saturating_add(1)
                                     .min(self.help_scroll_limit(session, selection.help_mode));
                             }
-                            Some(Action::PageUp) if selection.help => {
+                            Some(Action::PageUp) if view == View::Help => {
                                 selection.help_scroll = selection.help_scroll.saturating_sub(10);
                             }
-                            Some(Action::PageDown) if selection.help => {
+                            Some(Action::PageDown) if view == View::Help => {
                                 selection.help_scroll = selection
                                     .help_scroll
                                     .saturating_add(10)
                                     .min(self.help_scroll_limit(session, selection.help_mode));
                             }
-                            Some(Action::Up) if selection.inspection => {
+                            Some(Action::Up) if view == View::Problems => {
+                                selection.problems_scroll =
+                                    selection.problems_scroll.saturating_sub(1);
+                            }
+                            Some(Action::Down) if view == View::Problems => {
+                                selection.problems_scroll = selection
+                                    .problems_scroll
+                                    .saturating_add(1)
+                                    .min(self.problems_scroll_limit(session));
+                            }
+                            Some(Action::PageUp) if view == View::Problems => {
+                                selection.problems_scroll =
+                                    selection.problems_scroll.saturating_sub(10);
+                            }
+                            Some(Action::PageDown) if view == View::Problems => {
+                                selection.problems_scroll = selection
+                                    .problems_scroll
+                                    .saturating_add(10)
+                                    .min(self.problems_scroll_limit(session));
+                            }
+                            Some(Action::Up) if view == View::Inspect => {
                                 selection.inspection_scroll =
                                     selection.inspection_scroll.saturating_sub(1);
                             }
-                            Some(Action::Down) if selection.inspection => {
+                            Some(Action::Down) if view == View::Inspect => {
                                 let limit = selection
                                     .inspected_row(&visible_rows)
                                     .map(|row| {
@@ -536,11 +591,11 @@ impl TerminalSession {
                                 selection.inspection_scroll =
                                     selection.inspection_scroll.saturating_add(1).min(limit);
                             }
-                            Some(Action::PageUp) if selection.inspection => {
+                            Some(Action::PageUp) if view == View::Inspect => {
                                 selection.inspection_scroll =
                                     selection.inspection_scroll.saturating_sub(10);
                             }
-                            Some(Action::PageDown) if selection.inspection => {
+                            Some(Action::PageDown) if view == View::Inspect => {
                                 let limit = selection
                                     .inspected_row(&visible_rows)
                                     .map(|row| {
@@ -554,13 +609,17 @@ impl TerminalSession {
                                 selection.inspection_scroll =
                                     selection.inspection_scroll.saturating_add(10).min(limit);
                             }
-                            Some(Action::Up) if selection.menu => selection.move_menu_by(-1),
-                            Some(Action::Down) if selection.menu => selection.move_menu_by(1),
-                            Some(Action::PageUp) if selection.menu => selection.move_menu_by(-10),
-                            Some(Action::PageDown) if selection.menu => selection.move_menu_by(10),
+                            Some(Action::Up) if view == View::Menu => selection.move_menu_by(-1),
+                            Some(Action::Down) if view == View::Menu => selection.move_menu_by(1),
+                            Some(Action::PageUp) if view == View::Menu => {
+                                selection.move_menu_by(-10)
+                            }
+                            Some(Action::PageDown) if view == View::Menu => {
+                                selection.move_menu_by(10)
+                            }
                             Some(Action::Up) => selection.move_by(&visible_rows, -1),
                             Some(Action::Down) => selection.move_by(&visible_rows, 1),
-                            None if selection.search => selection.edit_query(key),
+                            None if view == View::Search => selection.edit_query(key),
                             _ => {}
                         }
                     }
@@ -614,13 +673,8 @@ impl TerminalSession {
         )
     }
 
-    fn menu_scroll_metrics(&self, session: &InventorySession, selection: &Selection) -> (u16, u16) {
-        let [_, _, body, _] = popup_regions(self.area(), POPUP, &menu_widget(selection, session));
-        let viewport = body.height.max(1);
-        (
-            (root_menu_actions().len() as u16).saturating_sub(viewport),
-            viewport,
-        )
+    fn problems_scroll_limit(&self, session: &InventorySession) -> u16 {
+        popup_scroll_limit(self.area(), WIDE_POPUP, &problems_widget(session))
     }
 
     fn draw_report(
@@ -634,43 +688,71 @@ impl TerminalSession {
         selection.help_scroll = selection
             .help_scroll
             .min(self.help_scroll_limit(session, selection.help_mode));
+        selection.problems_scroll = selection
+            .problems_scroll
+            .min(self.problems_scroll_limit(session));
         if let Some(row) = selection.inspected_row(visible_rows) {
             selection.inspection_scroll = selection
                 .inspection_scroll
                 .min(self.inspection_scroll_limit(row, &report.rows, &session.home));
         }
-        let (menu_limit, menu_viewport) = self.menu_scroll_metrics(session, selection);
-        selection.clamp_menu_scroll(menu_limit, menu_viewport);
+        let names = short_names(&report.rows);
+        let menu = selection.menu.last().map(|(menu, _)| {
+            let row = selection.menu_target_row(&report.rows);
+            let name = row.map(|row| names[&row.key].clone()).unwrap_or_default();
+            let lines = menu_lines(*menu, row, &name, session, visible_rows);
+            (menu_title(*menu, &name, session.marks.len()), lines)
+        });
+        if let Some((_, lines)) = &menu {
+            let entries = lines.iter().filter(|line| line.entry.is_some()).count();
+            let selected = selection.clamp_menu_index(entries);
+            let line = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.entry.is_some())
+                .nth(selected)
+                .map_or(0, |(index, _)| index);
+            let body = menu_widget(lines, line, popup_body_width(self.area(), POPUP));
+            let [_, _, content, _] = popup_regions(self.area(), POPUP, &body);
+            let viewport = content.height.max(1);
+            selection.clamp_menu_scroll(
+                (lines.len() as u16).saturating_sub(viewport),
+                viewport,
+                line as u16,
+            );
+        }
         let bindings = &session.bindings;
-        let view = if selection.help {
-            View::Help
-        } else if selection.inspection {
-            View::Inspect
-        } else if selection.menu {
-            View::Menu
-        } else if selection.search {
-            View::Search
-        } else {
-            View::Normal
-        };
+        let view = selection.view();
         let compact = self.area().width < WIDE_TABLE;
         let status = status_lines(
             report,
             complete,
             session.notice.as_deref(),
+            session.message.as_deref(),
             view,
             compact,
             bindings,
         );
         let home = session.home.as_path();
-        let names = short_names(&report.rows);
         let shown = &*selection;
         let mut table_state = shown.table.clone();
+        let problems = match session.problems.entries().len() {
+            0 => String::new(),
+            1 => " · 1 problem".to_owned(),
+            count => format!(" · {count} problems"),
+        };
+        let marked = session.marks.len();
+        let counter = (marked > 0).then(|| {
+            format!(
+                "{marked} marked · {} hidden",
+                session.marks.hidden(visible_rows)
+            )
+        });
         let result = self
             .terminal
             .draw(|frame| {
                 let area = frame.area();
-                let footer = footer_widget(bindings, view);
+                let footer = footer_widget(bindings, view, area.width.saturating_sub(4));
                 let footer_height = footer.line_count(area.width.saturating_sub(4)) as u16;
                 let [header, source, search, _, table, status_area, footer_area] =
                     Layout::vertical([
@@ -687,7 +769,7 @@ impl TerminalSession {
                     bar(
                         "LAGER / inventory",
                         &format!(
-                            "{} · {} {}",
+                            "{} · {} {}{problems}",
                             view.label(),
                             visible_rows.len(),
                             if visible_rows.len() == 1 { "row" } else { "rows" }
@@ -720,6 +802,14 @@ impl TerminalSession {
                     Paragraph::new(Line::from(query_line)).style(search_style),
                     padded(search),
                 );
+                if let Some(counter) = &counter {
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(counter.clone(), warn()))
+                            .alignment(Alignment::Right)
+                            .style(search_style),
+                        padded(search),
+                    );
+                }
                 if visible_rows.is_empty() {
                     frame.render_widget(
                         Paragraph::new(if !report.rows.is_empty() && !shown.query.is_empty() {
@@ -738,6 +828,7 @@ impl TerminalSession {
                         repository_table(
                             visible_rows,
                             &names,
+                            &session.marks,
                             home,
                             table.width,
                             table_state.selected(),
@@ -749,6 +840,7 @@ impl TerminalSession {
                 frame.render_widget(Paragraph::new(status.clone()), padded(status_area));
                 frame.render_widget(Paragraph::new("").style(footer_style()), footer_area);
                 frame.render_widget(footer.style(footer_style()), padded(footer_area));
+                let close = first_key_hint(bindings, Mode::Inspection, Action::Cancel, "close");
                 match view {
                     View::Help => draw_popup(
                         frame,
@@ -761,12 +853,26 @@ impl TerminalSession {
                             .map(|key| format!("{key} close"))
                             .unwrap_or_default(),
                     ),
+                    View::Problems => draw_popup(
+                        frame,
+                        WIDE_POPUP,
+                        &format!("Session problems / {}", session.problems.entries().len()),
+                        problems_widget(session).scroll((shown.problems_scroll, 0)),
+                        format!(
+                            "{} scroll · {close}",
+                            rows_hint(bindings, Mode::Inspection, true)
+                        ),
+                    ),
                     View::Inspect => {
-                        let footer = format!(
-                            "{} scroll · {}",
-                            rows_hint(bindings, Mode::Inspection, true),
-                            first_key_hint(bindings, Mode::Inspection, Action::Cancel, "close")
-                        );
+                        let footer = [
+                            format!("{} scroll", rows_hint(bindings, Mode::Inspection, true)),
+                            first_key_hint(bindings, Mode::Inspection, Action::Copy, "copy a value…"),
+                            close,
+                        ]
+                        .into_iter()
+                        .filter(|hint| !hint.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" · ");
                         match shown.inspected_row(visible_rows) {
                             Some(row) => draw_popup(
                                 frame,
@@ -794,18 +900,28 @@ impl TerminalSession {
                             ),
                         }
                     }
-                    View::Menu => draw_popup(
-                        frame,
-                        POPUP,
-                        "Menu / actions",
-                        menu_widget(shown, session).scroll((shown.menu_scroll, 0)),
-                        format!(
-                            "{} select · {} · {}",
-                            rows_hint(bindings, Mode::Menu, true),
-                            first_key_hint(bindings, Mode::Menu, Action::Accept, "choose"),
-                            first_key_hint(bindings, Mode::Menu, Action::Cancel, "back")
-                        ),
-                    ),
+                    View::Menu => {
+                        let (title, lines) = menu.as_ref().expect("an open menu has lines");
+                        let line = lines
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, line)| line.entry.is_some())
+                            .nth(shown.menu.last().map_or(0, |(_, index)| *index))
+                            .map_or(0, |(index, _)| index);
+                        draw_popup(
+                            frame,
+                            POPUP,
+                            title,
+                            menu_widget(lines, line, popup_body_width(area, POPUP))
+                                .scroll((shown.menu_scroll, 0)),
+                            format!(
+                                "{} select · {} · {}",
+                                rows_hint(bindings, Mode::Menu, true),
+                                first_key_hint(bindings, Mode::Menu, Action::Accept, "choose"),
+                                first_key_hint(bindings, Mode::Menu, Action::Cancel, "back")
+                            ),
+                        )
+                    }
                     View::Normal | View::Search => {}
                 }
             })
@@ -822,6 +938,7 @@ enum View {
     Search,
     Inspect,
     Menu,
+    Problems,
     Help,
 }
 
@@ -832,7 +949,17 @@ impl View {
             Self::Search => "SEARCH",
             Self::Inspect => "INSPECT",
             Self::Menu => "MENU",
+            Self::Problems => "PROBLEMS",
             Self::Help => "HELP",
+        }
+    }
+
+    fn mode(self) -> Mode {
+        match self {
+            Self::Normal => Mode::Normal,
+            Self::Search => Mode::Search,
+            Self::Menu => Mode::Menu,
+            Self::Inspect | Self::Problems | Self::Help => Mode::Inspection,
         }
     }
 }
@@ -937,7 +1064,8 @@ fn first_key_hint(bindings: &Bindings, mode: Mode, action: Action, label: &str) 
         .unwrap_or_default()
 }
 
-fn footer_widget(bindings: &Bindings, view: View) -> Paragraph<'static> {
+/// One line of hints; the least needed drop out when the line is too narrow.
+fn footer_widget(bindings: &Bindings, view: View, width: u16) -> Paragraph<'static> {
     let first = |mode: Mode, action: Action| {
         bindings
             .keys(mode, action)
@@ -945,7 +1073,7 @@ fn footer_widget(bindings: &Bindings, view: View) -> Paragraph<'static> {
             .map(|key| (*key).to_owned())
             .unwrap_or_default()
     };
-    let items = match view {
+    let items: Vec<(String, &str)> = match view {
         View::Search => vec![
             (first(Mode::Search, Action::Accept), "accept"),
             (first(Mode::Search, Action::Cancel), "cancel"),
@@ -956,7 +1084,7 @@ fn footer_widget(bindings: &Bindings, view: View) -> Paragraph<'static> {
             (first(Mode::Menu, Action::Accept), "choose"),
             (first(Mode::Menu, Action::Cancel), "back"),
         ],
-        View::Help => vec![
+        View::Help | View::Problems => vec![
             (rows_hint(bindings, Mode::Inspection, false), "scroll"),
             (first(Mode::Inspection, Action::Cancel), "close"),
         ],
@@ -965,6 +1093,7 @@ fn footer_widget(bindings: &Bindings, view: View) -> Paragraph<'static> {
             items.extend(
                 [
                     (Action::Search, "search"),
+                    (Action::Mark, "mark"),
                     (Action::Inspect, "inspect"),
                     (Action::Refresh, "refresh"),
                     (Action::Menu, "menu"),
@@ -976,8 +1105,26 @@ fn footer_widget(bindings: &Bindings, view: View) -> Paragraph<'static> {
             items
         }
     };
+    let mut items = items
+        .into_iter()
+        .filter(|(keys, _)| !keys.is_empty())
+        .collect::<Vec<_>>();
+    let width_of = |items: &[(String, &str)]| {
+        items
+            .iter()
+            .map(|(keys, label)| Line::raw(format!("{keys} {label}")).width() + 2)
+            .sum::<usize>()
+            .saturating_sub(2)
+    };
+    // Least needed first; exit, help and menu routes always stay visible.
+    for dropped in ["mark", "rows", "refresh", "search", "inspect", "delete"] {
+        if width_of(&items) <= usize::from(width) {
+            break;
+        }
+        items.retain(|(_, label)| *label != dropped);
+    }
     let mut spans = Vec::new();
-    for (keys, label) in items.into_iter().filter(|(keys, _)| !keys.is_empty()) {
+    for (keys, label) in items {
         if !spans.is_empty() {
             spans.push(Span::raw("  "));
         }
@@ -987,13 +1134,14 @@ fn footer_widget(bindings: &Bindings, view: View) -> Paragraph<'static> {
         ));
         spans.push(Span::raw(format!(" {label}")));
     }
-    Paragraph::new(Line::from(spans)).wrap(Wrap { trim: true })
+    Paragraph::new(Line::from(spans))
 }
 
 fn status_lines(
     report: &InventoryReport,
     complete: bool,
     notice: Option<&str>,
+    message: Option<&str>,
     view: View,
     compact: bool,
     bindings: &Bindings,
@@ -1062,10 +1210,13 @@ fn status_lines(
             bindings.hint(Mode::Search, Action::Accept),
             bindings.hint(Mode::Search, Action::Cancel)
         ),
-        View::Menu | View::Help => state.to_owned(),
-        View::Normal | View::Inspect if compact && complete && !inspect.is_empty() => {
-            format!("Path and origin: {} inspects the full value", inspect[0])
-        }
+        _ if message.is_some() && complete => message.unwrap_or_default().to_owned(),
+        _ if message.is_some() => format!("{state} · {}", message.unwrap_or_default()),
+        View::Menu | View::Help | View::Problems => state.to_owned(),
+        View::Normal | View::Inspect if compact && complete && !inspect.is_empty() => format!(
+            "Path and origin: {} inspects, menu copies the full value",
+            inspect[0]
+        ),
         View::Normal | View::Inspect if refresh.is_empty() => state.to_owned(),
         View::Normal | View::Inspect => format!("{state} · {refresh}"),
     };
@@ -1142,6 +1293,7 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
         Mode::Normal => vec![
             (pair(Down, Up), "previous / next row"),
             (single(Search), "live fuzzy search"),
+            (single(Mark), "toggle mark"),
             (single(ClearSearch), "clear filter"),
             (single(Inspect), "Inspect repository"),
             (single(Refresh), "refresh local/config state"),
@@ -1163,7 +1315,15 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
             (pair(Accept, Cancel).replace('/', " / "), "keep the filter"),
             (help_quit(), "help / quit"),
         ],
-        Mode::Inspection | Mode::Input | Mode::Confirmation => vec![
+        Mode::Inspection => vec![
+            (pair(Down, Up), "scroll"),
+            (pair(PageUp, PageDown), "page up / down"),
+            (single(Copy), "copy a value…"),
+            (single(Accept), "close"),
+            (single(Cancel), "close"),
+            (help_quit(), "help / quit"),
+        ],
+        Mode::Input | Mode::Confirmation => vec![
             (pair(Down, Up), "scroll"),
             (pair(PageUp, PageDown), "page up / down"),
             (single(Accept), "close"),
@@ -1475,40 +1635,436 @@ fn inspection_widget(
     Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 
-fn menu_widget(selection: &Selection, session: &InventorySession) -> Paragraph<'static> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Menu {
+    Root,
+    Repository,
+    Copy,
+    Selection,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Entry {
+    Open(Menu),
+    Inspect,
+    OpenOrigin,
+    Refresh,
+    Problems,
+    Help,
+    Quit,
+    /// Reports the message instead of acting.
+    Unavailable(&'static str),
+    Copy(CopyField),
+    ToggleMark,
+    MarkVisible,
+    ClearMarks,
+}
+
+/// One popup line: a group heading or spacer without an entry, or an entry with its hint.
+struct MenuLine {
+    entry: Option<Entry>,
+    label: String,
+    hint: String,
+    enabled: bool,
+}
+
+fn menu_title(menu: Menu, name: &str, marked: usize) -> String {
+    match menu {
+        Menu::Root => "All actions".to_owned(),
+        Menu::Repository => format!("Repository actions / {name}"),
+        Menu::Copy => format!("Copy value / {name}"),
+        Menu::Selection => format!("Selection / {marked} marked"),
+    }
+}
+
+/// The menu's own key for an action, else the normal-mode shortcut that reaches it.
+fn menu_key(bindings: &Bindings, action: Action) -> String {
+    let menu = bindings.keys(Mode::Menu, action);
+    let normal = if action.available(Mode::Normal) {
+        bindings.keys(Mode::Normal, action)
+    } else {
+        Vec::new()
+    };
+    menu.first()
+        .or(normal.first())
+        .map(|key| (*key).to_owned())
+        .unwrap_or_default()
+}
+
+fn menu_lines(
+    menu: Menu,
+    row: Option<&model::InventoryRow>,
+    name: &str,
+    session: &InventorySession,
+    visible: &[&model::InventoryRow],
+) -> Vec<MenuLine> {
+    let heading = |label: String| MenuLine {
+        entry: None,
+        label,
+        hint: String::new(),
+        enabled: false,
+    };
+    let item = |entry, label: &str, hint: String, enabled| MenuLine {
+        entry: Some(entry),
+        label: label.to_owned(),
+        hint,
+        enabled,
+    };
+    let on_row = |entry, label: &str, hint: String| match row {
+        Some(_) => item(entry, label, hint, true),
+        None => item(entry, label, "no row".to_owned(), false),
+    };
+    let key = |action| menu_key(&session.bindings, action);
+    match menu {
+        Menu::Root => {
+            let problems = session.problems.entries().len();
+            let mark = key(Action::Mark);
+            vec![
+                heading(format!(
+                    "This row · {}",
+                    if row.is_some() { name } else { "—" }
+                )),
+                on_row(
+                    Entry::Open(Menu::Repository),
+                    "Repository actions…",
+                    "clone, register, unregister, remove".to_owned(),
+                ),
+                on_row(Entry::Inspect, "Inspect repository", key(Action::Inspect)),
+                on_row(Entry::Open(Menu::Copy), "Copy value…", String::new()),
+                on_row(Entry::OpenOrigin, "Open origin in browser", String::new()),
+                on_row(
+                    Entry::Unavailable("Worktrees are unavailable in this build"),
+                    "Worktrees…",
+                    String::new(),
+                ),
+                heading(String::new()),
+                heading(format!("Selection · {} marked", session.marks.len())),
+                item(
+                    Entry::Open(Menu::Selection),
+                    "Selection…",
+                    if mark.is_empty() {
+                        mark
+                    } else {
+                        format!("{mark} marks the row")
+                    },
+                    true,
+                ),
+                heading(String::new()),
+                heading("Session".to_owned()),
+                item(
+                    Entry::Unavailable("Add repository is unavailable in this build"),
+                    "Add repository",
+                    String::new(),
+                    true,
+                ),
+                item(
+                    Entry::Unavailable("Remote discovery is unavailable in this build"),
+                    "Remote discovery…",
+                    "off".to_owned(),
+                    true,
+                ),
+                item(
+                    Entry::Refresh,
+                    "Refresh local / config",
+                    key(Action::Refresh),
+                    true,
+                ),
+                item(
+                    Entry::Problems,
+                    "Session problems…",
+                    match problems {
+                        0 => "none".to_owned(),
+                        1 => "1 problem".to_owned(),
+                        count => format!("{count} problems"),
+                    },
+                    problems > 0,
+                ),
+                item(
+                    Entry::Unavailable("No batch is active"),
+                    "Cancel active batch",
+                    "no batch".to_owned(),
+                    false,
+                ),
+                item(Entry::Help, "Help / keybindings", key(Action::Help), true),
+                item(Entry::Quit, "Quit", key(Action::Quit), true),
+            ]
+        }
+        Menu::Repository => [
+            ("Register", "Register is unavailable in this build"),
+            ("Unregister", "Unregister is unavailable in this build"),
+            ("Clone only", "Clone only is unavailable in this build"),
+            (
+                "Clone + register",
+                "Clone + register is unavailable in this build",
+            ),
+            ("Remove only", "Remove only is unavailable in this build"),
+            (
+                "Remove + unregister",
+                "Remove + unregister is unavailable in this build",
+            ),
+        ]
+        .into_iter()
+        .map(|(label, message)| on_row(Entry::Unavailable(message), label, String::new()))
+        .collect(),
+        Menu::Copy => CopyField::ALL
+            .into_iter()
+            .map(|field| {
+                let entry = Entry::Copy(field);
+                match row.map(|row| model::copy_value(row, field)) {
+                    Some(Ok(value)) => {
+                        let hint = match field {
+                            CopyField::Path => home_relative(Path::new(&value), &session.home),
+                            _ => escape(value.to_string_lossy()),
+                        };
+                        item(entry, field.label(), hint, true)
+                    }
+                    Some(Err(reason)) => item(entry, field.label(), reason.to_owned(), false),
+                    None => on_row(entry, field.label(), String::new()),
+                }
+            })
+            .collect(),
+        Menu::Selection => {
+            let marked = session.marks.len();
+            let markable = row.is_some_and(|row| row.markable);
+            vec![
+                item(
+                    Entry::ToggleMark,
+                    if row.is_some_and(|row| session.marks.contains(&row.key)) {
+                        "Unmark this row"
+                    } else {
+                        "Mark this row"
+                    },
+                    match row {
+                        Some(_) if markable => key(Action::Mark),
+                        Some(_) => "patterns are inspect-only".to_owned(),
+                        None => "no row".to_owned(),
+                    },
+                    markable,
+                ),
+                item(
+                    Entry::MarkVisible,
+                    "Mark visible concrete rows",
+                    format!(
+                        "{} visible",
+                        visible.iter().filter(|row| row.markable).count()
+                    ),
+                    true,
+                ),
+                item(
+                    Entry::ClearMarks,
+                    "Clear all marks",
+                    if marked == 0 {
+                        "none marked".to_owned()
+                    } else {
+                        format!("{marked} marked")
+                    },
+                    marked > 0,
+                ),
+            ]
+        }
+    }
+}
+
+fn menu_widget(lines: &[MenuLine], selected: usize, width: u16) -> Paragraph<'static> {
+    let width = usize::from(width);
     Paragraph::new(
-        root_menu_actions()
+        lines
             .iter()
             .enumerate()
-            .map(|(index, action)| {
-                let style = if index == selection.menu_index {
-                    Style::default().add_modifier(Modifier::REVERSED)
+            .map(|(index, line)| {
+                if line.entry.is_none() {
+                    return Line::styled(line.label.clone(), dim());
+                }
+                let label = Line::raw(line.label.clone()).width();
+                let hint = abbreviate(&line.hint, width.saturating_sub(label + 2), false);
+                let gap = width
+                    .saturating_sub(label + Line::raw(hint.as_str()).width())
+                    .max(1);
+                let (label_style, hint_style) = if index == selected {
+                    let reversed = Style::default().add_modifier(Modifier::REVERSED);
+                    (reversed, reversed)
+                } else if line.enabled {
+                    (Style::default(), dim())
                 } else {
-                    Style::default()
+                    (dim(), dim())
                 };
-                let hint = session.bindings.hint(Mode::Menu, *action);
-                Line::from(Span::styled(
-                    if hint.is_empty() {
-                        action.name().to_owned()
-                    } else {
-                        format!("{hint} {}", action.name())
-                    },
-                    style,
-                ))
+                Line::from(vec![
+                    Span::styled(format!("{}{}", line.label, " ".repeat(gap)), label_style),
+                    Span::styled(hint, hint_style),
+                ])
             })
             .collect::<Vec<_>>(),
     )
 }
 
-fn root_menu_actions() -> &'static [Action] {
-    &[
-        Action::Inspect,
-        Action::Search,
-        Action::ClearSearch,
-        Action::Refresh,
-        Action::Help,
-        Action::Quit,
-    ]
+/// Runs the selected menu entry. Returns the exit code when the entry quits.
+fn activate_menu_entry(
+    session: &mut InventorySession,
+    selection: &mut Selection,
+    report: &InventoryReport,
+    visible_rows: &[&model::InventoryRow],
+) -> Option<i32> {
+    let (menu, index) = *selection.menu.last()?;
+    let names = short_names(&report.rows);
+    let row = selection.menu_target_row(&report.rows);
+    let name = row.map(|row| names[&row.key].clone()).unwrap_or_default();
+    let line = menu_lines(menu, row, &name, session, visible_rows)
+        .into_iter()
+        .filter(|line| line.entry.is_some())
+        .nth(index)?;
+    let entry = line.entry.filter(|_| line.enabled)?;
+    match entry {
+        Entry::Open(menu) => {
+            selection.menu.push((menu, 0));
+            selection.menu_scroll = 0;
+            return None;
+        }
+        Entry::Help => {
+            selection.help_mode = Mode::Menu;
+            selection.help = true;
+            selection.help_scroll = 0;
+            return None;
+        }
+        Entry::Quit => return Some(quit(session)),
+        _ => selection.menu.clear(),
+    }
+    session.message = match (entry, row) {
+        (Entry::Inspect, _) => {
+            selection.open_inspection(visible_rows);
+            None
+        }
+        (Entry::Refresh, _) => {
+            refresh(session);
+            None
+        }
+        (Entry::Problems, _) => {
+            selection.problems = true;
+            selection.problems_scroll = 0;
+            None
+        }
+        (Entry::Unavailable(message), _) => Some(message.to_owned()),
+        (Entry::OpenOrigin, Some(row)) => Some(
+            match model::web_url(row, &session.config)
+                .map_err(str::to_owned)
+                .and_then(|url| NativeDesktop.open(&url).map(|()| url))
+            {
+                Ok(url) => format!("Opening {} in the browser", escape(url)),
+                Err(reason) => format!("Open origin unavailable: {}", escape(reason)),
+            },
+        ),
+        (Entry::Copy(field), Some(row)) => Some(
+            match model::copy_value(row, field)
+                .map_err(str::to_owned)
+                .and_then(|value| NativeDesktop.copy(&value))
+            {
+                Ok(()) => format!("Copied {} of {name}", field.label().to_lowercase()),
+                Err(reason) => format!("Copy unavailable: {}", escape(reason)),
+            },
+        ),
+        (Entry::ToggleMark, Some(row)) => Some(if session.marks.toggle(row) {
+            format!("Marked {name}")
+        } else {
+            format!("Unmarked {name}")
+        }),
+        (Entry::MarkVisible, _) => {
+            session.marks.mark_all(visible_rows.iter().copied());
+            Some(format!(
+                "Marked visible concrete rows · {} marked",
+                session.marks.len()
+            ))
+        }
+        (Entry::ClearMarks, _) => Some(match session.marks.clear() {
+            1 => "Cleared 1 mark".to_owned(),
+            count => format!("Cleared {count} marks"),
+        }),
+        _ => None,
+    };
+    None
+}
+
+fn toggle_mark(
+    session: &mut InventorySession,
+    row: &model::InventoryRow,
+    rows: &[model::InventoryRow],
+) {
+    if row.markable {
+        session.marks.toggle(row);
+    } else {
+        session.message = Some(format!(
+            "{} cannot be marked: patterns are inspect-only",
+            short_names(rows)[&row.key]
+        ));
+    }
+}
+
+fn refresh(session: &mut InventorySession) {
+    if let Err(error) = session.refresh() {
+        session.problems.record(
+            "refresh",
+            format!(
+                "{} · previous configuration kept",
+                escape(model::problem_reason(&error))
+            ),
+        );
+        session.notice = Some(format!("refresh failed: {}", escape(error)));
+    }
+}
+
+fn quit(session: &mut InventorySession) -> i32 {
+    session.worker.cancel_and_join();
+    session.receive_events();
+    session.problems.exit_code()
+}
+
+fn problems_widget(session: &InventorySession) -> Paragraph<'static> {
+    let line =
+        |time: &str, source: &str, problem: &str| format!("{time:<10} {source:<15} {problem}");
+    let mut lines = vec![Line::styled(line("time", "source", "problem"), dim())];
+    lines.extend(
+        session
+            .problems
+            .entries()
+            .iter()
+            .map(|problem| Line::raw(line(&clock(problem.at), &problem.source, &problem.message))),
+    );
+    lines.extend([
+        Line::default(),
+        Line::styled(
+            "Quit returns 1 because problems occurred in this session. A successful retry stays listed.",
+            dim(),
+        ),
+        Line::default(),
+        Line::styled(
+            "Declined confirmations, cancellations and missing optional tools are not problems.",
+            dim(),
+        ),
+    ]);
+    Paragraph::new(lines).wrap(Wrap { trim: false })
+}
+
+/// Local wall-clock time of day, or UTC where the platform offers no local time zone.
+fn clock(at: SystemTime) -> String {
+    let seconds = at
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    #[cfg(unix)]
+    {
+        let time = seconds as libc::time_t;
+        // SAFETY: `localtime_r` writes only to the zeroed struct it is given.
+        let mut local: libc::tm = unsafe { std::mem::zeroed() };
+        if !unsafe { libc::localtime_r(&time, &mut local) }.is_null() {
+            return format!(
+                "{:02}:{:02}:{:02}",
+                local.tm_hour, local.tm_min, local.tm_sec
+            );
+        }
+    }
+    format!(
+        "{:02}:{:02}:{:02}",
+        seconds / 3600 % 24,
+        seconds / 60 % 60,
+        seconds % 60
+    )
 }
 
 fn registration_style(state: &model::RegistrationState) -> Style {
@@ -1562,9 +2118,13 @@ struct Selection {
     table: TableState,
     search: bool,
     query: String,
-    menu: bool,
-    menu_index: usize,
+    /// Open menus, innermost last, each with its entry cursor.
+    menu: Vec<(Menu, usize)>,
+    /// The row the open menu acts on, fixed when the menu opens.
+    menu_target: Option<model::RowKey>,
     menu_scroll: u16,
+    problems: bool,
+    problems_scroll: u16,
     help: bool,
     help_mode: Mode,
     help_scroll: u16,
@@ -1647,14 +2207,53 @@ impl Selection {
         self.inspection_scroll = 0;
     }
 
-    fn move_menu_by(&mut self, delta: isize) {
-        let last = root_menu_actions().len().saturating_sub(1);
-        self.menu_index = self.menu_index.saturating_add_signed(delta).min(last);
+    fn view(&self) -> View {
+        if self.help {
+            View::Help
+        } else if !self.menu.is_empty() {
+            View::Menu
+        } else if self.problems {
+            View::Problems
+        } else if self.inspection {
+            View::Inspect
+        } else if self.search {
+            View::Search
+        } else {
+            View::Normal
+        }
     }
 
-    fn clamp_menu_scroll(&mut self, limit: u16, viewport: u16) {
+    fn open_menu(&mut self, menu: Menu, rows: &[&model::InventoryRow]) {
+        self.menu = vec![(menu, 0)];
+        self.menu_target = self.selected_row(rows).map(|row| row.key.clone());
+        self.menu_scroll = 0;
+    }
+
+    fn menu_target_row<'a>(
+        &self,
+        rows: &'a [model::InventoryRow],
+    ) -> Option<&'a model::InventoryRow> {
+        let key = self.menu_target.as_ref()?;
+        rows.iter().find(|row| &row.key == key)
+    }
+
+    /// Moves the cursor; drawing clamps it to the entries of the open menu.
+    fn move_menu_by(&mut self, delta: isize) {
+        if let Some((_, index)) = self.menu.last_mut() {
+            *index = index.saturating_add_signed(delta);
+        }
+    }
+
+    fn clamp_menu_index(&mut self, entries: usize) -> usize {
+        let Some((_, index)) = self.menu.last_mut() else {
+            return 0;
+        };
+        *index = (*index).min(entries.saturating_sub(1));
+        *index
+    }
+
+    fn clamp_menu_scroll(&mut self, limit: u16, viewport: u16, selected: u16) {
         self.menu_scroll = self.menu_scroll.min(limit);
-        let selected = self.menu_index.min(u16::MAX as usize) as u16;
         if selected < self.menu_scroll {
             self.menu_scroll = selected;
         } else if selected >= self.menu_scroll.saturating_add(viewport) {
@@ -1764,6 +2363,7 @@ fn fuzzy_subsequence(value: &str, query: &str) -> bool {
 fn repository_table(
     rows: &[&model::InventoryRow],
     names: &HashMap<model::RowKey, String>,
+    marks: &Marks,
     home: &Path,
     width: u16,
     selected: Option<usize>,
@@ -1895,10 +2495,13 @@ fn repository_table(
                         } else {
                             style
                         };
-                        Cell::from(Span::styled(
-                            format!(" {}{text}", " ".repeat(slot(column))),
-                            style,
-                        ))
+                        let mark = match column {
+                            0 if !rows[index].markable => "    ",
+                            0 if marks.contains(&rows[index].key) => "[x] ",
+                            0 => "[ ] ",
+                            _ => "",
+                        };
+                        Cell::from(Span::styled(format!(" {mark}{text}"), style))
                     })
                     .collect::<Vec<_>>(),
             )
@@ -2063,9 +2666,11 @@ mod tests {
             worker: ScanHandle::for_test(receiver),
             generation: 1,
             complete: false,
-            had_failure: false,
+            problems: Default::default(),
+            marks: Default::default(),
             bindings: Bindings::load(Default::default()).expect("default bindings are valid"),
             notice: None,
+            message: None,
             cached_report: None,
         };
 
@@ -2084,6 +2689,7 @@ mod tests {
             registration: RegistrationState::Pattern,
             checkout: CheckoutState::Pattern,
             origin: key.to_owned(),
+            remote: None,
             branch: ObservationField::NotApplicable,
             changes: ObservationField::NotApplicable,
             configured_destination: None,
@@ -2115,6 +2721,7 @@ mod tests {
             registration: RegistrationState::Pattern,
             checkout: CheckoutState::Pattern,
             origin: name.to_owned(),
+            remote: None,
             branch: ObservationField::NotApplicable,
             changes: ObservationField::NotApplicable,
             configured_destination: None,
@@ -2152,6 +2759,7 @@ mod tests {
             registration: RegistrationState::Explicit,
             checkout,
             origin: String::new(),
+            remote: None,
             branch: ObservationField::NotApplicable,
             changes: ObservationField::NotApplicable,
             configured_destination: None,

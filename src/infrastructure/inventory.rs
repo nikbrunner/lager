@@ -128,7 +128,10 @@ impl TargetSnapshot {
 }
 
 pub enum ScanEvent {
-    Failure,
+    Failure {
+        path: PathBuf,
+        message: String,
+    },
     Discovered {
         path: PathBuf,
         context: ScanContext,
@@ -243,8 +246,11 @@ pub fn start_local_scan_with_context(context: ScanContext) -> ScanHandle {
                     if cancel.load(Ordering::Relaxed) {
                         break;
                     }
-                    let Some(checkout) = inspect_checkout(&path.path, &cancel, || {
-                        let _ = sender.send(ScanEvent::Failure);
+                    let Some(checkout) = inspect_checkout(&path.path, &cancel, |message| {
+                        let _ = sender.send(ScanEvent::Failure {
+                            path: path.path.clone(),
+                            message,
+                        });
                     }) else {
                         continue;
                     };
@@ -309,7 +315,7 @@ pub fn scan_local_repositories(root: &Path) -> LocalScan {
     let handle = start_local_scan(root.to_path_buf());
     while let Ok(event) = handle.receiver.recv() {
         match event {
-            ScanEvent::Failure => {}
+            ScanEvent::Failure { .. } => {}
             ScanEvent::Discovered { path, .. } => scan.pending_paths.push(path),
             ScanEvent::Checkout { checkout, .. } => scan.checkouts.push(checkout),
             ScanEvent::Diagnostic { diagnostic, .. } => {
@@ -417,7 +423,7 @@ fn discover_checkout_paths(
 fn inspect_checkout(
     path: &Path,
     cancel: &AtomicBool,
-    mut failed: impl FnMut(),
+    mut failed: impl FnMut(String),
 ) -> Option<LocalCheckout> {
     let origin = match git_output(path, ["remote", "get-url", "origin"], cancel) {
         Ok(origin) => {
@@ -435,13 +441,13 @@ fn inspect_checkout(
                 }
                 Err(ProbeError::Cancelled) => return None,
                 Ok(_) | Err(_) => {
-                    failed();
+                    failed(format!("origin: {error}"));
                     OriginFact::Error(error.to_string())
                 }
             }
         }
         Err(error) => {
-            failed();
+            failed(format!("origin: {error}"));
             OriginFact::Error(error.to_string())
         }
     };
@@ -457,7 +463,7 @@ fn inspect_checkout(
             Ok(branch) => ObservationField::Known(branch.trim().to_owned()),
             Err(ProbeError::Cancelled) => return None,
             Err(error) => {
-                failed();
+                failed(format!("branch: {error}"));
                 ObservationField::Error(error.to_string())
             }
         },
@@ -470,7 +476,7 @@ fn inspect_checkout(
             Ok(status) => ObservationField::Dirty(format!("{} modified", status.lines().count())),
             Err(ProbeError::Cancelled) => return None,
             Err(error) => {
-                failed();
+                failed(format!("status: {error}"));
                 ObservationField::Error(error.to_string())
             }
         },

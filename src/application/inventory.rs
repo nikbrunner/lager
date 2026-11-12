@@ -1,5 +1,7 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::domain::config::{Config, RepositoryDeclaration};
 use crate::domain::repository::RepositoryRef;
@@ -21,6 +23,8 @@ pub struct InventoryRow {
     pub registration: RegistrationState,
     pub checkout: CheckoutState,
     pub origin: String,
+    /// The original origin URL, when the row has one; `origin` is display text.
+    pub remote: Option<String>,
     pub branch: ObservationField,
     pub changes: ObservationField,
     pub configured_destination: Option<PathBuf>,
@@ -91,6 +95,15 @@ impl OriginFact {
             Self::Absent => "No origin".to_owned(),
             Self::Supported { original, .. } | Self::Unsupported(original) => original.clone(),
             Self::Error(error) => format!("origin error: {error}"),
+        }
+    }
+
+    fn original(&self) -> Option<String> {
+        match self {
+            Self::Supported { original, .. } | Self::Unsupported(original) => {
+                Some(original.clone())
+            }
+            Self::Absent | Self::Error(_) => None,
         }
     }
 
@@ -202,6 +215,7 @@ pub fn build_inventory(
                 registration: RegistrationState::Explicit,
                 checkout: filesystem.destination_state(&declaration.destination),
                 origin: declaration.reference.clone_url.clone(),
+                remote: Some(declaration.reference.clone_url.clone()),
                 branch: if scan.complete {
                     ObservationField::NotApplicable
                 } else {
@@ -233,6 +247,7 @@ pub fn build_inventory(
                 registration: RegistrationState::Pattern,
                 checkout: CheckoutState::Pattern,
                 origin: wildcard.reference.clone_url.clone(),
+                remote: None,
                 branch: ObservationField::NotApplicable,
                 changes: ObservationField::NotApplicable,
                 configured_destination: Some(wildcard.destination.clone()),
@@ -267,6 +282,7 @@ pub fn build_inventory(
                 registration: RegistrationState::Unregistered,
                 checkout: CheckoutState::Unknown,
                 origin: "pending".to_owned(),
+                remote: None,
                 branch: ObservationField::Pending,
                 changes: ObservationField::Pending,
                 configured_destination: None,
@@ -289,6 +305,7 @@ pub fn build_inventory(
                 registration: RegistrationState::Unregistered,
                 checkout: CheckoutState::Unknown,
                 origin: "stale observation".to_owned(),
+                remote: None,
                 branch: ObservationField::Stale("target changed during observation".to_owned()),
                 changes: ObservationField::Stale("target changed during observation".to_owned()),
                 configured_destination: None,
@@ -315,6 +332,7 @@ pub fn build_inventory(
                         row.checkout = CheckoutState::Cloned;
                     }
                     row.origin = checkout.origin.display();
+                    row.remote = checkout.origin.original();
                     row.branch = checkout.branch;
                     row.changes = checkout.changes;
                     row.observed_path = Some(observed);
@@ -376,6 +394,7 @@ pub fn build_inventory(
                         CheckoutState::Cloned
                     },
                     origin: checkout.origin.display(),
+                    remote: checkout.origin.original(),
                     branch: checkout.branch,
                     changes: checkout.changes,
                     configured_destination,
@@ -406,6 +425,7 @@ pub fn build_inventory(
                         CheckoutState::Cloned
                     },
                     origin: checkout.origin.display(),
+                    remote: checkout.origin.original(),
                     branch: checkout.branch,
                     changes: checkout.changes,
                     configured_destination: None,
@@ -574,6 +594,280 @@ impl ObservationField {
     }
 }
 
+/// Session marks, kept by exact target. Pattern rows are never marked.
+#[derive(Debug, Clone, Default)]
+pub struct Marks(BTreeSet<RowKey>);
+
+impl Marks {
+    pub fn contains(&self, key: &RowKey) -> bool {
+        self.0.contains(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Returns whether the row is marked afterwards.
+    pub fn toggle(&mut self, row: &InventoryRow) -> bool {
+        row.markable && !self.0.remove(&row.key) && self.0.insert(row.key.clone())
+    }
+
+    pub fn mark_all<'a>(&mut self, rows: impl IntoIterator<Item = &'a InventoryRow>) {
+        self.0.extend(
+            rows.into_iter()
+                .filter(|row| row.markable)
+                .map(|row| row.key.clone()),
+        );
+    }
+
+    /// Returns how many marks were cleared.
+    pub fn clear(&mut self) -> usize {
+        let cleared = self.0.len();
+        self.0.clear();
+        cleared
+    }
+
+    pub fn hidden(&self, visible: &[&InventoryRow]) -> usize {
+        if self.0.is_empty() {
+            return 0;
+        }
+        let shown: HashSet<&RowKey> = visible.iter().map(|row| &row.key).collect();
+        self.0.iter().filter(|key| !shown.contains(key)).count()
+    }
+
+    /// Moves each mark to the row that now shows its exact target. A mark whose target is gone
+    /// is dropped only from a complete scan, since an incomplete one has not seen every row yet.
+    /// Returns how many marks were dropped.
+    /// A mark moves only when exactly one row shows its target.
+    pub fn reconcile(&mut self, rows: &[InventoryRow], complete: bool) -> usize {
+        if self.0.is_empty() {
+            return 0;
+        }
+        let present: HashSet<&RowKey> = rows
+            .iter()
+            .filter(|row| row.markable)
+            .map(|row| &row.key)
+            .collect();
+        let missing: Vec<RowKey> = self
+            .0
+            .iter()
+            .filter(|key| !present.contains(key))
+            .cloned()
+            .collect();
+        let mut dropped = 0;
+        for key in missing {
+            let mut targets = rows
+                .iter()
+                .filter(|row| row.markable && same_target(&key, row));
+            match (targets.next(), targets.next()) {
+                (Some(row), None) => {
+                    self.0.remove(&key);
+                    self.0.insert(row.key.clone());
+                }
+                _ if complete => {
+                    self.0.remove(&key);
+                    dropped += 1;
+                }
+                _ => {}
+            }
+        }
+        dropped
+    }
+}
+
+/// A path mark targets the checkout observed at that path, never a declaration that merely
+/// names it; a declaration and a checkout of the same identity at the same path are one target.
+fn same_target(marked: &RowKey, row: &InventoryRow) -> bool {
+    match (marked, &row.key) {
+        (RowKey::Path(path), _) => row.observed_path.as_ref() == Some(path),
+        (
+            RowKey::Declaration {
+                identity,
+                destination: path,
+            }
+            | RowKey::Checkout { identity, path },
+            RowKey::Declaration {
+                identity: other,
+                destination: other_path,
+            }
+            | RowKey::Checkout {
+                identity: other,
+                path: other_path,
+            },
+        ) => identity == other && path == other_path,
+        _ => false,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyField {
+    Path,
+    Origin,
+    Identity,
+    Branch,
+}
+
+impl CopyField {
+    pub const ALL: [Self; 4] = [Self::Path, Self::Origin, Self::Identity, Self::Branch];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Path => "Path",
+            Self::Origin => "Origin",
+            Self::Identity => "Identity",
+            Self::Branch => "Branch",
+        }
+    }
+}
+
+/// The original full value a Copy choice puts on the clipboard, or why the row has none.
+pub fn copy_value(row: &InventoryRow, field: CopyField) -> Result<OsString, &'static str> {
+    match field {
+        CopyField::Path if matches!(row.key, RowKey::Pattern(_)) => {
+            Err("patterns have no single path")
+        }
+        CopyField::Path => row
+            .observed_path
+            .as_ref()
+            .or(row.configured_destination.as_ref())
+            .map(|path| path.clone().into_os_string())
+            .ok_or("no path known"),
+        CopyField::Origin => row
+            .remote
+            .clone()
+            .map(OsString::from)
+            .ok_or("no origin observed"),
+        CopyField::Identity => match &row.key {
+            RowKey::Declaration { identity, .. }
+            | RowKey::Checkout { identity, .. }
+            | RowKey::Pattern(identity) => Ok(identity.into()),
+            RowKey::Path(_) => Err("identity is the exact path"),
+        },
+        CopyField::Branch => match &row.branch {
+            ObservationField::Known(branch) if branch.starts_with("detached HEAD ") => {
+                Err("detached HEAD")
+            }
+            ObservationField::Known(branch) => Ok(branch.into()),
+            ObservationField::Pending => Err("not observed yet"),
+            ObservationField::Stale(_) => Err("stale until observed again"),
+            ObservationField::Error(_) => Err("observation failed"),
+            _ => Err("no checkout"),
+        },
+    }
+}
+
+/// The repository web address Open origin may hand to the platform opener. It is always HTTPS
+/// and built from the normalized identity, never from the origin's own scheme.
+pub fn web_url(row: &InventoryRow, config: &Config) -> Result<String, &'static str> {
+    let identity = match &row.key {
+        RowKey::Declaration { identity, .. } | RowKey::Checkout { identity, .. } => identity,
+        RowKey::Pattern(_) => return Err("patterns have no single repository"),
+        RowKey::Path(_) => return Err("no supported origin"),
+    };
+    let unsupported = "no supported origin";
+    if identity.starts_with("file://") {
+        return Err(unsupported);
+    }
+    if !identity
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "._-/~".contains(character))
+    {
+        return Err("the repository identity has characters a web address cannot carry safely");
+    }
+    let (host, path) = identity.split_once('/').ok_or(unsupported)?;
+    let data_center = config
+        .providers
+        .get(host)
+        .is_some_and(|provider| provider.preset == "bitbucket-data-center");
+    let path = match path.split_once('/') {
+        Some((user, name)) if data_center && !name.contains('/') => match user.strip_prefix('~') {
+            Some(user) => format!("users/{user}/repos/{name}/browse"),
+            None => format!("projects/{user}/repos/{name}/browse"),
+        },
+        _ => path.to_owned(),
+    };
+    let url = url::Url::parse(&format!("https://{host}/{path}")).map_err(|_| unsupported)?;
+    (url.scheme() == "https"
+        && url.host_str() == Some(host)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path().len() > 1)
+        .then(|| url.to_string())
+        .ok_or(unsupported)
+}
+
+/// The lowercase reason at the end of an error chain, as the session problems list words it:
+/// `unreadable path: Permission denied (os error 13)` reads `permission denied`.
+pub fn problem_reason(error: &str) -> String {
+    let mut reason = error.trim();
+    loop {
+        let unwrapped = [
+            "unreadable path: ",
+            "unreadable directory entry: ",
+            "could not inspect bare repository: ",
+            "fatal: ",
+            "error: ",
+        ]
+        .iter()
+        .find_map(|prefix| reason.strip_prefix(prefix))
+        .or_else(|| {
+            reason
+                .strip_prefix("git command failed (exit ")
+                .and_then(|rest| rest.split_once("): "))
+                .map(|(_, rest)| rest)
+        });
+        match unwrapped {
+            Some(rest) => reason = rest.trim(),
+            None => break,
+        }
+    }
+    let reason = match reason.rfind(" (os error ") {
+        Some(index) if reason.ends_with(')') => &reason[..index],
+        _ => reason,
+    };
+    let mut characters = reason.chars();
+    characters
+        .next()
+        .map(|first| first.to_lowercase().chain(characters).collect())
+        .unwrap_or_else(|| error.to_owned())
+}
+
+/// A failure that makes the inventory session exit 1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionProblem {
+    pub at: SystemTime,
+    pub source: String,
+    pub message: String,
+}
+
+/// Every session failure in order. A later successful retry never removes one.
+#[derive(Debug, Clone, Default)]
+pub struct SessionProblems(Vec<SessionProblem>);
+
+impl SessionProblems {
+    pub fn record(&mut self, source: impl Into<String>, message: impl Into<String>) {
+        self.0.push(SessionProblem {
+            at: SystemTime::now(),
+            source: source.into(),
+            message: message.into(),
+        });
+    }
+
+    pub fn entries(&self) -> &[SessionProblem] {
+        &self.0
+    }
+
+    pub fn exit_code(&self) -> i32 {
+        i32::from(!self.0.is_empty())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -727,5 +1021,207 @@ mod tests {
                     .any(|warning| warning == "covered by github.com/org/team/*")
             );
         }
+    }
+
+    fn row(key: RowKey) -> InventoryRow {
+        InventoryRow {
+            markable: !matches!(key, RowKey::Pattern(_)),
+            key,
+            repository: String::new(),
+            path: String::new(),
+            registration: RegistrationState::Unregistered,
+            checkout: CheckoutState::Cloned,
+            origin: String::new(),
+            remote: None,
+            branch: ObservationField::NotApplicable,
+            changes: ObservationField::NotApplicable,
+            configured_destination: None,
+            observed_path: None,
+            declaration: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    fn checkout_key(identity: &str, path: &str) -> RowKey {
+        RowKey::Checkout {
+            identity: identity.to_owned(),
+            path: path.into(),
+        }
+    }
+
+    #[test]
+    fn web_url_is_https_from_the_identity_and_never_the_origin_scheme() {
+        let mut providers = config(&[]).providers;
+        providers.insert(
+            "git.example.com".to_owned(),
+            crate::domain::config::ProviderConfig {
+                preset: "bitbucket-data-center".to_owned(),
+                ..Default::default()
+            },
+        );
+        let config = Config {
+            providers,
+            ..config(&[])
+        };
+        for (key, expected) in [
+            (
+                checkout_key("github.com/org/alpha", "/r/alpha"),
+                Ok("https://github.com/org/alpha"),
+            ),
+            (
+                RowKey::Declaration {
+                    identity: "gitlab.com/group/sub/beta".to_owned(),
+                    destination: "/r/beta".into(),
+                },
+                Ok("https://gitlab.com/group/sub/beta"),
+            ),
+            (
+                checkout_key("git.example.com/PROJ/repo", "/r/repo"),
+                Ok("https://git.example.com/projects/PROJ/repos/repo/browse"),
+            ),
+            (
+                checkout_key("git.example.com/~nik/repo", "/r/repo"),
+                Ok("https://git.example.com/users/nik/repos/repo/browse"),
+            ),
+            (
+                checkout_key("file:///srv/git/alpha.git", "/r/alpha"),
+                Err("no supported origin"),
+            ),
+            (
+                checkout_key("user@evil.example/org/x", "/r/x"),
+                Err("the repository identity has characters a web address cannot carry safely"),
+            ),
+            (
+                checkout_key("github.com/org/x?y#z", "/r/x"),
+                Err("the repository identity has characters a web address cannot carry safely"),
+            ),
+            (RowKey::Path("/r/x".into()), Err("no supported origin")),
+            (
+                checkout_key("github.com/org/a$(touch)'b", "/r/x"),
+                Err("the repository identity has characters a web address cannot carry safely"),
+            ),
+            (
+                checkout_key("github.com/org/a;b&c", "/r/x"),
+                Err("the repository identity has characters a web address cannot carry safely"),
+            ),
+            (
+                RowKey::Pattern("github.com/org/*".to_owned()),
+                Err("patterns have no single repository"),
+            ),
+        ] {
+            assert_eq!(
+                web_url(&row(key.clone()), &config).as_deref(),
+                expected.as_ref().copied(),
+                "{key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn problem_reasons_drop_known_wrappers_and_keep_the_reason() {
+        assert_eq!(
+            problem_reason("unreadable path: Permission denied (os error 13)"),
+            "permission denied"
+        );
+        assert_eq!(
+            problem_reason(
+                "git command failed (exit Some(128)): fatal: not a git repository (or any of the parent directories): .git\n"
+            ),
+            "not a git repository (or any of the parent directories): .git"
+        );
+        assert_eq!(
+            problem_reason(
+                "git command failed (exit Some(128)): fatal: not a git repository: '/r/x/.git/worktrees/w'"
+            ),
+            "not a git repository: '/r/x/.git/worktrees/w'"
+        );
+        assert_eq!(
+            problem_reason(
+                "could not inspect bare repository: git command failed (exit Some(128)): fatal: detected dubious ownership in repository at '/r/x'"
+            ),
+            "detected dubious ownership in repository at '/r/x'"
+        );
+        assert_eq!(problem_reason("cancelled"), "cancelled");
+    }
+
+    #[test]
+    fn copy_values_are_original_and_display_text_is_never_copied() {
+        let mut checkout = row(checkout_key("github.com/org/alpha", "/r/a\tb/alpha"));
+        checkout.observed_path = Some("/r/a\tb/alpha".into());
+        checkout.origin = "git@github.com:org/alpha.git".to_owned();
+        checkout.remote = Some("git@github.com:org/alpha.git".to_owned());
+        checkout.branch = ObservationField::Known("feature/long".to_owned());
+        let values = CopyField::ALL.map(|field| copy_value(&checkout, field));
+        assert_eq!(
+            values,
+            [
+                Ok("/r/a\tb/alpha".into()),
+                Ok("git@github.com:org/alpha.git".into()),
+                Ok("github.com/org/alpha".into()),
+                Ok("feature/long".into()),
+            ]
+        );
+
+        let mut originless = row(RowKey::Path("/r/scratch".into()));
+        originless.observed_path = Some("/r/scratch".into());
+        originless.origin = "No origin".to_owned();
+        originless.branch = ObservationField::Known("detached HEAD abc123".to_owned());
+        assert_eq!(
+            CopyField::ALL.map(|field| copy_value(&originless, field)),
+            [
+                Ok("/r/scratch".into()),
+                Err("no origin observed"),
+                Err("identity is the exact path"),
+                Err("detached HEAD"),
+            ]
+        );
+        let pattern = row(RowKey::Pattern("github.com/org/*".to_owned()));
+        assert_eq!(
+            copy_value(&pattern, CopyField::Path),
+            Err("patterns have no single path")
+        );
+    }
+
+    #[test]
+    fn marks_follow_exact_targets_and_drop_vanished_ones_only_when_complete() {
+        let pending = row(RowKey::Path("/r/alpha".into()));
+        let gone = row(RowKey::Path("/r/gone".into()));
+        let pattern = row(RowKey::Pattern("github.com/org/*".to_owned()));
+        let mut marks = Marks::default();
+        assert!(marks.toggle(&pending));
+        assert!(marks.toggle(&gone));
+        assert!(!marks.toggle(&pattern));
+        assert_eq!(marks.hidden(&[&pending]), 1);
+
+        let mut identified = row(checkout_key("github.com/org/alpha", "/r/alpha"));
+        identified.observed_path = Some("/r/alpha".into());
+        let other = row(checkout_key("github.com/org/other", "/r/other"));
+        let rows = [identified.clone(), other.clone()];
+        assert_eq!(marks.reconcile(&rows, false), 0);
+        assert_eq!(marks.len(), 2);
+        assert_eq!(marks.reconcile(&rows, true), 1);
+        assert!(marks.contains(&identified.key));
+        assert!(!marks.contains(&other.key));
+
+        let mut shared = Marks::default();
+        shared.toggle(&row(RowKey::Path("/r/shared".into())));
+        let declared = row(RowKey::Declaration {
+            identity: "github.com/org/declared".to_owned(),
+            destination: "/r/shared".into(),
+        });
+        assert_eq!(shared.reconcile(std::slice::from_ref(&declared), false), 0);
+        assert!(shared.contains(&RowKey::Path("/r/shared".into())));
+        let mut found = row(checkout_key("github.com/org/found", "/r/shared"));
+        found.observed_path = Some("/r/shared".into());
+        let conflict = [declared, found.clone()];
+        assert_eq!(shared.reconcile(&conflict, true), 0);
+        assert!(shared.contains(&found.key));
+        assert!(!shared.contains(&conflict[0].key));
+
+        marks.mark_all([&identified, &other, &pattern]);
+        assert_eq!(marks.len(), 2);
+        assert!(!marks.toggle(&other));
+        assert_eq!(marks.clear(), 1);
+        assert!(marks.is_empty());
     }
 }

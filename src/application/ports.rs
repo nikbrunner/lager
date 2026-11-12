@@ -32,6 +32,14 @@ pub trait ToolInspector {
     fn github_authenticated(&self) -> bool;
 }
 
+/// Optional platform utilities. Errors explain why the utility was unavailable or failed.
+pub trait Desktop {
+    /// Puts `value` on the clipboard unchanged.
+    fn copy(&self, value: &std::ffi::OsStr) -> Result<(), String>;
+    /// Opens an already validated HTTPS address.
+    fn open(&self, url: &str) -> Result<(), String>;
+}
+
 pub trait ConfigurationFilesystem {
     type Error: Display;
 

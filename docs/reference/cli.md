@@ -93,12 +93,28 @@ an operational failure occurred during the session, even after a successful
 refresh; otherwise it returns `0`. Informational exclusions and deliberate
 cancellation do not count as failures.
 
-Use `j`/`k` or arrow keys to select a row, `/` for live fuzzy search, Enter to
-inspect the selected repository, `m` for the available local actions, and `?` for
-effective bindings. Search matches full attributes, paths and origins; Enter/Esc
+Use `j`/`k` or arrow keys to select a row, `/` for live fuzzy search, Space to
+mark the row, Enter to inspect the selected repository, `m` for the action menu,
+and `?` for effective bindings. Search matches full attributes, paths and origins; Enter/Esc
 retain the filter and normal-mode Backspace clears it. Ordinary search letters
 remain text; F1 opens search help. Help describes the mode it was opened from.
-The menu includes Inspect, Search, Clear search, local Refresh, Help and Quit.
+Marks survive filtering and refresh while their exact target remains; the search
+row shows the marked and hidden-marked counts, and the status line reports marks
+removed with a vanished entry. Wildcard pattern rows cannot be marked.
+The menu groups actions for this row (Repository actions…, Inspect, Copy value…,
+Open origin, Worktrees…), the selection (mark this row, mark visible concrete
+rows, clear all marks) and the session (Add, Remote discovery…, Refresh, Session
+problems…, batch cancellation, Help and Quit). Entries for actions this build
+does not provide report that they are unavailable. Copy value puts the full
+original Path, Origin, Identity or Branch on the clipboard through `pbcopy`
+(macOS), `clip` (Windows) or `wl-copy`, `xclip` or `xsel`, trying the next one
+when a utility fails, and gives up after 2 seconds in total; in Inspect, `c` opens the
+same choices. Open origin hands an HTTPS address derived from the repository
+identity to `open` (macOS) or `xdg-open` without waiting for it, never the
+origin's own scheme; Windows has no opener. A missing or failing utility is
+explained in the status line and is not a failure.
+Session problems… lists every failure that makes the session exit `1`; the header
+shows their count.
 Popup content scrolls independently of its title and effective action hints.
 In Menu, Inspect and Help, q or Esc closes the current popup; Ctrl-Q quits the
 app. Normal-mode q and Esc quit.

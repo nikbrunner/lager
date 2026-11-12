@@ -1,4 +1,5 @@
 pub mod config;
+pub mod desktop;
 pub(crate) mod exit_status;
 pub mod filesystem;
 pub mod fzf;

@@ -138,10 +138,11 @@ page_down = ["x", "PageDown"]
 ```
 
 Normal actions are `up`, `down`, `refresh`, `search`, `clear_search`, `inspect`,
-`menu`, `help` and `quit`. Menu uses navigation, paging, accept, cancel, help,
+`menu`, `mark`, `help` and `quit`. Menu uses navigation, paging, accept, cancel, help,
 quit, Search, Inspect, Refresh and Clear search. It inherits those last four
 normal shortcuts unless a menu override or a menu-local binding takes precedence.
-Inspection uses navigation, paging, accept, cancel, help and quit. Help popups use inspection
+Inspection uses navigation, paging, `copy` (default `c`), accept, cancel, help
+and quit. Help popups use inspection
 bindings to scroll and close while listing the invoking mode's bindings.
 Menu, Inspect and Help default to Esc/q for cancel and Ctrl-Q for quit. Normal
 mode uses q/Esc for quit. To bind popup quit to q explicitly, also set

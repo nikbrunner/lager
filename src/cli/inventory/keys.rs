@@ -90,6 +90,7 @@ impl Action {
                     | Self::ClearSearch
                     | Self::Inspect
                     | Self::Menu
+                    | Self::Mark
             ),
             Mode::Menu => matches!(
                 self,
@@ -113,6 +114,7 @@ impl Action {
                     | Self::Down
                     | Self::PageUp
                     | Self::PageDown
+                    | Self::Copy
                     | Self::Accept
                     | Self::Cancel
                     | Self::Help
@@ -185,6 +187,9 @@ impl Bindings {
                         (PageUp, vec!["PageUp"]),
                         (PageDown, vec!["PageDown"]),
                     ]);
+                }
+                if mode == Mode::Inspection {
+                    defaults.push((Copy, vec!["c"]));
                 }
                 if mode == Mode::Menu {
                     // These inherit normal-mode shortcuts unless the menu map explicitly

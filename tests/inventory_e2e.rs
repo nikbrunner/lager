@@ -281,8 +281,12 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         }
         for line in &lines[5..11] {
             let characters = line.chars().collect::<Vec<_>>();
+            let slot = characters[2..6].iter().collect::<String>();
+            let pattern = line.contains("team/*");
             assert!(
-                characters[..6].iter().all(|character| *character == ' ') && characters[6] != ' ',
+                characters[..2].iter().all(|character| *character == ' ')
+                    && slot == if pattern { "    " } else { "[ ] " }
+                    && characters[6] != ' ',
                 "repository text must start after the row padding and mark slot:\n{screen}"
             );
             for start in &starts[1..] {
@@ -293,24 +297,27 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
                 );
             }
         }
+        // At 80 columns the hint line stays one line and drops its least needed hint.
+        let footer: &[&str] = if compact {
+            &["  j/k rows  / search  Enter inspect  R refresh  m menu  ? help  q quit"]
+        } else {
+            &["  j/k rows  / search  Space mark  Enter inspect  R refresh  m menu  ? help  q quit"]
+        };
+        let status = rows - 1 - footer.len();
         assert!(
-            lines[11..rows - 2].iter().all(|line| line.is_empty()),
+            lines[11..status].iter().all(|line| line.is_empty()),
             "{screen}"
         );
         assert_eq!(
-            lines[rows - 2],
+            lines[status],
             if compact {
-                "  Path and origin: Enter inspects the full value"
+                "  Path and origin: Enter inspects, menu copies the full value"
             } else {
                 "  No active operation · R refreshes local/config state only"
             },
             "{screen}"
         );
-        assert_eq!(
-            lines[rows - 1],
-            "  j/k rows  / search  Enter inspect  R refresh  m menu  ? help  q quit",
-            "{screen}"
-        );
+        assert_eq!(&lines[status + 1..], footer, "{screen}");
         let styled = styled_screen(main, rows, cols);
         assert_eq!(
             styled[0].iter().all(|(_, reversed)| *reversed),
@@ -347,11 +354,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         let screen = screen_text(inspect, rows, cols);
         let lines = screen.lines().collect::<Vec<_>>();
         assert!(lines[0].ends_with("INSPECT · 2 rows"), "{screen}");
-        assert_eq!(
-            lines[rows - 1],
-            "  j/k rows  / search  Enter inspect  R refresh  m menu  ? help  q quit",
-            "{screen}"
-        );
+        assert_eq!(&lines[rows - footer.len()..], footer, "{screen}");
         let title = lines
             .iter()
             .position(|line| line.contains("│  Inspect / alpha  "))
@@ -410,7 +413,10 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
                 .collect::<Vec<_>>()[..],
             "{screen}"
         );
-        assert!(body.contains(&"j/k ↑/↓ scroll · Esc close"), "{screen}");
+        assert!(
+            body.contains(&"j/k ↑/↓ scroll · c copy a value… · Esc close"),
+            "{screen}"
+        );
 
         let screen = screen_text(help, rows, cols);
         let lines = screen.lines().collect::<Vec<_>>();
@@ -443,7 +449,14 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         assert_eq!(body[0], "Inspect mode", "{screen}");
         assert_eq!(
             descriptions,
-            ["scroll", "page up / down", "close", "close", "help / quit"],
+            [
+                "scroll",
+                "page up / down",
+                "copy a value…",
+                "close",
+                "close",
+                "help / quit"
+            ],
             "{screen}"
         );
         assert!(
@@ -655,25 +668,22 @@ fn inventory_root_menu_uses_effective_hints_and_preserves_search_and_selection()
             ),
             (
                 vec![
-                    "Menu / actions",
-                    "pair: i inspect",
-                    "pair: s search",
-                    "pair: ? help",
-                    "pair: Ctrl+q quit",
+                    "All actions",
+                    "pair: repository i",
+                    "pair: keybindings ?",
                     "MENU ·",
-                    "/ beta",
                 ],
                 b"i".to_vec(),
             ),
             (vec!["Inspect / beta"], b"\x1b".to_vec()),
             (vec!["NORMAL ·", "/ beta", "selected: beta"], b"M".to_vec()),
-            (vec!["Menu / actions", "pair: s search"], b"s".to_vec()),
+            (vec!["All actions", "pair: repository i"], b"s".to_vec()),
             (
                 vec!["SEARCH ·", "/ beta", "selected: beta"],
                 b"\x1b".to_vec(),
             ),
             (vec!["NORMAL ·", "/ beta", "selected: beta"], b"M".to_vec()),
-            (vec!["Menu / actions"], b"\x1b".to_vec()),
+            (vec!["All actions"], b"\x1b".to_vec()),
             (vec!["NORMAL ·", "/ beta", "selected: beta"], b"q".to_vec()),
         ],
         24,
@@ -3204,16 +3214,21 @@ fn inventory_menu_refresh_uses_effective_binding_and_preserves_filter() {
         &[
             (vec!["No active operation"], b"/alpha\rm".to_vec()),
             (
-                vec!["Menu / actions", "pair: x refresh", "clear_search"],
-                b"jjj\r".to_vec(),
+                vec!["All actions", "pair: config x", "Refresh local / config"],
+                b"jjjjjjjj\r".to_vec(),
             ),
             (
                 vec!["NORMAL ·", "/ alpha", "pair: y refresh", "selected: alpha"],
                 b"m".to_vec(),
             ),
-            (vec!["Menu / actions"], b"y".to_vec()),
+            (vec!["All actions"], b"y".to_vec()),
             (
                 vec!["NORMAL ·", "/ alpha", "pair: z refresh"],
+                b"m".to_vec(),
+            ),
+            (vec!["All actions", "/ alpha"], vec![127]),
+            (
+                vec!["NORMAL ·", "absent: All actions", "/ Search repositories"],
                 b"q".to_vec(),
             ),
         ],
@@ -3254,11 +3269,14 @@ fn inventory_compact_hints_keep_actions_and_popup_exit_routes_visible() {
                 b"m".to_vec(),
             ),
             (
-                vec!["Menu / actions", "j/k ↑/↓ select · Enter choose · Esc back"],
-                b"\r".to_vec(),
+                vec!["All actions", "j/k ↑/↓ select · Enter choose · Esc back"],
+                b"j\r".to_vec(),
             ),
             (
-                vec!["Inspect / alpha", "j/k ↑/↓ scroll · Esc close"],
+                vec![
+                    "Inspect / alpha",
+                    "j/k ↑/↓ scroll · c copy a value… · Esc close",
+                ],
                 b"\x1b".to_vec(),
             ),
             (
@@ -3302,7 +3320,7 @@ fn inventory_help_uses_the_invoking_mode_and_returns_to_it() {
                 ],
                 b"\x1b".to_vec(),
             ),
-            (vec!["Menu / actions"], b"\r?".to_vec()),
+            (vec!["All actions"], b"j\r?".to_vec()),
             (
                 vec![
                     "Keyboard / effective bindings",
@@ -3417,13 +3435,16 @@ fn inventory_menu_scrolls_with_visible_title_and_hints_after_resize() {
         support::lager(&home, &config).arg("inventory"),
         &[
             (vec!["Path and origin:"], b"m".to_vec()),
-            (vec!["Menu / actions", "inspect"], b"\x1b[6~?".to_vec()),
+            (
+                vec!["All actions", "Inspect repository"],
+                b"\x1b[6~\x1b[6~?".to_vec(),
+            ),
             (vec!["Keyboard / effective bindings"], b"\x1b".to_vec()),
             (
-                vec!["Menu / actions", "pair: Enter choose", "pair: Esc back"],
+                vec!["All actions", "pair: Enter choose", "pair: Esc back"],
                 b"\x1b[5~\x1b".to_vec(),
             ),
-            (vec!["NORMAL", "absent: Menu / actions"], b"q".to_vec()),
+            (vec!["NORMAL", "absent: All actions"], b"q".to_vec()),
         ],
         12,
         80,
@@ -3443,10 +3464,10 @@ fn inventory_menu_scrolls_with_visible_title_and_hints_after_resize() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        screen_has_pair(&popup, "Ctrl+q quit"),
+        screen_has_pair(&popup, "Quit Ctrl+q"),
         "menu did not scroll to its final item:\n{small}"
     );
-    assert!(!popup.contains("inspect"), "{small}");
+    assert!(!popup.contains("Inspect repository"), "{small}");
 }
 
 #[cfg(unix)]
@@ -3526,8 +3547,8 @@ fn inventory_dialog_overrides_refresh_atomically_and_keep_all_exit_routes_reacha
         &[
             (vec!["Path and origin:"], b"m".to_vec()),
             (
-                vec!["Menu / actions", "pair: Ctrl+a choose", "pair: Ctrl+e back"],
-                vec![1],
+                vec!["All actions", "pair: Ctrl+a choose", "pair: Ctrl+e back"],
+                vec![b'j', 1],
             ),
             (vec!["Inspect / alpha", "pair: Ctrl+e close"], vec![2]),
             (vec!["NORMAL", "absent: INSPECT"], b"R".to_vec()),
@@ -3536,7 +3557,7 @@ fn inventory_dialog_overrides_refresh_atomically_and_keep_all_exit_routes_reacha
                 vec!["Keyboard / effective bindings", "pair: Ctrl+e close"],
                 vec![4],
             ),
-            (vec!["Menu / actions", "absent: HELP"], vec![5]),
+            (vec!["All actions", "absent: HELP"], vec![5]),
             (vec!["NORMAL", "absent: MENU"], b"\r".to_vec()),
             (
                 vec!["Inspect / alpha", "pair: Ctrl+e close"],
@@ -3556,7 +3577,7 @@ fn inventory_dialog_overrides_refresh_atomically_and_keep_all_exit_routes_reacha
                 ],
                 b"m".to_vec(),
             ),
-            (vec!["Menu / actions", "pair: Ctrl+a choose"], vec![1]),
+            (vec!["All actions", "pair: Ctrl+a choose"], vec![b'j', 1]),
             (vec!["INSPECT", "pair: Ctrl+e close"], b"\x1bOP".to_vec()),
             (
                 vec!["Keyboard / effective bindings", "pair: Ctrl+d close"],
@@ -3646,7 +3667,7 @@ fn inventory_no_color_applies_to_rows_and_popups() {
                 vec!["Path and origin:", "explicit", "missing"],
                 b"m".to_vec(),
             ),
-            (vec!["Menu / actions"], b"\r".to_vec()),
+            (vec!["All actions"], b"j\r".to_vec()),
             (vec!["Inspect / alpha"], b"?".to_vec()),
             (vec!["Keyboard / effective bindings"], vec![17]),
         ],
@@ -3769,9 +3790,9 @@ fn inventory_popup_q_returns_to_the_previous_view() {
                 vec!["NORMAL ·", "/ github.com/org/beta", "selected: beta"],
                 b"m".to_vec(),
             ),
-            (vec!["Menu / actions"], b"?".to_vec()),
+            (vec!["All actions"], b"?".to_vec()),
             (vec!["Keyboard / effective bindings"], b"q".to_vec()),
-            (vec!["Menu / actions", "absent: HELP"], b"q".to_vec()),
+            (vec!["All actions", "absent: HELP"], b"q".to_vec()),
             (
                 vec![
                     "NORMAL ·",
@@ -3842,7 +3863,7 @@ fn inventory_popup_quit_routes_and_explicit_overrides_remain_effective() {
         )
         .unwrap();
         for (open, title) in [
-            (b"m", "Menu / actions"),
+            (b"m", "All actions"),
             (b"\r", "Inspect / alpha"),
             (b"?", "Keyboard / effective bindings"),
         ] {
@@ -3857,6 +3878,557 @@ fn inventory_popup_quit_routes_and_explicit_overrides_remain_effective() {
             );
             assert!(transcript.contains("\x1b[?1049l") && transcript.contains("\x1b[?25h"));
         }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_marks_survive_filtering_and_refresh_and_report_vanished_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        &config,
+        "root = \"repos\"\n[providers.\"github.com\"]\npreset = \"github\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n[[repositories]]\nurl = \"github.com/org/beta\"\n[[repositories]]\nurl = \"github.com/team/*\"\n",
+    )
+    .unwrap();
+    init_repo(
+        &root.join("org/alpha"),
+        "git@github.com:org/alpha.git",
+        true,
+    );
+    init_repo_without_origin(&root.join("scratch/gone"));
+
+    run_inventory_pty_actions_with_hook(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 4 rows", "absent: Scanning", "selected: alpha"],
+                b" ".to_vec(),
+            ),
+            (
+                vec!["[x] alpha", "[ ] beta", "1 marked · 0 hidden"],
+                b"jj ".to_vec(),
+            ),
+            (vec!["[x] gone", "2 marked · 0 hidden"], b"j ".to_vec()),
+            (
+                vec![
+                    "team/* cannot be marked: patterns are inspect-only",
+                    "2 marked · 0 hidden",
+                ],
+                b"/org/alpha\r".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "[x] alpha", "2 marked · 1 hidden"],
+                b"R".to_vec(),
+            ),
+            (
+                vec![
+                    "absent: Scanning",
+                    "Removed 1 mark: its entry vanished",
+                    "1 marked · 0 hidden",
+                    "[x] alpha",
+                    "/ org/alpha",
+                ],
+                vec![127],
+            ),
+            (
+                vec!["NORMAL · 3 rows", "absent: gone", "[x] alpha", "[ ] beta"],
+                b"mjjjjj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Selection / 1 marked",
+                    "Mark visible concrete rows",
+                    "Clear all marks",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Marked visible concrete rows",
+                    "[x] beta",
+                    "2 marked · 0 hidden",
+                ],
+                b"mjjjjj\rjj\r".to_vec(),
+            ),
+            (
+                vec!["Cleared 2 marks", "absent: marked ·", "absent: [x]"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        |action| {
+            if action == 4 {
+                fs::remove_dir_all(root.join("scratch")).unwrap();
+            }
+        },
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_copy_value_sends_the_full_original_value_to_the_clipboard() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    let checkout = root.join("archive\tcopy/alpha");
+    init_repo(&checkout, "git@github.com:org/alpha.git", true);
+    let branch = "feature/an-extremely-long-branch-name-that-the-cell-cuts";
+    run_git(&checkout, &["checkout", "-qb", branch]);
+    let tools = temp.path().join("tools");
+    let copied = temp.path().join("copied");
+    desktop_stubs(
+        &tools,
+        &["pbcopy", "wl-copy", "xclip", "xsel", "clip"],
+        &format!("cat > {}", shell_word(&copied)),
+    );
+
+    let mut values = Vec::new();
+    run_inventory_pty_with_exit(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "selected: alpha"],
+                b"mjj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Copy value / alpha",
+                    "pair: Path ~/repos/archive\\tcopy/alpha",
+                    "pair: Origin git@github.com:org/alpha.git",
+                    "pair: Identity github.com/org/alpha",
+                ],
+                b"\r".to_vec(),
+            ),
+            (vec!["Copied path of alpha"], b"\r".to_vec()),
+            (vec!["Inspect / alpha", "c copy a value…"], b"c".to_vec()),
+            (vec!["Copy value / alpha"], b"j\r".to_vec()),
+            (
+                vec!["Copied origin of alpha", "Inspect / alpha"],
+                b"c".to_vec(),
+            ),
+            (vec!["Copy value / alpha"], b"jj\r".to_vec()),
+            (vec!["Copied identity of alpha"], b"c".to_vec()),
+            (vec!["Copy value / alpha"], b"jjj\r".to_vec()),
+            (vec!["Copied branch of alpha"], b"\x1b".to_vec()),
+            (vec!["NORMAL", "absent: INSPECT"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        0,
+        |action| {
+            if matches!(action, 2 | 5 | 7 | 9) {
+                values.push(fs::read(&copied).unwrap());
+            }
+        },
+    );
+    let path = fs::canonicalize(&checkout).unwrap();
+    assert!(
+        values[0] == checkout.as_os_str().as_encoded_bytes()
+            || values[0] == path.as_os_str().as_encoded_bytes(),
+        "{:?}",
+        String::from_utf8_lossy(&values[0])
+    );
+    assert_eq!(
+        values[1..],
+        [
+            b"git@github.com:org/alpha.git".to_vec(),
+            b"github.com/org/alpha".to_vec(),
+            branch.as_bytes().to_vec(),
+        ]
+    );
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "selected: alpha"],
+                b"mjj\r\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Copy unavailable: no clipboard utility found",
+                    "absent: Copied",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_open_origin_opens_only_a_derived_https_address() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    init_repo(
+        &root.join("org/alpha"),
+        "git@github.com:org/alpha.git",
+        true,
+    );
+    let marker = temp.path().join("executed");
+    init_repo(
+        &root.join("odd/tool"),
+        &format!("ext::sh -c touch% {}", marker.display()),
+        true,
+    );
+    let tools = temp.path().join("tools");
+    let opened = temp.path().join("opened");
+    desktop_stubs(
+        &tools,
+        &["open", "xdg-open"],
+        &format!("printf '%s\\n' \"$@\" > {}", shell_word(&opened)),
+    );
+
+    run_inventory_pty_with_exit(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 2 rows", "absent: Scanning", "selected: executed"],
+                b"jmjjj\r".to_vec(),
+            ),
+            (
+                vec!["Opening https://github.com/org/alpha in the browser"],
+                b"kmjjj\r".to_vec(),
+            ),
+            (
+                vec!["Open origin unavailable: the repository identity has characters"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        0,
+        |action| {
+            if action == 1 {
+                wait_for_file(&opened);
+                assert_eq!(
+                    fs::read_to_string(&opened).unwrap(),
+                    "https://github.com/org/alpha\n"
+                );
+                fs::remove_file(&opened).unwrap();
+            }
+        },
+    );
+    assert!(!opened.exists(), "an unsupported origin reached the opener");
+    assert!(!marker.exists(), "an origin scheme was executed");
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 2 rows", "absent: Scanning", "selected: executed"],
+                b"jmjjj\r".to_vec(),
+            ),
+            (
+                vec!["Open origin unavailable: no URL opener found"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        &config,
+        "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n",
+    )
+    .unwrap();
+    init_repo(
+        &root.join("org/alpha"),
+        "git@github.com:org/alpha.git",
+        true,
+    );
+    let repository = |down: usize| format!("m\r{}\r", "j".repeat(down)).into_bytes();
+    let root_entry = |down: usize| format!("m{}\r", "j".repeat(down)).into_bytes();
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "selected: alpha"],
+                b"m".to_vec(),
+            ),
+            (
+                vec![
+                    "All actions",
+                    "This row · alpha",
+                    "pair: actions… clone,",
+                    "pair: repository Enter",
+                    "Copy value…",
+                    "Open origin in browser",
+                    "Worktrees…",
+                    "Selection · 0 marked",
+                    "pair: Selection… Space",
+                    "Session",
+                    "Add repository",
+                    "pair: discovery… off",
+                    "pair: config R",
+                    "pair: problems… none",
+                    "pair: batch no",
+                    "pair: keybindings ?",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Repository actions / alpha",
+                    "Register",
+                    "Unregister",
+                    "Clone only",
+                    "Clone + register",
+                    "Remove only",
+                    "Remove + unregister",
+                ],
+                b"\r".to_vec(),
+            ),
+            (vec!["Register is unavailable in this build"], repository(1)),
+            (
+                vec!["Unregister is unavailable in this build"],
+                repository(2),
+            ),
+            (
+                vec!["Clone only is unavailable in this build"],
+                repository(3),
+            ),
+            (
+                vec!["Clone + register is unavailable in this build"],
+                repository(4),
+            ),
+            (
+                vec!["Remove only is unavailable in this build"],
+                repository(5),
+            ),
+            (
+                vec!["Remove + unregister is unavailable in this build"],
+                b"m\r\x1b".to_vec(),
+            ),
+            (
+                vec!["All actions", "absent: Repository actions /"],
+                b"j\r".to_vec(),
+            ),
+            (vec!["Inspect / alpha"], b"\x1b".to_vec()),
+            (vec!["NORMAL", "absent: Inspect /"], b"mjj\r".to_vec()),
+            (
+                vec!["Copy value / alpha", "Path", "Origin", "Identity", "Branch"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["All actions", "absent: Copy value /"], b"j\r".to_vec()),
+            (
+                vec!["Open origin unavailable: no URL opener found"],
+                root_entry(4),
+            ),
+            (
+                vec!["Worktrees are unavailable in this build"],
+                root_entry(5),
+            ),
+            (
+                vec![
+                    "Selection / 0 marked",
+                    "Mark this row",
+                    "Mark visible concrete rows",
+                    "Clear all marks",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                vec!["Marked alpha", "1 marked · 0 hidden"],
+                b"mjjjjj\rjj\r".to_vec(),
+            ),
+            (
+                vec!["Cleared 1 mark", "absent: marked ·"],
+                b"mjjjjj\rj\r".to_vec(),
+            ),
+            (
+                vec!["Marked visible concrete rows", "1 marked · 0 hidden"],
+                root_entry(6),
+            ),
+            (
+                vec!["Add repository is unavailable in this build"],
+                root_entry(7),
+            ),
+            (
+                vec!["Remote discovery is unavailable in this build"],
+                root_entry(8),
+            ),
+            (
+                vec![
+                    "NORMAL",
+                    "absent: All actions",
+                    "absent: Remote discovery is unavailable",
+                ],
+                root_entry(9),
+            ),
+            (vec!["All actions", "pair: problems… none"], b"j\r".to_vec()),
+            (vec!["All actions", "pair: batch no"], b"j\r".to_vec()),
+            (
+                vec!["Keyboard / effective bindings", "Menu mode"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["All actions", "absent: Keyboard"], b"j\r".to_vec()),
+        ],
+        24,
+        80,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_session_problems_list_every_failure_behind_exit_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(
+        &config,
+        "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n",
+    )
+    .unwrap();
+    let problems = format!("m{}\r", "j".repeat(9)).into_bytes();
+
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec![
+                    "partial scan:",
+                    "NORMAL · 1 row · 1 problem",
+                    "absent: Scanning",
+                ],
+                b"m".to_vec(),
+            ),
+            (
+                vec!["All actions", "pair: problems… 1"],
+                problems[1..].to_vec(),
+            ),
+            (
+                vec![
+                    "PROBLEMS · 1 row · 1 problem",
+                    "Session problems / 1",
+                    "pair: scan ~/repos:",
+                    "~/repos: no such file or directory ·",
+                    "Quit returns 1 because problems occurred in this session.",
+                    "Declined confirmations, cancellations and missing optional tools are not",
+                    "j/k ↑/↓ scroll · Esc close",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row · 1 problem", "absent: Session problems /"],
+                b"R".to_vec(),
+            ),
+            (
+                vec!["refresh failed:", "NORMAL · 1 row · 2 problems"],
+                problems.clone(),
+            ),
+            (
+                vec![
+                    "Session problems / 2",
+                    "pair: scan ~/repos:",
+                    "pair: refresh inventory",
+                    "previous configuration kept",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Session problems /"], b"q".to_vec()),
+        ],
+        24,
+        80,
+        1,
+        |action| {
+            if action == 3 {
+                fs::write(
+                    &config,
+                    "root = \"repos\"\n[inventory.keys.normal]\nquit = []\n",
+                )
+                .unwrap();
+            }
+        },
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_keeps_drawing_while_the_opener_and_clipboard_hang() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    init_repo(
+        &root.join("org/alpha"),
+        "git@github.com:org/alpha.git",
+        true,
+    );
+    init_repo(&root.join("org/beta"), "git@github.com:org/beta.git", true);
+    let tools = temp.path().join("tools");
+    desktop_stubs(
+        &tools,
+        &[
+            "open", "xdg-open", "pbcopy", "wl-copy", "xclip", "xsel", "clip",
+        ],
+        "exec /bin/sleep 15",
+    );
+
+    let started = Instant::now();
+    run_inventory_pty_actions(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 2 rows", "absent: Scanning", "selected: alpha"],
+                b"mjjj\r".to_vec(),
+            ),
+            (
+                vec!["Opening https://github.com/org/alpha in the browser"],
+                b"j".to_vec(),
+            ),
+            (vec!["selected: beta"], b"mjj\r\r".to_vec()),
+            (
+                vec!["Copy unavailable:", "did not finish within 2 s"],
+                b"k".to_vec(),
+            ),
+            (
+                vec!["selected: alpha", "absent: Copy unavailable"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    // The clipboard gets 2 s in total, however many utilities it tries.
+    assert!(started.elapsed() < Duration::from_secs(6));
+}
+
+#[cfg(unix)]
+fn desktop_stubs(directory: &std::path::Path, names: &[&str], body: &str) {
+    fs::create_dir_all(directory).unwrap();
+    for name in names {
+        let stub = directory.join(name);
+        fs::write(&stub, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
 
@@ -4225,8 +4797,12 @@ impl Drop for FixtureProcesses {
     }
 }
 
+/// The mark slot before every repository name: unmarked, marked, or blank for patterns.
+const MARK_SLOTS: [&str; 3] = ["[ ] ", "[x] ", "    "];
+
 /// Splits table rows at the column header offsets; rows end at the first line whose
-/// registration cell holds no registration label.
+/// registration cell holds no registration label. The repository cell starts after the
+/// mark slot.
 #[cfg(unix)]
 fn inventory_rows(screen: &str) -> Vec<Vec<String>> {
     let lines = screen.lines().collect::<Vec<_>>();
@@ -4248,7 +4824,14 @@ fn inventory_rows(screen: &str) -> Vec<Vec<String>> {
         .unwrap();
     let cell = |line: &str, column: usize| {
         let characters = line.chars().collect::<Vec<_>>();
-        let start = if column == 0 { 0 } else { offsets[column] };
+        if column == 0 && characters.len() > 6 {
+            let slot = characters[2..6].iter().collect::<String>();
+            assert!(
+                MARK_SLOTS.contains(&slot.as_str()),
+                "mark slot {slot:?}: {line}"
+            );
+        }
+        let start = if column == 0 { 6 } else { offsets[column] };
         let end = offsets.get(column + 1).copied().unwrap_or(characters.len());
         characters[start.min(characters.len())..end.min(characters.len())]
             .iter()
@@ -4358,11 +4941,16 @@ fn highlighted_inventory_row(
             let selected = line[start..start + repository.len()]
                 .iter()
                 .all(|(_, reversed)| *reversed);
-            let fixed_mark_space = start >= 2
-                && line[start - 2..start]
-                    .iter()
-                    .all(|(character, reversed)| *character == ' ' && *reversed);
-            (selected && fixed_mark_space).then(|| {
+            let fixed_mark_slot = start >= 4
+                && MARK_SLOTS.contains(
+                    &line[start - 4..start]
+                        .iter()
+                        .map(|(character, _)| *character)
+                        .collect::<String>()
+                        .as_str(),
+                )
+                && line[start - 4..start].iter().all(|(_, reversed)| *reversed);
+            (selected && fixed_mark_slot).then(|| {
                 line.into_iter()
                     .map(|(character, _)| character)
                     .collect::<String>()
