@@ -3362,7 +3362,7 @@ fn inventory_inspect_explains_unavailable_actions_without_changing_the_checkout(
                 vec![
                     "pair: Register no-op",
                     "pair: Unregister available",
-                    "pair: Clone unavailable",
+                    "pair: Clone no-op",
                     "pair: Remove unavailable",
                     "read-only inventory",
                 ],
@@ -4218,15 +4218,28 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
                 vec!["Batch / Unregister", "pair: SUCCEEDED alpha"],
                 b"\x1b".to_vec(),
             ),
-            (vec!["NORMAL", "absent: Batch /"], repository(2)),
+            // Cloning needs the observed checkout: wait out the refresh that follows a batch.
             (
-                vec!["Clone only is unavailable in this build"],
+                vec!["NORMAL", "absent: Batch /", "absent: Scanning"],
+                repository(2),
+            ),
+            (
+                vec!["Batch / Clone only", "pair: NO-OP alpha"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "absent: Batch /", "absent: Scanning"],
                 repository(3),
             ),
             (
-                vec!["Clone + register is unavailable in this build"],
-                repository(4),
+                vec![
+                    "Batch / Clone + register",
+                    "pair: SUCCEEDED alpha",
+                    "pair: alpha updated",
+                ],
+                b"\x1b".to_vec(),
             ),
+            (vec!["NORMAL", "absent: Batch /"], repository(4)),
             (
                 vec!["Remove only is unavailable in this build"],
                 repository(5),
@@ -5044,18 +5057,7 @@ fn inventory_cancelled_add_changes_nothing_and_keeps_query_cursor_and_marks() {
                     "Back to reference",
                     "j/k ↑/↓ select · Enter choose · Esc back",
                 ],
-                b"kkkkj\r".to_vec(),
-            ),
-            (
-                vec!["Add / preview", "Clone only is unavailable in this build"],
-                b"j\r".to_vec(),
-            ),
-            (
-                vec![
-                    "Add / preview",
-                    "Clone + register is unavailable in this build",
-                ],
-                b"j\r".to_vec(),
+                b"kkkkjjj\r".to_vec(),
             ),
             (
                 vec!["Add / URL or reference", "qam/new", "absent: Add / preview"],
@@ -5124,27 +5126,33 @@ fn inventory_add_never_offers_an_unknown_destination_as_missing() {
             "Clone only unavailable: destination conflicts with repository",
             "Clone + register unavailable: destination conflicts with repository",
         ),
-        (
-            "org/alpha",
-            "pair: Checkout cloned",
-            "Clone only is unavailable in this build",
-            "Clone + register is unavailable in this build",
-        ),
-        (
-            "org/fresh",
-            "pair: Checkout missing",
-            "Clone only is unavailable in this build",
-            "Clone + register is unavailable in this build",
-        ),
+        // The controls: both clone choices are offered here, so they are not pressed.
+        ("org/alpha", "pair: Checkout cloned", "", ""),
+        ("org/fresh", "pair: Checkout missing", "", ""),
     ] {
+        actions.push((
+            vec!["Add / URL or reference"],
+            format!("{reference}\r").into_bytes(),
+        ));
+        if clone_only.is_empty() {
+            actions.push((
+                vec![
+                    "Add / preview",
+                    checkout,
+                    "absent: destination conflicts",
+                    "absent: destination is unreadable",
+                    "absent: holds no observed checkout",
+                ],
+                b"\x1b".to_vec(),
+            ));
+        } else {
+            actions.extend([
+                (vec!["Add / preview", checkout], b"kkkkj\r".to_vec()),
+                (vec!["Add / preview", clone_only], b"j\r".to_vec()),
+                (vec!["Add / preview", clone_register], b"\x1b".to_vec()),
+            ]);
+        }
         actions.extend([
-            (
-                vec!["Add / URL or reference"],
-                format!("{reference}\r").into_bytes(),
-            ),
-            (vec!["Add / preview", checkout], b"kkkkj\r".to_vec()),
-            (vec!["Add / preview", clone_only], b"j\r".to_vec()),
-            (vec!["Add / preview", clone_register], b"\x1b".to_vec()),
             (
                 vec!["Add / URL or reference", "absent: Add / preview"],
                 b"\x1b".to_vec(),
@@ -5311,6 +5319,760 @@ fn inventory_add_registers_a_typed_reference_through_the_batch_and_keeps_marks()
         cli_config(&home, original, &["register", reference])
     );
     assert_eq!(checkout_tree(&root), tree);
+}
+
+/// A Git wrapper that asks for a line on the terminal before every clone, records the answer,
+/// then runs the real Git. The reset after the prompt ends a frame for the PTY reader.
+#[cfg(unix)]
+fn prompting_git(tools: &std::path::Path, answers: &std::path::Path) {
+    fs::create_dir_all(tools).unwrap();
+    fs::write(
+        tools.join("git"),
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = clone ]; then\n  printf 'Passphrase for %s: \\033[0m' \"$(basename \"$2\")\" > /dev/tty\n  IFS= read -r answer < /dev/tty\n  printf '%s\\n' \"$answer\" >> {}\nfi\nexec {} \"$@\"\n",
+            shell_word(answers),
+            shell_word(&support::real_tool("git")),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A local repository with one commit and the `file://` reference that clones it.
+#[cfg(unix)]
+fn clone_source(directory: &std::path::Path, name: &str) -> String {
+    let source = directory.join("remotes").join(name);
+    init_repo(&source, "git@github.com:org/unused.git", true);
+    format!("file://{}", source.display())
+}
+
+#[cfg(unix)]
+fn cooked(terminal: &fs::File) -> bool {
+    use rustix_openpty::rustix::termios::LocalModes;
+    rustix_openpty::rustix::termios::tcgetattr(terminal)
+        .unwrap()
+        .local_modes
+        .contains(LocalModes::ICANON | LocalModes::ECHO | LocalModes::ISIG)
+}
+
+/// The last thing the session did to the screen: it left the alternate screen and showed the
+/// cursor.
+#[cfg(unix)]
+fn assert_screen_left(transcript: &str) {
+    let last = |sequence: &str| transcript.rfind(sequence);
+    assert!(
+        last("\x1b[?1049l") > last("\x1b[?1049h"),
+        "alternate screen was not left:\n{transcript}"
+    );
+    assert!(
+        last("\x1b[?25h") > last("\x1b[?25l"),
+        "cursor was not shown:\n{transcript}"
+    );
+}
+
+const HANDOFF_NOTICE: &str =
+    "lager: Git owns this terminal until it returns. Ctrl-C interrupts the batch and exits 130.";
+
+#[cfg(unix)]
+#[test]
+fn inventory_clone_register_hands_the_terminal_to_git_and_returns_with_the_new_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let tools = temp.path().join("tools");
+    let answers = temp.path().join("answers");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    fs::create_dir_all(&root).unwrap();
+    prompting_git(&tools, &answers);
+    let reference = clone_source(temp.path(), "beta");
+    let mut modes = Vec::new();
+
+    let transcript = run_inventory_pty_with_exit_observing(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        &[
+            (vec!["NORMAL · 0 rows", "absent: Scanning"], b"a".to_vec()),
+            (
+                vec!["Add / URL or reference"],
+                format!("{reference}\r").into_bytes(),
+            ),
+            (
+                vec![
+                    "Add / preview",
+                    "~/repos/beta",
+                    "pair: Checkout missing",
+                    "pair: Registration unregistered",
+                ],
+                // Typed ahead of the handoff: it must not answer Git's prompt.
+                b"kkkkjj\rleak\r".to_vec(),
+            ),
+            // The stub reads one line. The `q` it leaves unread must not act on the inventory.
+            (vec!["Passphrase for beta:"], b"quit q a\rq".to_vec()),
+            (
+                vec![
+                    "Batch / Clone + register",
+                    "1 / 1 processed",
+                    "SUCCEEDED",
+                    "pair: cloned updated",
+                    "Clone + register: 1 succeeded",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            // Had `q` closed the popup, this Esc would have quit and the menu would never open.
+            (
+                vec![
+                    "NORMAL · 1 row",
+                    "absent: Batch /",
+                    "absent: Scanning",
+                    "pair: explicit cloned",
+                    "absent: problem",
+                ],
+                b"m".to_vec(),
+            ),
+            (vec!["All actions"], b"\x1b".to_vec()),
+            (vec!["NORMAL · 1 row", "absent: All actions"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        0,
+        |action, terminal, _| {
+            if matches!(action, 2..=4) {
+                modes.push(cooked(terminal));
+            }
+            if action == 3 {
+                assert_eq!(fs::read_to_string(&config).unwrap(), original);
+            }
+        },
+    );
+
+    assert_eq!(modes, [false, true, false], "{transcript}");
+    assert_eq!(fs::read_to_string(&answers).unwrap(), "quit q a\n");
+    assert!(root.join("beta/.git").is_dir());
+    let other = temp.path().join("other");
+    fs::create_dir_all(&other).unwrap();
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        cli_config(&other, original, &["add", &reference, "--register"])
+    );
+    let handoff = transcript.find("lager: clone 1 of 1 · ").unwrap();
+    let prompt = transcript.find("Passphrase for beta:").unwrap();
+    let left = transcript[..handoff].rfind("\x1b[?1049l").unwrap();
+    assert!(
+        transcript[..handoff].rfind("\x1b[?25h") > transcript[..handoff].rfind("\x1b[?25l"),
+        "{transcript}"
+    );
+    assert!(transcript[handoff..prompt].contains(HANDOFF_NOTICE));
+    assert!(transcript[handoff..prompt].contains("~/repos/beta"));
+    assert!(!transcript[left..prompt].contains("\x1b[?1049h"));
+    assert_eq!(transcript.matches("\x1b[?1049h").count(), 2);
+    assert_eq!(transcript.matches("\x1b[?1049l").count(), 2);
+    assert_screen_left(&transcript);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_clone_only_from_the_row_menu_runs_the_hook_on_the_terminal_and_keeps_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let tools = temp.path().join("tools");
+    let answers = temp.path().join("answers");
+    fs::create_dir_all(&root).unwrap();
+    prompting_git(&tools, &answers);
+    let reference = clone_source(temp.path(), "alpha");
+    let hook = "printf 'hook ready: \\033[0m'; IFS= read -r line; printf '%s' \"$line\" > \"$HOME/hook-answer\"";
+    let original =
+        format!("root = \"repos\"\n[[repositories]]\nurl = {reference:?}\npost_clone = {hook:?}\n");
+    fs::write(&config, &original).unwrap();
+
+    let transcript = run_inventory_pty_actions(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "missing"],
+                b"kkm\r".to_vec(),
+            ),
+            (
+                vec!["Repository actions / alpha", "Clone only"],
+                b"jj\r".to_vec(),
+            ),
+            // The second line is typed during the clone; it must not answer the hook.
+            (
+                vec!["Passphrase for alpha:"],
+                b"git says q\rhook-leak\r".to_vec(),
+            ),
+            (vec!["hook ready:"], b"hook says j\r".to_vec()),
+            (
+                vec![
+                    "Batch / Clone only",
+                    "1 / 1 processed",
+                    "pair: SUCCEEDED alpha",
+                    "pair: alpha cloned",
+                    "Clone only: 1 succeeded",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL · 1 row",
+                    "absent: Batch /",
+                    "absent: Scanning",
+                    "pair: explicit cloned",
+                    "absent: problem",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(fs::read_to_string(&answers).unwrap(), "git says q\n");
+    assert_eq!(
+        fs::read_to_string(home.join("hook-answer")).unwrap(),
+        "hook says j"
+    );
+    assert!(root.join("alpha/.git").is_dir());
+    assert!(transcript.contains("lager: clone 1 of 1 · "));
+    assert!(transcript.contains(HANDOFF_NOTICE));
+    assert_eq!(transcript.matches("\x1b[?1049h").count(), 2);
+    assert_screen_left(&transcript);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_clone_batch_reports_each_target_and_continues_past_a_failed_and_a_stale_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let tools = temp.path().join("tools");
+    let answers = temp.path().join("answers");
+    fs::create_dir_all(&root).unwrap();
+    prompting_git(&tools, &answers);
+    let mut original = "root = \"repos\"\n".to_owned();
+    for name in ["alpha", "delta", "gamma"] {
+        let reference = clone_source(temp.path(), name);
+        original.push_str(&format!("[[repositories]]\nurl = {reference:?}\n"));
+    }
+    let broken = format!("file://{}", temp.path().join("remotes/broken").display());
+    original.push_str(&format!("[[repositories]]\nurl = {broken:?}\n"));
+    fs::write(&config, &original).unwrap();
+    let mut modes = Vec::new();
+
+    let transcript = run_inventory_pty_with_exit_observing(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 4 rows", "absent: Scanning"],
+                b"kkk j j j ".to_vec(),
+            ),
+            (vec!["4 marked · 0 hidden"], b"m\rjj\r".to_vec()),
+            (
+                vec![
+                    "CONFIRM",
+                    "Clone only / preview",
+                    "4 exact targets",
+                    "ELIGIBLE alpha",
+                    "ELIGIBLE broken",
+                    "ELIGIBLE delta",
+                    "ELIGIBLE gamma",
+                    "~/repos/delta",
+                    "pair: Cancel default",
+                    "Clone only 4 targets",
+                    "Nothing changes until you confirm",
+                ],
+                b"j\r".to_vec(),
+            ),
+            // `extra` stays unread in the terminal's line buffer; it must not join the next answer.
+            (vec!["Passphrase for alpha:"], b"a1\rextra".to_vec()),
+            (vec!["Passphrase for broken:"], b"b2\r".to_vec()),
+            // A line typed before the failure is reported must not dismiss the wait.
+            (vec!["Passphrase for gamma:"], b"g3\rskip\r".to_vec()),
+            (vec!["Enter returns to the inventory."], b"\r".to_vec()),
+            (
+                vec![
+                    "Batch / Clone only",
+                    "4 / 4 processed",
+                    "pair: SUCCEEDED alpha",
+                    "pair: alpha cloned",
+                    "pair: FAILED broken",
+                    "git exited with status 128",
+                    "pair: BLOCKED delta",
+                    "stale: destination is no longer missing after",
+                    "pair: SUCCEEDED gamma",
+                    "Clone only: 2 succeeded, 1 failed, 1 blocked",
+                    "· 2 problems",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 4 rows", "absent: Batch /", "absent: Scanning"],
+                format!("m{}\r", "j".repeat(9)).into_bytes(),
+            ),
+            (
+                vec![
+                    "Session problems / 2",
+                    "batch · broken",
+                    "Clone only failed: git exited with status 128",
+                    "batch · delta",
+                    "Clone only blocked: stale: destination is no longer missing after",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Session problems /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        1,
+        |action, terminal, frame| {
+            if action == 2 {
+                fs::create_dir_all(root.join("delta")).unwrap();
+            }
+            if matches!(action, 4 | 6 | 7) {
+                modes.push(cooked(terminal));
+            }
+            if action == 6 {
+                // Git's own error is still on the normal screen and the inventory has not
+                // come back over it.
+                let shown = &frame[frame.rfind("\x1b[?1049l").unwrap()..];
+                assert!(!shown.contains("\x1b[?1049h"), "{frame}");
+                assert!(shown.contains("fatal:"), "{frame}");
+                assert!(
+                    shown.contains("lager: failed · broken · git exited with status 128"),
+                    "{frame}"
+                );
+            }
+        },
+    );
+
+    assert_eq!(modes, [true, true, false], "{transcript}");
+    assert_eq!(transcript.matches("\x1b[?1049h").count(), 2);
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(fs::read_to_string(&answers).unwrap(), "a1\nb2\ng3\n");
+    assert!(root.join("alpha/.git").is_dir());
+    assert!(root.join("gamma/.git").is_dir());
+    assert!(!root.join("broken").exists());
+    assert_eq!(fs::read_dir(root.join("delta")).unwrap().count(), 0);
+    assert!(transcript.contains("lager: clone 1 of 4 · "));
+    assert!(transcript.contains("lager: clone 2 of 4 · "));
+    assert!(!transcript.contains("lager: clone 3 of 4 · "));
+    assert!(transcript.contains("lager: clone 4 of 4 · "));
+    assert_screen_left(&transcript);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_ctrl_c_during_a_clone_handoff_exits_130_and_keeps_the_earlier_clone() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let tools = temp.path().join("tools");
+    let answers = temp.path().join("answers");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    fs::create_dir_all(root.join("misc")).unwrap();
+    prompting_git(&tools, &answers);
+    let alpha = clone_source(temp.path(), "alpha");
+    let beta = clone_source(temp.path(), "beta");
+    run_git(&root, &["clone", "-q", &alpha, "misc/one"]);
+    run_git(&root, &["clone", "-q", &beta, "misc/two"]);
+    let tree = checkout_tree(&root.join("misc"));
+    let mut modes = Vec::new();
+
+    let transcript = run_inventory_pty_with_exit_observing(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 2 rows", "absent: Scanning", "absent: pending"],
+                b"kk j ".to_vec(),
+            ),
+            (vec!["2 marked · 0 hidden"], b"m\rjjj\r".to_vec()),
+            (
+                vec![
+                    "Clone + register / preview",
+                    "2 exact targets",
+                    "ELIGIBLE alpha",
+                    "found at ~/repos/misc/one · clones at ~/repos/alpha",
+                    "ELIGIBLE beta",
+                    "found at ~/repos/misc/two · clones at ~/repos/beta",
+                    "Clone + register 2 targets",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (vec!["Passphrase for alpha:"], b"first\r".to_vec()),
+            (vec!["Passphrase for beta:"], vec![3]),
+        ],
+        32,
+        132,
+        130,
+        |action, terminal, _| {
+            if matches!(action, 2 | 4) {
+                modes.push(cooked(terminal));
+            }
+        },
+    );
+
+    assert_eq!(modes, [false, true], "{transcript}");
+    assert_eq!(fs::read_to_string(&answers).unwrap(), "first\n");
+    assert!(root.join("alpha/.git").is_dir());
+    assert!(!root.join("beta").exists());
+    assert_eq!(checkout_tree(&root.join("misc")), tree);
+    let other = temp.path().join("other");
+    fs::create_dir_all(&other).unwrap();
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        cli_config(&other, original, &["add", &alpha, "--register"])
+    );
+    assert_eq!(transcript.matches("\x1b[?1049h").count(), 1);
+    assert_screen_left(&transcript);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_clone_register_on_a_matching_checkout_registers_without_cloning() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    init_repo(
+        &root.join("org/alpha"),
+        "git@github.com:org/alpha.git",
+        true,
+    );
+    let tree = checkout_tree(&root);
+
+    let transcript = run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "absent: pending"],
+                b"aorg/alpha\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Add / preview",
+                    "pair: Checkout cloned",
+                    "pair: Registration unregistered",
+                ],
+                b"kkkkjj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Clone + register",
+                    "1 / 1 processed",
+                    "pair: SUCCEEDED github.com/org/alpha",
+                    "pair: github.com/org/alpha updated",
+                    "Clone + register: 1 succeeded",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL · 1 row",
+                    "absent: Batch /",
+                    "pair: explicit cloned",
+                    "absent: problem",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        cli_config(&home, original, &["add", "org/alpha", "--register"])
+    );
+    assert_ne!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(checkout_tree(&root), tree);
+    assert_eq!(transcript.matches("\x1b[?1049h").count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_add_blocks_a_clone_whose_destination_appeared_after_the_preview() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let tools = temp.path().join("tools");
+    let answers = temp.path().join("answers");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    fs::create_dir_all(&root).unwrap();
+    prompting_git(&tools, &answers);
+    let reference = clone_source(temp.path(), "late");
+
+    run_inventory_pty_with_exit(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        &[
+            (vec!["NORMAL · 0 rows", "absent: Scanning"], b"a".to_vec()),
+            (
+                vec!["Add / URL or reference"],
+                format!("{reference}\r").into_bytes(),
+            ),
+            (
+                vec!["Add / preview", "pair: Checkout missing"],
+                b"kkkkjj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Clone + register",
+                    "1 / 1 processed",
+                    "BLOCKED",
+                    "stale: destination is no longer missing after preview",
+                    "Clone + register: 1 blocked",
+                    "· 1 problem",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Batch /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        1,
+        |action| {
+            if action == 2 {
+                fs::create_dir_all(root.join("late")).unwrap();
+            }
+        },
+    );
+
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert!(!answers.exists());
+    assert_eq!(fs::read_dir(root.join("late")).unwrap().count(), 0);
+}
+
+/// A Git wrapper that clones every URL from the local repository of the same name and then
+/// records the requested URL as the origin, so hosted references never leave the machine.
+#[cfg(unix)]
+fn redirecting_git(tools: &std::path::Path, directory: &std::path::Path) {
+    fs::create_dir_all(tools).unwrap();
+    let git = shell_word(&support::real_tool("git"));
+    fs::write(
+        tools.join("git"),
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = clone ]; then\n  {git} clone -q \"file://\"{}\"/$(basename \"$2\" .git)\" . || exit\n  exec {git} remote set-url origin \"$2\"\nfi\nexec {git} \"$@\"\n",
+            shell_word(&directory.join("remotes")),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_failed_hook_keeps_the_clone_skips_registration_and_lets_the_next_target_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let tools = temp.path().join("tools");
+    fs::create_dir_all(&root).unwrap();
+    redirecting_git(&tools, temp.path());
+    clone_source(temp.path(), "alpha");
+    clone_source(temp.path(), "beta");
+    // Registering alpha would lift its exclusion; a failed hook must leave it in place.
+    let original = "root = \"repos\"\n[providers.\"github.com\"]\npreset = \"github\"\n[[repositories]]\nurl = \"github.com/org/*\"\nexclude = [\"alpha\"]\n[[repositories]]\nurl = \"git@github.com:org/alpha.git\"\npost_clone = \"echo hook broke >&2; exit 3\"\n[[repositories]]\nurl = \"git@github.com:org/beta.git\"\n";
+    fs::write(&config, original).unwrap();
+    let mut modes = Vec::new();
+
+    let transcript = run_inventory_pty_with_exit_observing(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 3 rows", "absent: Scanning"],
+                b"kk j ".to_vec(),
+            ),
+            (vec!["2 marked · 0 hidden"], b"m\rjjj\r".to_vec()),
+            (
+                vec![
+                    "Clone + register / preview",
+                    "ELIGIBLE alpha",
+                    "ELIGIBLE beta",
+                    "Clone + register 2 targets",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (vec!["Enter returns to the inventory."], b"\r".to_vec()),
+            (
+                vec![
+                    "Batch / Clone + register",
+                    "2 / 2 processed",
+                    "pair: FAILED alpha",
+                    "pair: alpha cloned",
+                    "hook exited with status 3",
+                    "pair: SUCCEEDED beta",
+                    "pair: beta cloned",
+                    "Clone + register: 1 succeeded, 1 failed",
+                    "· 1 problem",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 3 rows", "absent: Batch /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        1,
+        |action, terminal, frame| {
+            if matches!(action, 3 | 4) {
+                modes.push(cooked(terminal));
+            }
+            if action == 3 {
+                let shown = &frame[frame.rfind("\x1b[?1049l").unwrap()..];
+                assert!(!shown.contains("\x1b[?1049h"), "{frame}");
+                assert!(shown.contains("hook broke"), "{frame}");
+                assert!(
+                    shown.contains("lager: failed · alpha · hook exited with status 3"),
+                    "{frame}"
+                );
+                assert!(
+                    shown.contains("lager: clone 2 of 2 · github.com/org/beta → ~/repos/org/beta")
+                );
+            }
+        },
+    );
+
+    assert_eq!(modes, [true, false], "{transcript}");
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert!(root.join("org/alpha/.git").is_dir());
+    assert!(root.join("org/beta/.git").is_dir());
+    assert_screen_left(&transcript);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_ctrl_c_during_a_hook_exits_130_and_keeps_the_clone() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let tools = temp.path().join("tools");
+    let answers = temp.path().join("answers");
+    fs::create_dir_all(&root).unwrap();
+    prompting_git(&tools, &answers);
+    let reference = clone_source(temp.path(), "alpha");
+    let hook = "printf 'hook ready: \\033[0m'; IFS= read -r line; touch \"$HOME/hook-finished\"";
+    let original =
+        format!("root = \"repos\"\n[[repositories]]\nurl = {reference:?}\npost_clone = {hook:?}\n");
+    fs::write(&config, &original).unwrap();
+
+    let transcript = run_inventory_pty_with_exit(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "missing"],
+                b"kkm\r".to_vec(),
+            ),
+            (
+                vec!["Repository actions / alpha", "Clone only"],
+                b"jj\r".to_vec(),
+            ),
+            (vec!["Passphrase for alpha:"], b"open\r".to_vec()),
+            (vec!["hook ready:"], vec![3]),
+        ],
+        32,
+        132,
+        130,
+        |_| {},
+    );
+
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert!(root.join("alpha/.git").is_dir());
+    assert!(!home.join("hook-finished").exists());
+    assert_eq!(transcript.matches("\x1b[?1049h").count(), 1);
+    assert_screen_left(&transcript);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_ctrl_c_while_a_failed_clone_waits_for_enter_exits_130() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    let broken = format!("file://{}", temp.path().join("remotes/broken").display());
+    let original = format!("root = \"repos\"\n[[repositories]]\nurl = {broken:?}\n");
+    fs::write(&config, &original).unwrap();
+
+    let transcript = run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "missing"],
+                b"kkm\r".to_vec(),
+            ),
+            (
+                vec!["Repository actions / broken", "Clone only"],
+                b"jj\r".to_vec(),
+            ),
+            (vec!["Enter returns to the inventory."], vec![3]),
+        ],
+        32,
+        132,
+        130,
+        |_| {},
+    );
+
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert!(!root.join("broken").exists());
+    assert!(transcript.contains("lager: failed · broken · git exited with status 128"));
+    assert_eq!(transcript.matches("\x1b[?1049h").count(), 1);
+    assert_screen_left(&transcript);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_keeps_keys_typed_at_it_when_a_suspend_starts_no_child() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    fs::create_dir_all(&root).unwrap();
+    let reference = clone_source(temp.path(), "late");
+
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (vec!["NORMAL · 0 rows", "absent: Scanning"], b"a".to_vec()),
+            (
+                vec!["Add / URL or reference"],
+                format!("{reference}\r").into_bytes(),
+            ),
+            // The target is stale, so no child starts: the second Enter belongs to the
+            // inventory and closes the outcomes.
+            (
+                vec!["Add / preview", "pair: Checkout missing"],
+                b"kkkkjj\r\r".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "absent: Batch /", "· 1 problem"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        1,
+        |action| {
+            if action == 2 {
+                fs::create_dir_all(root.join("late")).unwrap();
+            }
+        },
+    );
+
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(fs::read_dir(root.join("late")).unwrap().count(), 0);
 }
 
 #[cfg(unix)]

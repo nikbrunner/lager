@@ -5,17 +5,22 @@ use crate::application::inventory::{
     wildcard_relative,
 };
 use crate::application::ports::{
-    AtomicRegistrationStore, GitRemoval, Interaction, InteractionError, Mutation,
+    AtomicRegistrationStore, ConfigStore, EnsureReporter, GitClient, GitRemoval, GitState,
+    HookRunner, Interaction, InteractionError, Mutation,
 };
 use crate::application::registry::RegistrationError;
+use crate::application::warehouse::{self, OperationStatus};
 use crate::domain::config::Config;
 use crate::domain::repository::RepositoryRef;
+use crate::domain::state::LocalState;
 
 /// A row mutation the inventory runs over targets frozen at invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchAction {
     Register,
     Unregister,
+    Clone,
+    CloneRegister,
 }
 
 impl BatchAction {
@@ -23,7 +28,14 @@ impl BatchAction {
         match self {
             Self::Register => "Register",
             Self::Unregister => "Unregister",
+            Self::Clone => "Clone only",
+            Self::CloneRegister => "Clone + register",
         }
+    }
+
+    /// Clone actions run native Git and hooks; the others change configuration only.
+    pub fn clones(self) -> bool {
+        matches!(self, Self::Clone | Self::CloneRegister)
     }
 }
 
@@ -231,8 +243,62 @@ impl AddPreview {
                 .noop(BatchAction::Register)
                 .map(str::to_owned),
             registration: self.registration.clone(),
+            elsewhere: None,
         }
     }
+
+    /// The target of a clone action, frozen with the destination state this preview observed:
+    /// a destination that was missing must still be missing when its clone starts.
+    pub fn clone_target(&self, action: BatchAction, name: String) -> BatchTarget {
+        let choice = if action == BatchAction::CloneRegister {
+            AddChoice::CloneRegister
+        } else {
+            AddChoice::Clone
+        };
+        let (blocked, noop) = match self.eligibility(choice) {
+            Eligibility::Available => (None, None),
+            Eligibility::Noop(reason) => (None, Some(reason.to_owned())),
+            Eligibility::Unavailable(reason) => (Some(reason.to_owned()), None),
+        };
+        BatchTarget {
+            blocked,
+            noop,
+            ..self.target(name)
+        }
+    }
+}
+
+/// The reference a row's identity is registered and cloned by: the configured or observed
+/// clone URL text, as the CLI keeps it, when it names the same identity.
+fn row_reference(row: &InventoryRow) -> Option<String> {
+    let (RowKey::Checkout { identity, .. } | RowKey::Declaration { identity, .. }) = &row.key
+    else {
+        return None;
+    };
+    row.remote
+        .clone()
+        .filter(|remote| {
+            RepositoryRef::parse(remote).is_ok_and(|parsed| parsed.identity() == *identity)
+        })
+        .or_else(|| Some(identity.clone()))
+}
+
+/// What cloning a row means: its identity at the configured destination, wherever a checkout
+/// was found. Patterns and originless checkouts cannot be cloned.
+pub fn clone_preview(
+    row: &InventoryRow,
+    config: &Config,
+    root: &Path,
+    rows: &[InventoryRow],
+    scan_complete: bool,
+    filesystem: &impl InventoryFilesystem,
+) -> Result<AddPreview, &'static str> {
+    let unsupported = "no supported origin observed";
+    let reference = match &row.key {
+        RowKey::Pattern(_) => return Err("patterns are inspect-only"),
+        _ => row_reference(row).ok_or(unsupported)?,
+    };
+    add_preview(&reference, config, root, rows, scan_complete, filesystem).map_err(|_| unsupported)
 }
 
 /// Registration is identity-scoped: only an identity known from configuration or a supported
@@ -271,6 +337,8 @@ pub struct BatchTarget {
     /// How the configuration declared the identity at invocation; it must still hold when the
     /// target runs.
     pub registration: Registration,
+    /// The checkout found at another path than the clone destination in `path`.
+    pub elsewhere: Option<PathBuf>,
 }
 
 impl BatchTarget {
@@ -287,14 +355,7 @@ impl BatchTarget {
             }
             RowKey::Path(_) | RowKey::Pattern(_) => None,
         };
-        // Keep the configured clone URL text, as the CLI does, when it names the same identity.
-        let reference = row
-            .remote
-            .clone()
-            .filter(|remote| {
-                RepositoryRef::parse(remote).is_ok_and(|parsed| Some(parsed.identity()) == identity)
-            })
-            .or_else(|| identity.clone());
+        let reference = row_reference(row);
         let eligibility = eligibility(row, action, config);
         Self {
             key: row.key.clone(),
@@ -315,6 +376,39 @@ impl BatchTarget {
             noop: match eligibility {
                 Eligibility::Noop(reason) => Some(reason.to_owned()),
                 Eligibility::Available | Eligibility::Unavailable(_) => None,
+            },
+            elsewhere: None,
+        }
+    }
+
+    /// Freezes a row for a clone action. The clone lands at the configured destination; a
+    /// checkout found at another path stays where it is.
+    #[allow(clippy::too_many_arguments)]
+    pub fn freeze_clone(
+        row: &InventoryRow,
+        name: String,
+        hidden: bool,
+        action: BatchAction,
+        config: &Config,
+        root: &Path,
+        rows: &[InventoryRow],
+        scan_complete: bool,
+        filesystem: &impl InventoryFilesystem,
+    ) -> Self {
+        match clone_preview(row, config, root, rows, scan_complete, filesystem) {
+            Ok(preview) => Self {
+                key: row.key.clone(),
+                hidden,
+                elsewhere: row
+                    .observed_path
+                    .clone()
+                    .filter(|found| *found != preview.destination),
+                ..preview.clone_target(action, name)
+            },
+            Err(reason) => Self {
+                blocked: Some(reason.to_owned()),
+                noop: None,
+                ..Self::freeze(row, name, hidden, BatchAction::Register, config)
             },
         }
     }
@@ -442,6 +536,25 @@ impl Batch {
         let index = self.active()?;
         let target = &self.targets[index];
         let stale = target.blocked.clone().or_else(|| self.stale(target, git));
+        self.results[index] = if let Some(reason) = stale {
+            TargetResult::new(Outcome::Blocked, "", reason)
+        } else if let Some(earlier) = self.shared_with(index) {
+            self.results[earlier].clone()
+        } else {
+            self.write_registration(index, store, config_path)
+        };
+        Some(index)
+    }
+
+    /// The registration write of one target, after the live configuration is compared with
+    /// what was frozen.
+    fn write_registration<S: AtomicRegistrationStore>(
+        &self,
+        index: usize,
+        store: &S,
+        config_path: &Path,
+    ) -> TargetResult {
+        let target = &self.targets[index];
         let changed = || {
             TargetResult::new(
                 Outcome::Blocked,
@@ -449,55 +562,202 @@ impl Batch {
                 format!("stale: registration changed {}", self.since()),
             )
         };
-        let done = |reason| TargetResult::new(Outcome::Noop, "", reason);
+        let live = match store.load(config_path) {
+            Ok(live) => live,
+            Err(error) => return TargetResult::new(Outcome::Failed, "", error.to_string()),
+        };
+        let identity = target.identity.as_deref().unwrap_or_default();
+        if Registration::of(identity, &live) != target.registration {
+            return changed();
+        }
+        // A clone target's own no-op covers the checkout too; its registration decides here.
+        let noop = if self.action.clones() {
+            target.registration.noop(BatchAction::Register).is_some()
+        } else {
+            target.noop.is_some()
+        };
+        if noop {
+            return TargetResult::new(
+                Outcome::Noop,
+                "",
+                match self.action {
+                    BatchAction::Unregister => "already unregistered",
+                    _ => "already registered",
+                },
+            );
+        }
+        let references = [target.reference.clone().unwrap_or_default()];
+        let written = match self.action {
+            BatchAction::Unregister => {
+                crate::application::configuration::unregister(store, config_path, &references)
+            }
+            _ => crate::application::registry::register_batch(
+                store,
+                config_path,
+                &references,
+                None,
+                false,
+                &mut NoPrompts,
+            )
+            .map_err(|error| match error {
+                RegistrationError::Cancelled => "cancelled".to_owned(),
+                RegistrationError::Interaction(message) | RegistrationError::Store(message) => {
+                    message
+                }
+            }),
+        };
+        match written {
+            Ok(mutations) if mutations.contains(&Mutation::Changed) => {
+                TargetResult::new(Outcome::Succeeded, "updated", "")
+            }
+            Ok(_) => changed(),
+            Err(error) => TargetResult::new(Outcome::Failed, "write failed", error),
+        }
+    }
+
+    /// The next target of a clone action would run native Git: it was frozen as missing.
+    pub fn needs_terminal(&self) -> bool {
+        self.action.clones()
+            && self.active().is_some_and(|index| {
+                let target = &self.targets[index];
+                target.blocked.is_none() && !target.found && self.shared_with(index).is_none()
+            })
+    }
+
+    /// Why a clone would no longer do what was frozen: the configured layout must still lead
+    /// to the frozen destination, and a destination frozen as missing must still be missing.
+    fn stale_clone<S: ConfigStore>(
+        &self,
+        target: &BatchTarget,
+        store: &S,
+        git: &impl GitState,
+        config_path: &Path,
+        home: &Path,
+    ) -> Option<TargetResult> {
+        let live = match store.load(config_path) {
+            Ok(live) => live,
+            Err(error) => return Some(TargetResult::new(Outcome::Failed, "", error.to_string())),
+        };
+        let reference = target.reference.as_deref().unwrap_or_default();
+        let path = target.path.as_deref()?;
+        let destination = RepositoryRef::parse(reference)
+            .ok()
+            .zip(live.resolve_root(home).ok())
+            .map(|(parsed, root)| configured_destination(&live, &parsed, &root));
+        let reason = if destination.as_deref() != Some(path) {
+            "configured destination changed"
+        } else if !target.found && git.classify_destination(path, reference) != LocalState::Missing
+        {
+            "destination is no longer missing"
+        } else {
+            return None;
+        };
+        Some(TargetResult::new(
+            Outcome::Blocked,
+            "",
+            format!("stale: {reason} {}", self.since()),
+        ))
+    }
+
+    /// Runs the next target of a clone action through the service `lager add` uses and returns
+    /// its index. Git and a configured hook run with the caller's streams; `reporter` hears of
+    /// a clone just before Git starts. Clone + register writes its registration only after a
+    /// successful or no-op clone, and a failed write leaves the checkout in place. A cancelled
+    /// child gives `Outcome::Cancelled`.
+    pub fn step_clone<S, G, H>(
+        &mut self,
+        store: &S,
+        git: &G,
+        hooks: &H,
+        config_path: &Path,
+        home: &Path,
+        reporter: &mut dyn EnsureReporter,
+    ) -> Option<usize>
+    where
+        S: AtomicRegistrationStore,
+        G: GitClient + GitState + GitRemoval,
+        H: HookRunner,
+    {
+        let index = self.active()?;
+        let target = &self.targets[index];
+        let stale = target.blocked.clone().or_else(|| self.stale(target, git));
         self.results[index] = if let Some(reason) = stale {
             TargetResult::new(Outcome::Blocked, "", reason)
         } else if let Some(earlier) = self.shared_with(index) {
             self.results[earlier].clone()
-        } else if let Some(result) = match store.load(config_path) {
-            Err(error) => Some(TargetResult::new(Outcome::Failed, "", error.to_string())),
-            Ok(live) => {
-                let identity = target.identity.as_deref().unwrap_or_default();
-                if Registration::of(identity, &live) != target.registration {
-                    Some(changed())
-                } else {
-                    target.noop.as_ref().map(|_| {
-                        done(match self.action {
-                            BatchAction::Register => "already registered",
-                            BatchAction::Unregister => "already unregistered",
-                        })
-                    })
-                }
-            }
-        } {
+        } else if let Some(result) = self.stale_clone(target, store, git, config_path, home) {
             result
         } else {
-            let references = [target.reference.clone().unwrap_or_default()];
-            let written = match self.action {
-                BatchAction::Register => crate::application::registry::register_batch(
+            let reference = target.reference.clone().unwrap_or_default();
+            // A checkout found at the destination is a no-op and never reaches Git, so Git
+            // only runs for targets `needs_terminal` announced.
+            let (status, cancelled) = if target.found {
+                (OperationStatus::Noop, false)
+            } else {
+                match warehouse::clone_many_with_reporter(
                     store,
+                    git,
+                    hooks,
                     config_path,
-                    &references,
-                    None,
+                    std::slice::from_ref(&reference),
                     false,
-                    &mut NoPrompts,
-                )
-                .map_err(|error| match error {
-                    RegistrationError::Cancelled => "cancelled".to_owned(),
-                    RegistrationError::Interaction(message) | RegistrationError::Store(message) => {
-                        message
-                    }
-                }),
-                BatchAction::Unregister => {
-                    crate::application::configuration::unregister(store, config_path, &references)
+                    None,
+                    home,
+                    reporter,
+                ) {
+                    Ok(mut batch) => (
+                        batch
+                            .outcomes
+                            .pop()
+                            .map_or(OperationStatus::Noop, |outcome| outcome.status),
+                        batch.cancelled,
+                    ),
+                    Err(error) => (OperationStatus::Failed(error), false),
                 }
             };
-            match written {
-                Ok(mutations) if mutations.contains(&Mutation::Changed) => {
-                    TargetResult::new(Outcome::Succeeded, "updated", "")
+            // A hook that fails after its clone leaves the checkout in place.
+            let cloned = match &status {
+                OperationStatus::Cloned => true,
+                OperationStatus::Failed(_) => {
+                    !target.found
+                        && target.path.as_deref().is_some_and(|path| {
+                            git.classify_destination(path, &reference) == LocalState::Cloned
+                        })
                 }
-                Ok(_) => changed(),
-                Err(error) => TargetResult::new(Outcome::Failed, "write failed", error),
+                _ => false,
+            };
+            let disk = if cloned { "cloned" } else { "" }.to_owned();
+            match status {
+                OperationStatus::Failed(reason) => TargetResult {
+                    outcome: if cancelled {
+                        Outcome::Cancelled
+                    } else {
+                        Outcome::Failed
+                    },
+                    disk,
+                    config: String::new(),
+                    reason,
+                },
+                _ if self.action == BatchAction::CloneRegister => {
+                    let written = self.write_registration(index, store, config_path);
+                    TargetResult {
+                        outcome: match written.outcome {
+                            Outcome::Noop if cloned => Outcome::Succeeded,
+                            outcome => outcome,
+                        },
+                        reason: match written.outcome {
+                            Outcome::Noop if !cloned => "already cloned and registered".to_owned(),
+                            _ => written.reason,
+                        },
+                        disk,
+                        config: written.config,
+                    }
+                }
+                _ if cloned => TargetResult {
+                    disk,
+                    ..TargetResult::new(Outcome::Succeeded, "", "")
+                },
+                _ => TargetResult::new(Outcome::Noop, "", "already cloned"),
             }
         };
         Some(index)
@@ -655,6 +915,7 @@ mod tests {
             blocked: blocked.map(str::to_owned),
             noop: None,
             registration: Registration::default(),
+            elsewhere: None,
         }
     }
 
@@ -710,7 +971,7 @@ mod tests {
                     BatchTarget {
                         registration: match action {
                             BatchAction::Register => Registration::default(),
-                            BatchAction::Unregister => declared.clone(),
+                            _ => declared.clone(),
                         },
                         ..target("beta", Some(beta), None)
                     },
@@ -889,5 +1150,300 @@ mod tests {
         assert_eq!(batch.shared_with(2), Some(1));
         assert_eq!(batch.shared_with(1), None);
         assert!(batch.finished());
+    }
+
+    /// Git whose destination is missing until a clone succeeds; `0` counts the clones.
+    #[derive(Default)]
+    struct Cloner(std::cell::Cell<usize>);
+
+    impl crate::application::ports::GitClient for Cloner {
+        type Error = String;
+        fn clone_repository(&self, _: &str, _: &Path, _: &Path, _: &Path) -> Result<(), String> {
+            self.0.set(self.0.get() + 1);
+            Ok(())
+        }
+    }
+
+    impl crate::application::ports::GitState for Cloner {
+        fn classify_destination(&self, _: &Path, _: &str) -> crate::domain::state::LocalState {
+            if self.0.get() == 0 {
+                crate::domain::state::LocalState::Missing
+            } else {
+                crate::domain::state::LocalState::Cloned
+            }
+        }
+    }
+
+    impl GitRemoval for Cloner {
+        fn inspect_removal(&self, _: &Path, _: &str) -> Result<Vec<String>, String> {
+            unreachable!()
+        }
+        fn origin_identity(&self, _: &Path) -> Result<String, String> {
+            Ok("github.com/org/alpha".to_owned())
+        }
+    }
+
+    struct NoHooks;
+
+    impl crate::application::ports::HookRunner for NoHooks {
+        type Error = String;
+        fn run_hook(&self, _: &str, _: &Path) -> Result<(), String> {
+            unreachable!()
+        }
+    }
+
+    struct Silent;
+
+    impl crate::application::ports::EnsureReporter for Silent {
+        fn report(&mut self, _: crate::application::ports::EnsureEvent<'_>) {}
+    }
+
+    /// Loads like `CountingStore` and refuses every write.
+    struct ReadOnlyStore;
+
+    impl ConfigStore for ReadOnlyStore {
+        type Error = String;
+        fn exists(&self, _: &Path) -> bool {
+            true
+        }
+        fn load(&self, path: &Path) -> Result<Config, String> {
+            CountingStore::default().load(path)
+        }
+        fn init(&self, _: &Path, _: &str, _: bool) -> Result<(), String> {
+            unreachable!()
+        }
+        fn register(
+            &self,
+            _: &Path,
+            _: &[String],
+            _: Option<&str>,
+        ) -> Result<Vec<Mutation>, String> {
+            unreachable!()
+        }
+        fn remove(&self, _: &Path, _: &[String]) -> Result<Vec<Mutation>, String> {
+            unreachable!()
+        }
+    }
+
+    impl AtomicRegistrationStore for ReadOnlyStore {
+        fn register_batch(
+            &self,
+            _: &Path,
+            _: &[RegistrationRequest],
+        ) -> Result<Vec<Mutation>, String> {
+            Err("config is read-only".to_owned())
+        }
+    }
+
+    fn clone_target(path: &str) -> BatchTarget {
+        BatchTarget {
+            path: Some(path.into()),
+            ..target("alpha", Some("github.com/org/alpha"), None)
+        }
+    }
+
+    #[test]
+    fn a_failed_registration_write_keeps_the_clone_and_reports_both_cells() {
+        let git = Cloner::default();
+        let mut batch = Batch::new(
+            BatchAction::CloneRegister,
+            vec![clone_target("/h/repos/org/alpha")],
+        );
+        assert!(batch.needs_terminal());
+        batch.step_clone(
+            &ReadOnlyStore,
+            &git,
+            &NoHooks,
+            Path::new("config"),
+            Path::new("/h"),
+            &mut Silent,
+        );
+        let result = &batch.results[0];
+        assert_eq!(result.outcome, Outcome::Failed);
+        assert_eq!(
+            (result.disk.as_str(), result.config.as_str()),
+            ("cloned", "write failed")
+        );
+        assert_eq!(result.reason, "config is read-only");
+        assert_eq!(git.0.get(), 1);
+    }
+
+    #[test]
+    fn a_checkout_found_at_the_destination_never_reaches_git_even_if_it_vanishes() {
+        // The origin re-check passes, then the destination classifies as missing.
+        let git = Cloner::default();
+        let mut batch = Batch::new(
+            BatchAction::Clone,
+            vec![BatchTarget {
+                found: true,
+                ..clone_target("/h/repos/org/alpha")
+            }],
+        );
+        assert!(!batch.needs_terminal());
+        batch.step_clone(
+            &CountingStore::default(),
+            &git,
+            &NoHooks,
+            Path::new("config"),
+            Path::new("/h"),
+            &mut Silent,
+        );
+        assert_eq!(batch.results[0].outcome, Outcome::Noop);
+        assert_eq!(batch.results[0].reason, "already cloned");
+        assert_eq!(git.0.get(), 0);
+    }
+
+    #[test]
+    fn a_clone_runs_only_at_the_frozen_destination_and_only_while_it_is_missing() {
+        for (path, clones_before, reason) in [
+            (
+                "/h/elsewhere/alpha",
+                0,
+                "stale: configured destination changed since the action started",
+            ),
+            (
+                "/h/repos/org/alpha",
+                1,
+                "stale: destination is no longer missing since the action started",
+            ),
+        ] {
+            let git = Cloner(std::cell::Cell::new(clones_before));
+            let store = CountingStore::default();
+            let mut batch = Batch::new(BatchAction::Clone, vec![clone_target(path)]);
+            batch.step_clone(
+                &store,
+                &git,
+                &NoHooks,
+                Path::new("config"),
+                Path::new("/h"),
+                &mut Silent,
+            );
+            assert_eq!(batch.results[0].outcome, Outcome::Blocked, "{path}");
+            assert_eq!(batch.results[0].reason, reason);
+            assert_eq!(git.0.get(), clones_before);
+            assert!(store.0.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_row_clones_only_at_its_configured_destination_and_only_when_that_is_safe() {
+        use crate::application::inventory::{
+            CheckoutState, InventoryFilesystem, InventoryRow, ObservationField, RegistrationState,
+        };
+        /// `/r/org/gone` is unreadable, `/r/org/alpha` is absent, any other path is a directory.
+        struct Disk;
+        impl InventoryFilesystem for Disk {
+            fn destination_state(&self, path: &Path) -> CheckoutState {
+                match path.to_str() {
+                    Some("/r/org/alpha") => CheckoutState::Missing,
+                    Some("/r/org/gone") => CheckoutState::Unreadable,
+                    _ => CheckoutState::Unknown,
+                }
+            }
+            fn config_revision(&self, _: &Path) -> String {
+                String::new()
+            }
+        }
+        let row = |key: RowKey, observed: Option<&str>| InventoryRow {
+            key,
+            repository: String::new(),
+            path: String::new(),
+            registration: RegistrationState::Unregistered,
+            checkout: if observed.is_some() {
+                CheckoutState::Cloned
+            } else {
+                CheckoutState::Missing
+            },
+            origin: String::new(),
+            remote: None,
+            branch: ObservationField::NotApplicable,
+            changes: ObservationField::NotApplicable,
+            configured_destination: None,
+            observed_path: observed.map(Into::into),
+            declaration: None,
+            warnings: Vec::new(),
+            markable: true,
+        };
+        let declared = |name: &str| RowKey::Declaration {
+            identity: format!("github.com/org/{name}"),
+            destination: format!("/r/org/{name}").into(),
+        };
+        let checkout = |name: &str, path: &str| RowKey::Checkout {
+            identity: format!("github.com/org/{name}"),
+            path: path.into(),
+        };
+        let rows = [
+            row(RowKey::Pattern("github.com/org/*".into()), None),
+            row(RowKey::Path("/r/scratch".into()), Some("/r/scratch")),
+            row(declared("alpha"), None),
+            row(declared("gone"), None),
+            row(declared("taken"), None),
+            row(checkout("other", "/r/org/taken"), Some("/r/org/taken")),
+            row(checkout("alpha", "/r/misc/one"), Some("/r/misc/one")),
+            row(checkout("beta", "/r/org/beta"), Some("/r/org/beta")),
+        ];
+        let config = CountingStore::default().load(Path::new("config")).unwrap();
+        // Per row: why it is blocked, why it is a no-op, found at its path, found elsewhere.
+        type Frozen = (
+            Option<&'static str>,
+            Option<&'static str>,
+            bool,
+            Option<&'static str>,
+        );
+        let expected: [Frozen; 8] = [
+            (Some("patterns are inspect-only"), None, false, None),
+            (Some("no supported origin observed"), None, true, None),
+            (None, None, false, None),
+            (Some("destination is unreadable"), None, false, None),
+            (
+                Some("destination conflicts with repository"),
+                None,
+                false,
+                None,
+            ),
+            (
+                Some("the destination exists and holds no observed checkout"),
+                None,
+                false,
+                Some("/r/org/taken"),
+            ),
+            (None, None, false, Some("/r/misc/one")),
+            (
+                None,
+                Some("a matching checkout is at the destination"),
+                true,
+                None,
+            ),
+        ];
+        for (row, (blocked, noop, found, elsewhere)) in rows.iter().zip(expected) {
+            let target = BatchTarget::freeze_clone(
+                row,
+                String::new(),
+                false,
+                BatchAction::Clone,
+                &config,
+                Path::new("/r"),
+                &rows,
+                true,
+                &Disk,
+            );
+            assert_eq!(target.key, row.key);
+            assert_eq!(target.blocked.as_deref(), blocked, "{:?}", row.key);
+            assert_eq!(target.noop.as_deref(), noop, "{:?}", row.key);
+            assert_eq!(target.found, found, "{:?}", row.key);
+            assert_eq!(target.elsewhere.as_deref(), elsewhere.map(Path::new));
+        }
+        let misplaced = BatchTarget::freeze_clone(
+            &rows[6],
+            String::new(),
+            false,
+            BatchAction::Clone,
+            &config,
+            Path::new("/r"),
+            &rows,
+            true,
+            &Disk,
+        );
+        assert_eq!(misplaced.path.as_deref(), Some(Path::new("/r/org/alpha")));
     }
 }

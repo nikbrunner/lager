@@ -10,7 +10,7 @@ pub struct Shell;
 pub enum ShellError {
     #[error("could not start /bin/sh: {0}")]
     Start(#[source] std::io::Error),
-    #[error("hook exited with status {0}")]
+    #[error("hook exited with {}", super::exit_status::describe(.0))]
     Failed(std::process::ExitStatus),
 }
 

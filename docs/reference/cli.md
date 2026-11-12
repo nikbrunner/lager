@@ -131,7 +131,40 @@ as done. Otherwise the target is blocked as stale (`stale: origin changed`,
 `stale: checkout is gone or unreadable` or `stale: registration changed`,
 followed by `after preview`, or `since the action started` for the current row
 alone), nothing is written for it, and the other targets go on. Blocked and
-failed targets are session problems; a cancelled preview is not. Copy value puts the full
+failed targets are session problems; a cancelled preview is not.
+Repository actions… → Clone only and Clone + register run through the same
+service as `add`, with the same targets, preview and outcomes as above. A clone
+lands at the identity's configured destination. A matching checkout there is a
+no-op; a conflicting, unreadable or unobserved destination blocks the target,
+as do originless rows and patterns. A row whose checkout was found at another
+path clones at the configured destination and leaves the found checkout alone;
+the menu hint, Inspect and the preview name both paths, and such a row is
+previewed even when nothing is marked. Clone only never writes configuration.
+Clone + register registers after a successful or no-op clone; a failed
+configuration write reports `write failed` in the config cell and keeps the
+checkout. A post-clone hook declared for the identity runs after a fresh clone
+and before the registration write; when it fails the target fails, the checkout
+stays and Clone + register does not register it. A checkout found at the
+destination never starts Git. Immediately before a
+clone starts, the configured layout must still lead to the previewed
+destination and a destination previewed as missing must still be missing;
+otherwise the target is blocked (`stale: configured destination changed` or
+`stale: destination is no longer missing`) and nothing is cloned over.
+While Git or a hook runs, the inventory leaves the alternate screen, restores
+cooked mode and the cursor, and reads no input: Git and the hook keep the
+terminal's streams for output, prompts and authentication, without a timeout.
+Above Git's output Lager prints the target (`lager: clone 2 of 3 · identity →
+destination`) and that Git owns the terminal. Keys typed before a child starts
+are discarded and never answer its prompts; that holds for Git and for a hook.
+The terminal stays handed over across consecutive clones. When no target in the
+handoff failed the inventory returns at once. Otherwise the output stays on the
+normal screen under one `lager: failed · name · reason` line per failure
+(`registration failed` for a configuration write), and Enter returns to
+the inventory; Ctrl-C exits `130` there too. On return the inventory discards
+keys typed at the child and shows the batch outcomes; Git's own output stays in
+the shell's scrollback. Ctrl-C during the handover interrupts the child and the
+batch and exits `130` without returning to the inventory; targets already
+completed keep their checkouts and registrations. Copy value puts the full
 original Path, Origin, Identity or Branch on the clipboard through `pbcopy`
 (macOS), `clip` (Windows) or `wl-copy`, `xclip` or `xsel`, trying the next one
 when a utility fails, and gives up after 2 seconds in total; in Inspect, `c` opens the
@@ -154,9 +187,10 @@ not exist reads `missing`; a file, a symlink or a path that cannot be read reads
 a checkout there and `unknown` otherwise, either not observed yet or holding no
 observed checkout after the scan. An unknown, unreadable or conflicting
 destination disables both clone choices with the reason.
-Register only runs as a one-target registration batch with the same re-check and
-outcomes as Repository actions… → Register, keeping the typed reference text.
-Clone only and Clone + register report that cloning is unavailable in this build.
+Each choice runs as a one-target batch with the same re-checks, terminal
+handover and outcomes as the matching entry under Repository actions…, keeping
+the typed reference text. The preview observes the destination once, when it
+opens; a destination that appeared since then blocks the clone as stale.
 Add never targets or changes marks, and closing it changes no files or
 configuration and keeps the query, cursor and marks.
 Session problems… lists every failure that makes the session exit `1`; the header
@@ -167,8 +201,8 @@ the current popup (the Add preview returns to its reference);
 Ctrl-Q quits the app. Normal-mode q and Esc quit.
 Configure shortcuts through [inventory key maps](config.md#inventory-key-maps).
 
-Register and Unregister, including Add's Register only, are the only repository
-mutations; cloning, removal and remote discovery are unavailable. `--remote`, including with `--include-archived`, exits
+Register, Unregister, Clone only and Clone + register, from the menu or from Add,
+are the repository mutations; removal and remote discovery are unavailable. `--remote`, including with `--include-archived`, exits
 `2` before raw mode. `--include-archived` without `--remote` is also invalid.
 Non-TTY use exits `2`; fatal startup/configuration errors exit `1`.
 

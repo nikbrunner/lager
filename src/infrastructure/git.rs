@@ -25,7 +25,7 @@ pub enum GitError {
     },
     #[error("could not start git: {0}")]
     Start(#[source] std::io::Error),
-    #[error("git exited with status {0}")]
+    #[error("git exited with {}", super::exit_status::describe(.0))]
     Failed(ExitStatus),
     #[error("git failed and its fresh destination could not be safely cleaned: {0}")]
     Cleanup(#[source] std::io::Error),

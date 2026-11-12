@@ -24,7 +24,7 @@ use crate::application::inventory::{
     self as model, CopyField, InventoryFilesystem, InventoryReport, LocalScan, Marks,
     SessionProblems,
 };
-use crate::application::ports::Desktop;
+use crate::application::ports::{Desktop, EnsureEvent, EnsureReporter, HookRunner};
 use crate::domain::repository::validate_reference_safety;
 use crate::infrastructure::config::{CommandConfigStore, load_inventory};
 use crate::infrastructure::desktop::NativeDesktop;
@@ -32,6 +32,7 @@ use crate::infrastructure::git::NativeGit;
 use crate::infrastructure::inventory::{
     LocalInventoryFilesystem, ScanContext, ScanEvent, ScanHandle, start_local_scan_with_context,
 };
+use crate::infrastructure::shell::{Shell, ShellError};
 use crate::presentation::escape;
 
 use super::args::InventoryArgs;
@@ -297,13 +298,37 @@ impl InventorySession {
 
     /// Runs the next batch target, records its blocker or failure, and refreshes once the batch
     /// is finished.
-    fn step_batch(&mut self) {
+    /// Returns whether the step started a native child.
+    fn step_batch(&mut self) -> bool {
         let Some(batch) = self.batch.as_mut() else {
-            return;
+            return false;
         };
-        let Some(index) = batch.step(&CommandConfigStore::quiet(), &NativeGit, &self.config_path)
-        else {
-            return;
+        let store = CommandConfigStore::quiet();
+        let mut started = false;
+        let stepped = if batch.action.clones() {
+            let active = batch.active();
+            let mut banner = HandoffBanner {
+                position: active.map_or(0, |index| index + 1),
+                total: batch.targets.len(),
+                identity: active
+                    .and_then(|index| batch.targets[index].identity.as_deref())
+                    .map(escape),
+                home: &self.home,
+                started: &mut started,
+            };
+            batch.step_clone(
+                &store,
+                &NativeGit,
+                &HandoffHooks,
+                &self.config_path,
+                &self.home,
+                &mut banner,
+            )
+        } else {
+            batch.step(&store, &NativeGit, &self.config_path)
+        };
+        let Some(index) = stepped else {
+            return started;
         };
         let (action, target, result) = (batch.action, &batch.targets[index], &batch.results[index]);
         if matches!(result.outcome, Outcome::Blocked | Outcome::Failed)
@@ -339,6 +364,130 @@ impl InventorySession {
             .collect::<Vec<_>>();
             self.message = Some(format!("{}: {}", action.label(), counts.join(", ")));
             refresh(self);
+        }
+        started
+    }
+
+    fn batch_needs_terminal(&self) -> bool {
+        self.batch.as_ref().is_some_and(Batch::needs_terminal)
+    }
+
+    /// The targets from `first` on that failed, one line each for the normal screen.
+    fn failures_since(&self, first: usize) -> Vec<String> {
+        self.batch
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .targets
+                    .iter()
+                    .zip(&batch.results)
+                    .skip(first)
+                    .filter(|(_, result)| result.outcome == Outcome::Failed)
+                    .map(|(target, result)| {
+                        // The reason names the failing part unless it is the config write.
+                        let failed = if result.config == "write failed" {
+                            "registration failed"
+                        } else {
+                            "failed"
+                        };
+                        format!("{failed} · {} · {}", target.name, escape(&result.reason))
+                    })
+            })
+            .collect()
+    }
+
+    fn batch_cancelled(&self) -> bool {
+        self.batch.as_ref().is_some_and(|batch| {
+            batch
+                .results
+                .iter()
+                .any(|result| result.outcome == Outcome::Cancelled)
+        })
+    }
+}
+
+/// Lager's own lines above native Git output, printed just before Git starts.
+struct HandoffBanner<'a> {
+    position: usize,
+    total: usize,
+    identity: Option<String>,
+    home: &'a Path,
+    started: &'a mut bool,
+}
+
+/// Runs a hook through the shell once input typed before it started is gone.
+struct HandoffHooks;
+
+impl HookRunner for HandoffHooks {
+    type Error = ShellError;
+
+    fn is_cancelled(&self, error: &Self::Error) -> bool {
+        Shell.is_cancelled(error)
+    }
+
+    fn run_hook(&self, command: &str, directory: &Path) -> Result<(), Self::Error> {
+        discard_input();
+        Shell.run_hook(command, directory)
+    }
+}
+
+/// One of Lager's own lines on the normal screen while the inventory is suspended.
+fn handoff_line(text: &str) {
+    if no_color() {
+        eprintln!("lager: {text}");
+    } else {
+        eprintln!("\x1b[2mlager: {text}\x1b[0m");
+    }
+}
+
+/// Drops terminal input nobody has read, so keys typed at one reader never reach the next.
+fn discard_input() {
+    // crossterm's tty source reports nothing for a zero timeout, even with parsed keys queued.
+    while event::poll(Duration::from_millis(1)).unwrap_or(false) && event::read().is_ok() {}
+    // SAFETY: tcflush only takes a descriptor; inventory requires stdin to be the terminal.
+    #[cfg(unix)]
+    unsafe {
+        libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
+    }
+}
+
+/// Waits on the normal screen and returns once a line is entered, or with the exit code when
+/// a signal arrives first. What is left of the line is dropped by `resume`.
+fn wait_for_enter(interrupted: &dyn Fn() -> Option<i32>) -> Option<i32> {
+    loop {
+        if let Some(code) = interrupted() {
+            return Some(code);
+        }
+        match event::poll(Duration::from_millis(50)) {
+            Ok(false) => {}
+            Ok(true) if matches!(event::read(), Ok(Event::Resize(..))) => {}
+            Ok(true) | Err(_) => return None,
+        }
+    }
+}
+
+impl EnsureReporter for HandoffBanner<'_> {
+    fn report(&mut self, event: EnsureEvent<'_>) {
+        if let EnsureEvent::CloneStarted {
+            reference,
+            destination,
+        } = event
+        {
+            // Keys typed before Git starts must not answer its prompts.
+            discard_input();
+            *self.started = true;
+            eprintln!();
+            handoff_line(&format!(
+                "clone {} of {} · {} → {}",
+                self.position,
+                self.total,
+                self.identity.clone().unwrap_or_else(|| escape(reference)),
+                home_relative(destination, self.home)
+            ));
+            handoff_line(
+                "Git owns this terminal until it returns. Ctrl-C interrupts the batch and exits 130.",
+            );
+            eprintln!();
         }
     }
 }
@@ -459,6 +608,23 @@ impl TerminalSession {
         Ok(Self { terminal, restore })
     }
 
+    /// Hands the terminal to a native child: cooked mode, main screen, cursor shown.
+    fn suspend(&mut self) {
+        let _ = self.terminal.show_cursor();
+        self.restore.restore();
+    }
+
+    /// Takes the terminal back. After a child ran or a line was awaited, what was typed there
+    /// and left unread is dropped; otherwise every key was meant for the inventory and stays.
+    fn resume(&mut self, discard: bool) -> Result<(), String> {
+        self.restore = TerminalRestore::begin()?;
+        if discard {
+            discard_input();
+        }
+        // The frame ratatui remembers was drawn on a screen that is gone.
+        self.terminal.clear().map_err(|error| error.to_string())
+    }
+
     fn draw_loading(&mut self) -> Result<(), String> {
         self.terminal
             .draw(|frame| {
@@ -488,7 +654,41 @@ impl TerminalSession {
                 return code;
             }
             session.receive_events();
-            session.step_batch();
+            if session.batch_needs_terminal() {
+                self.suspend();
+                let first = session.batch.as_ref().map_or(0, Batch::processed);
+                let mut ran = false;
+                while session.batch_needs_terminal() {
+                    ran |= session.step_batch();
+                    // The terminal stays with the shell: a cancelled child ends the session.
+                    if session.batch_cancelled() || interrupted().is_some() {
+                        session.worker.cancel_and_join();
+                        eprintln!("\nlager: batch interrupted; completed changes remain");
+                        return interrupted().unwrap_or(130);
+                    }
+                }
+                // A failure's native output stays on screen until the user has read it.
+                let failures = session.failures_since(first);
+                if !failures.is_empty() {
+                    eprintln!();
+                    failures.iter().for_each(|line| handoff_line(line));
+                    discard_input();
+                    handoff_line("Enter returns to the inventory. Ctrl-C exits 130.");
+                    if let Some(code) = wait_for_enter(interrupted) {
+                        session.worker.cancel_and_join();
+                        return code;
+                    }
+                }
+                if let Err(error) = self.resume(ran || !failures.is_empty()) {
+                    eprintln!(
+                        "lager: could not restore inventory terminal: {}",
+                        escape(error)
+                    );
+                    return 1;
+                }
+            } else {
+                session.step_batch();
+            }
             let report = match session.report() {
                 Ok(report) => report,
                 Err(error) => {
@@ -923,7 +1123,7 @@ impl TerminalSession {
         let menu = selection.menu.last().map(|(menu, _)| {
             let row = selection.menu_target_row(&report.rows);
             let name = row.map(|row| names[&row.key].clone()).unwrap_or_default();
-            let lines = menu_lines(*menu, row, &name, session, visible_rows);
+            let lines = menu_lines(*menu, row, &name, session, visible_rows, &report.rows);
             (menu_title(*menu, &name, session.marks.len()), lines)
         });
         if let Some((_, lines)) = &menu {
@@ -2062,14 +2262,37 @@ fn inspection_widget(
         };
         lines.extend(field_lines(action.label(), &state, dim(), width));
     }
+    let clone = config
+        .resolve_root(home)
+        .map_err(|_| "configured root is unavailable")
+        .and_then(|root| {
+            batch::clone_preview(row, config, &root, rows, true, &LocalInventoryFilesystem)
+        });
+    let clone = match clone.as_ref().map(|preview| {
+        (
+            preview.eligibility(AddChoice::Clone),
+            row.observed_path
+                .as_ref()
+                .is_some_and(|found| *found != preview.destination),
+            home_relative(&preview.destination, home),
+        )
+    }) {
+        Ok((Eligibility::Available, true, destination)) => {
+            format!("available · clones at {destination}, not at the found path")
+        }
+        Ok((Eligibility::Available, ..)) => "available".to_owned(),
+        Ok((Eligibility::Noop(reason), ..)) => format!("no-op · {reason}"),
+        Ok((Eligibility::Unavailable(reason), ..)) | Err(&reason) => {
+            format!("unavailable · {reason}")
+        }
+    };
+    lines.extend(field_lines("Clone", &clone, dim(), width));
     let reason = if row.markable {
         "unavailable · read-only inventory"
     } else {
         "unavailable · patterns are inspect-only"
     };
-    for action in ["Clone", "Remove"] {
-        lines.extend(field_lines(action, reason, dim(), width));
-    }
+    lines.extend(field_lines("Remove", reason, dim(), width));
     Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 
@@ -2137,6 +2360,7 @@ fn menu_lines(
     name: &str,
     session: &InventorySession,
     visible: &[&model::InventoryRow],
+    rows: &[model::InventoryRow],
 ) -> Vec<MenuLine> {
     let heading = |label: String| MenuLine {
         entry: None,
@@ -2224,47 +2448,80 @@ fn menu_lines(
                 item(Entry::Quit, "Quit", key(Action::Quit), true),
             ]
         }
-        Menu::Repository => [BatchAction::Register, BatchAction::Unregister]
-            .into_iter()
-            .map(|action| {
-                let entry = Entry::Run(action);
-                let label = action.label();
-                match row {
-                    _ if !session.marks.is_empty() => item(
+        Menu::Repository => [
+            BatchAction::Register,
+            BatchAction::Unregister,
+            BatchAction::Clone,
+            BatchAction::CloneRegister,
+        ]
+        .into_iter()
+        .map(|action| {
+            let entry = Entry::Run(action);
+            let label = action.label();
+            let Some(row) = row.filter(|_| session.marks.is_empty()) else {
+                return if session.marks.is_empty() {
+                    on_row(entry, label, String::new())
+                } else {
+                    item(
                         entry,
                         label,
                         format!("{} marked", session.marks.len()),
                         true,
-                    ),
-                    None => on_row(entry, label, String::new()),
-                    Some(row) => match batch::eligibility(row, action, &session.config) {
-                        Eligibility::Available => item(entry, label, String::new(), true),
-                        Eligibility::Noop(reason) => {
-                            item(entry, label, format!("no-op · {reason}"), true)
-                        }
-                        Eligibility::Unavailable(reason) => {
-                            item(entry, label, reason.to_owned(), false)
-                        }
-                    },
+                    )
+                };
+            };
+            let mut elsewhere = None;
+            let eligibility = if action.clones() {
+                match batch::clone_preview(
+                    row,
+                    &session.config,
+                    &session.root,
+                    rows,
+                    session.complete,
+                    &LocalInventoryFilesystem,
+                ) {
+                    Ok(preview) => {
+                        elsewhere = row
+                            .observed_path
+                            .as_ref()
+                            .is_some_and(|found| *found != preview.destination)
+                            .then(|| home_relative(&preview.destination, &session.home));
+                        preview.eligibility(if action == BatchAction::Clone {
+                            AddChoice::Clone
+                        } else {
+                            AddChoice::CloneRegister
+                        })
+                    }
+                    Err(reason) => Eligibility::Unavailable(reason),
                 }
-            })
-            .chain(
-                [
-                    ("Clone only", "Clone only is unavailable in this build"),
-                    (
-                        "Clone + register",
-                        "Clone + register is unavailable in this build",
-                    ),
-                    ("Remove only", "Remove only is unavailable in this build"),
-                    (
-                        "Remove + unregister",
-                        "Remove + unregister is unavailable in this build",
-                    ),
-                ]
-                .into_iter()
-                .map(|(label, message)| on_row(Entry::Unavailable(message), label, String::new())),
-            )
-            .collect(),
+            } else {
+                batch::eligibility(row, action, &session.config)
+            };
+            match (eligibility, elsewhere) {
+                (Eligibility::Available, Some(destination)) => {
+                    item(entry, label, format!("clones at {destination}"), true)
+                }
+                (Eligibility::Available, None) => item(entry, label, String::new(), true),
+                (Eligibility::Noop(reason), _) => {
+                    item(entry, label, format!("no-op · {reason}"), true)
+                }
+                (Eligibility::Unavailable(reason), _) => {
+                    item(entry, label, reason.to_owned(), false)
+                }
+            }
+        })
+        .chain(
+            [
+                ("Remove only", "Remove only is unavailable in this build"),
+                (
+                    "Remove + unregister",
+                    "Remove + unregister is unavailable in this build",
+                ),
+            ]
+            .into_iter()
+            .map(|(label, message)| on_row(Entry::Unavailable(message), label, String::new())),
+        )
+        .collect(),
         Menu::Copy => CopyField::ALL
             .into_iter()
             .map(|field| {
@@ -2384,7 +2641,7 @@ fn activate_menu_entry(
     let names = short_names(&report.rows);
     let row = selection.menu_target_row(&report.rows);
     let name = row.map(|row| names[&row.key].clone()).unwrap_or_default();
-    let line = menu_lines(menu, row, &name, session, visible_rows)
+    let line = menu_lines(menu, row, &name, session, visible_rows, &report.rows)
         .into_iter()
         .filter(|line| line.entry.is_some())
         .nth(index)?;
@@ -2476,6 +2733,17 @@ fn activate_menu_entry(
                 .map(|key| {
                     let hidden = !visible_rows.iter().any(|row| row.key == key);
                     match report.rows.iter().find(|row| row.key == key) {
+                        Some(row) if action.clones() => BatchTarget::freeze_clone(
+                            row,
+                            names[&row.key].clone(),
+                            hidden,
+                            action,
+                            &session.config,
+                            &session.root,
+                            &report.rows,
+                            session.complete,
+                            &LocalInventoryFilesystem,
+                        ),
                         Some(row) => BatchTarget::freeze(
                             row,
                             names[&row.key].clone(),
@@ -2499,12 +2767,16 @@ fn activate_menu_entry(
                             blocked: Some("the entry is no longer listed".to_owned()),
                             noop: None,
                             registration: Default::default(),
+                            elsewhere: None,
                         },
                     }
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            // A clone that lands away from the found checkout is previewed even for one row.
+            let direct =
+                session.marks.is_empty() && targets.iter().all(|target| target.elsewhere.is_none());
             let batch = Batch::new(action, targets);
-            if session.marks.is_empty() {
+            if direct {
                 start_batch(session, selection, batch);
             } else {
                 selection.preview = Some(batch);
@@ -2679,7 +2951,7 @@ fn add_preview_lines(
     (fields, lines)
 }
 
-/// Register only runs as a one-target registration batch.
+/// Each choice runs as a one-target batch of its action.
 fn choose_add(session: &mut InventorySession, selection: &mut Selection) {
     let Some(form) = selection.add.as_mut() else {
         return;
@@ -2692,31 +2964,55 @@ fn choose_add(session: &mut InventorySession, selection: &mut Selection) {
         return;
     };
     let label = choice.label();
-    session.message = Some(match (choice, preview.eligibility(choice)) {
-        (_, Eligibility::Unavailable(reason)) => format!("{label} unavailable: {reason}"),
-        (AddChoice::Register, _)
-            if session
-                .batch
-                .as_ref()
-                .is_some_and(|batch| !batch.finished()) =>
+    session.message = Some(match preview.eligibility(choice) {
+        Eligibility::Unavailable(reason) => format!("{label} unavailable: {reason}"),
+        _ if session
+            .batch
+            .as_ref()
+            .is_some_and(|batch| !batch.finished()) =>
         {
             "A batch is already running".to_owned()
         }
-        (AddChoice::Register, _) => {
-            let target = preview.target(escape(&preview.identity));
+        _ => {
+            let name = escape(&preview.identity);
+            let (action, target) = match choice {
+                AddChoice::Register => (BatchAction::Register, preview.target(name)),
+                AddChoice::Clone => (
+                    BatchAction::Clone,
+                    preview.clone_target(BatchAction::Clone, name),
+                ),
+                AddChoice::CloneRegister => (
+                    BatchAction::CloneRegister,
+                    preview.clone_target(BatchAction::CloneRegister, name),
+                ),
+            };
             selection.add = None;
             start_batch(
                 session,
                 selection,
                 Batch {
                     previewed: true,
-                    ..Batch::new(BatchAction::Register, vec![target])
+                    ..Batch::new(action, vec![target])
                 },
             );
             return;
         }
-        _ => format!("{label} is unavailable in this build"),
     });
+}
+
+/// What an action touches, under its preview and its outcomes.
+fn batch_note(action: BatchAction) -> &'static str {
+    match action {
+        BatchAction::Register | BatchAction::Unregister => {
+            "Registration changes configuration only. Checkouts and their files stay as they are."
+        }
+        BatchAction::Clone => {
+            "Clone only creates checkouts at configured destinations. Configuration stays as it is. Git owns the terminal while it clones."
+        }
+        BatchAction::CloneRegister => {
+            "A target registers only after its clone succeeded or was a no-op. A failed configuration write does not undo a checkout. Git owns the terminal while it clones."
+        }
+    }
 }
 
 fn start_batch(session: &mut InventorySession, selection: &mut Selection, batch: Batch) {
@@ -2848,31 +3144,35 @@ fn batch_widget(batch: &Batch, home: &Path, width: u16) -> Paragraph<'static> {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(" · ");
-        for (line, chunk) in
-            column_chunks(&reason, usize::from(width).saturating_sub(reason_column))
+        // A name too long to leave a reason column moves the reason below its row.
+        let below = usize::from(width).saturating_sub(reason_column) < 20;
+        let indent = if below { 13 } else { reason_column };
+        let mut chunks = column_chunks(&reason, usize::from(width).saturating_sub(indent));
+        let first = if below || chunks.is_empty() {
+            String::new()
+        } else {
+            chunks.remove(0)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{label:<12} "), style),
+            Span::raw(cells(&target.name, &result.disk, &result.config)),
+            Span::styled(first, dim()),
+        ]));
+        lines.extend(
+            chunks
                 .into_iter()
-                .enumerate()
-        {
-            lines.push(if line == 0 {
-                Line::from(vec![
-                    Span::styled(format!("{label:<12} "), style),
-                    Span::raw(cells(&target.name, &result.disk, &result.config)),
-                    Span::styled(chunk, dim()),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::raw(" ".repeat(reason_column)),
-                    Span::styled(chunk, dim()),
-                ])
-            });
-        }
+                .filter(|chunk| !chunk.is_empty())
+                .map(|chunk| {
+                    Line::from(vec![
+                        Span::raw(" ".repeat(indent)),
+                        Span::styled(chunk, dim()),
+                    ])
+                }),
+        );
     }
     lines.extend([
         Line::default(),
-        Line::styled(
-            "Registration changes configuration only. Checkouts and their files stay as they are.",
-            dim(),
-        ),
+        Line::styled(batch_note(batch.action), dim()),
     ]);
     Paragraph::new(lines).wrap(Wrap { trim: false })
 }
@@ -2895,10 +3195,7 @@ fn preview_lines(batch: &Batch, home: &Path) -> Vec<Line<'static>> {
     }
     let mut lines = vec![
         Line::raw(summary),
-        Line::styled(
-            "Registration changes configuration only. Checkouts and their files stay as they are.",
-            dim(),
-        ),
+        Line::styled(batch_note(batch.action), dim()),
     ];
     for target in &batch.targets {
         let (label, style, reason) = match (&target.blocked, &target.noop) {
@@ -2913,11 +3210,17 @@ fn preview_lines(batch: &Batch, home: &Path) -> Vec<Line<'static>> {
         if target.hidden {
             heading.push(Span::styled(" (hidden by filter)", dim()));
         }
+        let path = target
+            .path
+            .as_ref()
+            .map_or_else(|| "no path".to_owned(), |path| home_relative(path, home));
         let mut detail = vec![
-            target
-                .path
-                .as_ref()
-                .map_or_else(|| "no path".to_owned(), |path| home_relative(path, home)),
+            match &target.elsewhere {
+                Some(found) => {
+                    format!("found at {} · clones at {path}", home_relative(found, home))
+                }
+                None => path,
+            },
             target
                 .identity
                 .as_deref()
@@ -2969,7 +3272,12 @@ fn preview_choices(batch: &Batch, run: bool) -> Vec<Line<'static>> {
                 if changing == 1 { "target" } else { "targets" }
             ),
             if unchanged.is_empty() {
-                "configuration only".to_owned()
+                match batch.action {
+                    BatchAction::Clone => "files only",
+                    BatchAction::CloneRegister => "files, then configuration",
+                    BatchAction::Register | BatchAction::Unregister => "configuration only",
+                }
+                .to_owned()
             } else {
                 format!("{} stay unchanged", unchanged.join(" · "))
             },

@@ -16,6 +16,11 @@ use, invalid flags and unavailable remote discovery exit `2` before raw mode;
 fatal startup/configuration errors exit `1`. In Unix binary inventory sessions,
 Ctrl-C or SIGINT exits `130`; SIGTERM exits `143`. Workers are cancelled and the
 terminal is restored before returning.
+While a clone or hook owns the terminal, Ctrl-C interrupts it and the batch, and
+a child that reports an interruption or exits `130` does the same: the session
+exits `130` without returning to the inventory, and completed targets keep their
+checkouts and registrations. SIGTERM during that time takes effect when the
+child returns; the session then exits `143`.
 
 Native Git and hooks inherit stdin, stdout, and stderr. Ordinary child failures
 return aggregate status `1` and allow independent later targets to run.
