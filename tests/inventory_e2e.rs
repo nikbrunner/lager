@@ -3934,7 +3934,7 @@ fn run_inventory_pty_with_exit_observing(
         ws_ypixel: 0,
     };
     let pty = rustix_openpty::openpty(None, Some(&winsize)).unwrap();
-    let mut writer = fs::File::from(pty.controller);
+    let writer = fs::File::from(pty.controller);
     let before = rustix_openpty::rustix::termios::tcgetattr(&writer).unwrap();
     let flags = rustix::fs::fcntl_getfl(&writer).unwrap();
     rustix::fs::fcntl_setfl(&writer, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
@@ -3954,7 +3954,12 @@ fn run_inventory_pty_with_exit_observing(
             Ok(())
         });
     }
-    let mut child = PtyChild(command.spawn().unwrap());
+    let mut child = PtyChild {
+        process: command.spawn().unwrap(),
+        controller: Some(writer),
+        abandoned: false,
+    };
+    let writer = child.controller.as_mut().unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut bytes = Vec::new();
     let mut transcript = String::new();
@@ -3963,14 +3968,17 @@ fn run_inventory_pty_with_exit_observing(
         let size = rustix_openpty::rustix::termios::tcgetwinsize(&writer).unwrap();
         let (rows, cols) = (size.ws_row, size.ws_col);
         if Instant::now() >= deadline {
-            let _ = child.0.kill();
-            let _ = child.0.wait();
+            let stuck = child
+                .kill_and_reap()
+                .err()
+                .map(|stuck| format!("; {stuck}"))
+                .unwrap_or_default();
             retain_transcript(&transcript, rows, cols);
             panic!(
-                "inventory PTY timed out at action {action_index}; transcript retained:\n{transcript}"
+                "inventory PTY timed out at action {action_index}{stuck}; transcript retained:\n{transcript}"
             );
         }
-        read_pty(&mut writer, &mut bytes);
+        read_pty(writer, &mut bytes);
         transcript = String::from_utf8_lossy(&bytes).into_owned();
         let completed_frame = transcript
             .rfind("\x1b[0m")
@@ -3998,12 +4006,12 @@ fn run_inventory_pty_with_exit_observing(
                 }
             })
         {
-            before_action(action_index, &mut writer, completed_frame);
+            before_action(action_index, writer, completed_frame);
             writer.write_all(input).unwrap();
             writer.flush().unwrap();
             action_index += 1;
         }
-        if let Some(status) = child.0.try_wait().unwrap() {
+        if let Some(status) = child.process.try_wait().unwrap() {
             let after = rustix_openpty::rustix::termios::tcgetattr(&writer).unwrap();
             retain_transcript(&transcript, rows, cols);
             assert_eq!(
@@ -4011,7 +4019,7 @@ fn run_inventory_pty_with_exit_observing(
                 actions.len(),
                 "child exited before all actions:\n{transcript}"
             );
-            read_pty(&mut writer, &mut bytes);
+            read_pty(writer, &mut bytes);
             transcript = String::from_utf8_lossy(&bytes).into_owned();
             assert_eq!(status.code(), Some(expected_exit), "{transcript}");
             assert_eq!(
@@ -4027,14 +4035,74 @@ fn run_inventory_pty_with_exit_observing(
 }
 
 #[cfg(unix)]
-struct PtyChild(std::process::Child);
+const PTY_REAP_GRACE: Duration = Duration::from_secs(2);
+
+#[cfg(unix)]
+struct PtyChild {
+    process: std::process::Child,
+    controller: Option<fs::File>,
+    abandoned: bool,
+}
+
+#[cfg(unix)]
+impl PtyChild {
+    fn kill_and_reap(&mut self) -> Result<(), String> {
+        let _ = self.process.kill();
+        // macOS drains the controlling terminal while a killed session leader exits, so an
+        // open, unread controller holds it in exit state E until the controller closes.
+        self.controller = None;
+        let reaped = self.reap_within(PTY_REAP_GRACE);
+        self.abandoned = reaped.is_err();
+        reaped
+    }
+
+    fn reap_within(&mut self, grace: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + grace;
+        loop {
+            if !matches!(self.process.try_wait(), Ok(None)) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "PTY child pid {} did not exit within {grace:?} while being reaped",
+                    self.process.id()
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
 
 #[cfg(unix)]
 impl Drop for PtyChild {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        if self.abandoned {
+            return;
+        }
+        if let Err(stuck) = self.kill_and_reap() {
+            if std::thread::panicking() {
+                eprintln!("{stuck}");
+            } else {
+                panic!("{stuck}");
+            }
+        }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn pty_reap_gives_up_on_a_stuck_child_and_names_it() {
+    let mut child = PtyChild {
+        process: Command::new("sleep").arg("30").spawn().unwrap(),
+        controller: None,
+        abandoned: false,
+    };
+    let pid = child.process.id();
+    let started = Instant::now();
+    let stuck = child.reap_within(Duration::from_millis(300)).unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(2), "{stuck}");
+    assert!(stuck.contains(&format!("pid {pid} ")), "{stuck}");
+    child.kill_and_reap().unwrap();
 }
 
 #[cfg(unix)]
