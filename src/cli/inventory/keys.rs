@@ -43,6 +43,7 @@ pub(super) enum Action {
     Remote,
     Retry,
     Archives,
+    Acknowledge,
 }
 
 impl Action {
@@ -74,6 +75,7 @@ impl Action {
             Self::Remote => "remote",
             Self::Retry => "retry",
             Self::Archives => "archives",
+            Self::Acknowledge => "acknowledge",
         }
     }
 
@@ -92,6 +94,7 @@ impl Action {
                     | Self::Menu
                     | Self::Mark
                     | Self::Add
+                    | Self::Remove
             ),
             Mode::Menu => matches!(
                 self,
@@ -121,6 +124,7 @@ impl Action {
                     | Self::Cancel
                     | Self::Help
                     | Self::Quit
+                    | Self::Acknowledge
             ),
             Mode::Inspection => matches!(
                 self,
@@ -203,6 +207,9 @@ impl Bindings {
                 }
                 if mode == Mode::Inspection {
                     defaults.push((Copy, vec!["c"]));
+                }
+                if mode == Mode::Confirmation {
+                    defaults.push((Acknowledge, vec!["Space"]));
                 }
                 if mode == Mode::Menu {
                     // These inherit normal-mode shortcuts unless the menu map explicitly
@@ -311,6 +318,14 @@ impl Bindings {
             (action.available(mode) && keys.iter().any(|(event, _)| *event == key))
                 .then_some(*action)
         })
+    }
+
+    /// Whether `key` is the first key bound to `action`, the one hints show.
+    pub(super) fn is_first(&self, mode: Mode, action: Action, key: KeyEvent) -> bool {
+        self.0[&mode]
+            .get(&action)
+            .and_then(|keys| keys.first())
+            .is_some_and(|(event, _)| *event == normalized(key))
     }
 
     pub(super) fn hint(&self, mode: Mode, action: Action) -> String {

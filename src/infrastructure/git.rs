@@ -394,27 +394,18 @@ pub fn inspect_removal(destination: &Path, expected_url: &str) -> Result<Vec<Str
     {
         warnings.push("stashes".to_owned());
     }
-    if !Command::new("git")
-        .args(["-C"])
-        .arg(destination)
-        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .output()
-        .map_err(|error| error.to_string())?
-        .status
-        .success()
-    {
+    if git_output(destination, &["symbolic-ref", "--quiet", "--short", "HEAD"]).is_err() {
         warnings.push("detached HEAD".to_owned());
     }
     if git_output(destination, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
         warnings.push("unsafe branch tip".to_owned());
     }
-    let upstream = Command::new("git")
-        .args(["-C"])
-        .arg(destination)
-        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !upstream.status.success() {
+    if git_output(
+        destination,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )
+    .is_err()
+    {
         warnings.push("no upstream".to_owned());
     } else {
         let ahead = git_output(destination, &["rev-list", "--count", "@{u}..HEAD"])?;

@@ -138,7 +138,7 @@ page_down = ["x", "PageDown"]
 ```
 
 Normal actions are `up`, `down`, `refresh`, `search`, `clear_search`, `inspect`,
-`menu`, `mark`, `add`, `help` and `quit`. Menu uses navigation, paging, accept, cancel, help,
+`menu`, `mark`, `add`, `remove`, `help` and `quit`. Menu uses navigation, paging, accept, cancel, help,
 quit, Search, Inspect, Refresh and Clear search. It inherits those last four
 normal shortcuts unless a menu override or a menu-local binding takes precedence.
 Inspection uses navigation, paging, `copy` (default `c`), accept, cancel, help
@@ -153,6 +153,9 @@ Search uses accept, cancel, help and quit, with Enter, Esc, F1 and Ctrl-Q as
 defaults. Its letters remain text. Confirmation settings drive the batch preview:
 up and down move the cursor between Cancel and the action, page up and down
 scroll the target list, accept chooses, cancel closes it, plus help and quit.
+The removal confirmation adds `acknowledge` (default Space), which ticks the
+loss acknowledgment, and the quit prompt of a running batch uses up, down,
+accept and cancel.
 Input settings drive the Add reference form: accept previews the reference,
 cancel closes the form, plus help and quit, with Enter, Esc, F1 and Ctrl-Q as
 defaults; its letters remain text. The Add preview uses the confirmation

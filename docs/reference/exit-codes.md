@@ -11,7 +11,10 @@ For `inventory` / `inv`, normal-mode `q`/Esc or popup Ctrl-Q perform a normal
 quit: `1` if discovery, observation or another operational failure occurred in
 the session, including
 failures followed by successful refresh; otherwise `0`. Informational exclusions
-and deliberate background-work cancellation do not count as failures. Non-TTY
+and deliberate background-work cancellation do not count as failures. A
+cancelled confirmation and a cancelled batch do not count either, including
+cancelling from the quit prompt of a running batch; blocked and failed batch
+targets do. Non-TTY
 use, invalid flags and unavailable remote discovery exit `2` before raw mode;
 fatal startup/configuration errors exit `1`. In Unix binary inventory sessions,
 Ctrl-C or SIGINT exits `130`; SIGTERM exits `143`. Workers are cancelled and the

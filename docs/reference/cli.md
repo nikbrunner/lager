@@ -94,7 +94,7 @@ refresh; otherwise it returns `0`. Informational exclusions and deliberate
 cancellation do not count as failures.
 
 Use `j`/`k` or arrow keys to select a row, `/` for live fuzzy search, Space to
-mark the row, `a` to add a repository by reference, Enter to inspect the selected repository, `m` for the action menu,
+mark the row, `a` to add a repository by reference, `r` to remove the checkout and keep its registration, Enter to inspect the selected repository, `m` for the action menu,
 and `?` for effective bindings. Search matches full attributes, paths and origins; Enter/Esc
 retain the filter and normal-mode Backspace clears it. Ordinary search letters
 remain text; F1 opens search help. Help describes the mode it was opened from.
@@ -150,6 +150,73 @@ clone starts, the configured layout must still lead to the previewed
 destination and a destination previewed as missing must still be missing;
 otherwise the target is blocked (`stale: configured destination changed` or
 `stale: destination is no longer missing`) and nothing is cloned over.
+Remove only (`r`, or Repository actions… → Remove only) and Repository actions…
+→ Remove + unregister delete exact checkouts through the same guards as
+`remove`. They act on the marked rows, hidden ones included, or on the current
+row, and always open a confirmation first. Opening it runs the guards once on
+every target's exact found path, never on the configured destination of a
+checkout found elsewhere, and fixes the targets, their identities and what the
+guards answered. The confirmation lists each target as `ELIGIBLE` (`clean`),
+`LOSS ACKNOWLEDGMENT REQUIRED` with its named local-state losses, or `BLOCKED`
+with the guard that forbids it and `force cannot waive this`. A checkout found
+at the configured destination of another identity's declaration is removed at
+that found path, and the confirmation names the declaration, which stays.
+Cancel is the default and changes nothing. A confirmation, like the batch
+previews of the other actions and the Add preview, is answered only by keys
+typed once it is on screen: input typed before it is drawn is discarded. Targets with losses stay unless the acknowledgment
+row is ticked (Space, or Enter on the row); it covers exactly the listed losses
+at the listed paths. Confirming runs the eligible targets one after another;
+blocked targets and unacknowledged losses are reported as `BLOCKED` and the
+others go on. Immediately before a deletion the target is checked again: the
+configuration must still declare the identity as it did, the checkout must
+still be at its exact path with the same origin, and every guard must pass
+against the current configured root with exactly the losses that were listed.
+The confirmation binds to the checkout that was inspected: its canonical path
+and the device and inode of its directory and Git directory, read before and
+after the Git guards and equal both times, must be the same,
+so another checkout put at the path since, or reached through an ancestor that
+became a symlink, is never deleted.
+Any difference, including a loss that appeared after the box was ticked, blocks
+that target as stale (`stale: registration changed`, `stale: origin changed`,
+`stale: checkout is gone or unreadable`, `stale: selected clone path changed`,
+`stale: checkout was replaced`, `stale: local state changed` or `stale:` with
+the failing guard, followed by `after preview`), deletes nothing
+and leaves its registration alone. Remove only never writes configuration.
+Remove + unregister unregisters an identity once, with its last selected
+target, and only when every selected checkout of that identity is gone from
+disk; a selected checkout that was blocked, failed, stale or left unattempted
+keeps the registration. A removed target whose identity is settled by a later
+one reads `unregister waits for name` until that target has run, then
+`unregistered with name` or `registration kept: …`; the last target of an
+identity that could not unregister reads `registration kept: name was not
+removed`. Remove + unregister needs a complete scan, because unregistering
+changes every checkout of an identity: while a scan runs or is partial its
+menu entry is unavailable with `the scan is not complete` and no confirmation
+opens. Remove only is unaffected. The
+confirmation names unselected checkouts of the same identity whose registration
+the unregister changes; their files stay. A declared row whose destination is
+missing can only be unregistered this way: its destination must still be the
+configured one and still absent when the target runs (`stale: destination is no
+longer missing` otherwise); Remove only is unavailable for it, as both actions
+are for originless rows, patterns, and conflicting, unreadable or unobserved
+destinations. A deletion whose configuration write then fails reports
+`removed` in the disk cell and `write failed` in the config cell; the checkout
+is not restored.
+While a batch runs, the status line shows `Batch: n / m processed`, and
+browsing, search and the menu stay available between two targets. A target is
+never interrupted midway: keys typed while it runs are kept and handled in
+order once it has finished, before the next target starts. Esc followed by a
+character, Enter, Tab or Backspace while a target runs arrives from the
+terminal as one Alt+key; for keys typed during a target the inventory reads it
+as Esc and then that key. Two Esc in a row arrive as one. At any other time an
+Alt+key matches no binding and does nothing.
+Cancel active batch in the menu, or Cancel remaining work in the batch popup,
+stops the batch before its next target: completed targets keep their outcomes,
+the rest stay `UNATTEMPTED`, the inventory refreshes, and the cancellation is
+not a session problem. Quitting while a batch runs, with `q` in the batch popup
+or a normal-mode quit key, pauses it and asks: Return
+to inventory, the default, resumes it; Cancel remaining work and quit cancels
+as above and exits with the session status. Ctrl-C exits `130` at once.
 While Git or a hook runs, the inventory leaves the alternate screen, restores
 cooked mode and the cursor, and reads no input: Git and the hook keep the
 terminal's streams for output, prompts and authentication, without a timeout.
@@ -196,13 +263,14 @@ configuration and keeps the query, cursor and marks.
 Session problems… lists every failure that makes the session exit `1`; the header
 shows their count.
 Popup content scrolls independently of its title and effective action hints.
-In Menu, Inspect, Help, the batch preview and the Add preview, q or Esc closes
+In Menu, Inspect, Help, the batch preview, the removal confirmation and the Add preview, q or Esc closes
 the current popup (the Add preview returns to its reference);
 Ctrl-Q quits the app. Normal-mode q and Esc quit.
 Configure shortcuts through [inventory key maps](config.md#inventory-key-maps).
 
 Register, Unregister, Clone only and Clone + register, from the menu or from Add,
-are the repository mutations; removal and remote discovery are unavailable. `--remote`, including with `--include-archived`, exits
+and Remove only and Remove + unregister are the repository mutations; remote
+discovery is unavailable. `--remote`, including with `--include-archived`, exits
 `2` before raw mode. `--include-archived` without `--remote` is also invalid.
 Non-TTY use exits `2`; fatal startup/configuration errors exit `1`.
 

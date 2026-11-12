@@ -138,6 +138,11 @@ pub trait RemovalFilesystem {
         Ok(self.exists(path))
     }
     fn contains_symlink(&self, path: &Path) -> Result<bool, Self::Error>;
+    /// What tells this directory from another one put at the same path later, such as its
+    /// device and inode. An empty answer means the filesystem cannot tell.
+    fn directory_identity(&self, _path: &Path) -> Result<String, Self::Error> {
+        Ok(String::new())
+    }
     fn remove_dir_all(&self, path: &Path) -> Result<(), Self::Error>;
     fn discover_checkouts(&self, root: &Path) -> Result<Vec<PathBuf>, Self::Error>;
 }

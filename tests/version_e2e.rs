@@ -39,6 +39,7 @@ fn overlay_current_sources(source: &Path, destination: &Path) {
         "src/application/inventory.rs",
         "src/application/mod.rs",
         "src/application/ports.rs",
+        "src/application/warehouse.rs",
         "src/cli/args.rs",
         "src/cli/controller.rs",
         "src/cli/inventory.rs",
@@ -48,6 +49,8 @@ fn overlay_current_sources(source: &Path, destination: &Path) {
         "src/main.rs",
         "src/infrastructure/config.rs",
         "src/infrastructure/desktop.rs",
+        "src/infrastructure/filesystem.rs",
+        "src/infrastructure/git.rs",
         "src/infrastructure/inventory.rs",
         "src/infrastructure/mod.rs",
     ] {

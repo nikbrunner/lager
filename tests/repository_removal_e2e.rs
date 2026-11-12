@@ -415,3 +415,41 @@ fn picker_lists_checkout_roots_without_inspecting_them() {
     assert_eq!(fs::read(&fixture.config).unwrap(), before);
     assert!(nested.join(".git").is_dir());
 }
+
+#[test]
+fn loss_checks_read_the_selected_checkout_when_git_dir_and_work_tree_are_exported() {
+    let fixture = Fixture::new();
+    git(&fixture.primary, &["branch", "-M", "main"]);
+    git(
+        &fixture.primary,
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+    );
+    git(
+        &fixture.primary,
+        &["branch", "-q", "--set-upstream-to=origin/main"],
+    );
+    // Detached and without an upstream: read instead of the checkout, it adds two warnings.
+    let decoy = fixture.temp.path().join("decoy");
+    fs::create_dir_all(&decoy).unwrap();
+    git(&decoy, &["init", "-q"]);
+    git(&decoy, &["config", "user.email", "lager@example.invalid"]);
+    git(&decoy, &["config", "user.name", "lager"]);
+    fs::write(decoy.join("README"), "decoy\n").unwrap();
+    git(&decoy, &["add", "README"]);
+    git(&decoy, &["commit", "-qm", "initial"]);
+    git(&decoy, &["checkout", "-q", "--detach"]);
+
+    let output = support::lager(&fixture.home, &fixture.config)
+        .args(["remove", "file:///primary", "--yes", "--keep-registered"])
+        .env("GIT_DIR", decoy.join(".git"))
+        .env("GIT_WORK_TREE", &decoy)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!fixture.primary.exists());
+    assert_eq!(fs::read_to_string(decoy.join("README")).unwrap(), "decoy\n");
+}

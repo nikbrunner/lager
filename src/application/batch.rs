@@ -1,15 +1,15 @@
 use std::path::{Path, PathBuf};
 
 use crate::application::inventory::{
-    CheckoutState, InventoryFilesystem, InventoryRow, RowKey, configured_destination,
-    wildcard_relative,
+    CheckoutState, InventoryFilesystem, InventoryRow, ObservationField, RowKey,
+    configured_destination, wildcard_relative,
 };
 use crate::application::ports::{
     AtomicRegistrationStore, ConfigStore, EnsureReporter, GitClient, GitRemoval, GitState,
-    HookRunner, Interaction, InteractionError, Mutation,
+    HookRunner, Interaction, InteractionError, Mutation, RemovalFilesystem,
 };
 use crate::application::registry::RegistrationError;
-use crate::application::warehouse::{self, OperationStatus};
+use crate::application::warehouse::{self, ConfirmedCheckout, ExactRemovalError, OperationStatus};
 use crate::domain::config::Config;
 use crate::domain::repository::RepositoryRef;
 use crate::domain::state::LocalState;
@@ -21,6 +21,8 @@ pub enum BatchAction {
     Unregister,
     Clone,
     CloneRegister,
+    Remove,
+    RemoveUnregister,
 }
 
 impl BatchAction {
@@ -30,7 +32,14 @@ impl BatchAction {
             Self::Unregister => "Unregister",
             Self::Clone => "Clone only",
             Self::CloneRegister => "Clone + register",
+            Self::Remove => "Remove only",
+            Self::RemoveUnregister => "Remove + unregister",
         }
+    }
+
+    /// Removal actions delete exact checkouts; they always run from a confirmation.
+    pub fn removes(self) -> bool {
+        matches!(self, Self::Remove | Self::RemoveUnregister)
     }
 
     /// Clone actions run native Git and hooks; the others change configuration only.
@@ -244,6 +253,7 @@ impl AddPreview {
                 .map(str::to_owned),
             registration: self.registration.clone(),
             elsewhere: None,
+            removal: Removal::default(),
         }
     }
 
@@ -315,6 +325,64 @@ pub fn eligibility(row: &InventoryRow, action: BatchAction, config: &Config) -> 
     }
 }
 
+/// Whether a row's checkout can be removed, from what the inventory has observed. The removal
+/// guards themselves run when the target is frozen and again before deletion.
+pub fn removal_eligibility(
+    row: &InventoryRow,
+    action: BatchAction,
+    config: &Config,
+) -> Eligibility {
+    let identity = match &row.key {
+        RowKey::Pattern(_) => return Eligibility::Unavailable("patterns are inspect-only"),
+        RowKey::Path(_) => return Eligibility::Unavailable("no supported origin observed"),
+        RowKey::Checkout { identity, .. } | RowKey::Declaration { identity, .. } => identity,
+    };
+    Eligibility::Unavailable(match row.checkout {
+        CheckoutState::Cloned if row.observed_path.is_none() => {
+            "checkout state is unknown until it is observed"
+        }
+        CheckoutState::Cloned if row.changes == ObservationField::Pending => {
+            "changes are not observed yet"
+        }
+        CheckoutState::Cloned => return Eligibility::Available,
+        CheckoutState::Missing if action != BatchAction::RemoveUnregister => {
+            "no checkout at the configured destination"
+        }
+        CheckoutState::Missing
+            if Registration::of(identity, config)
+                .noop(BatchAction::Unregister)
+                .is_some() =>
+        {
+            "no checkout and no registration"
+        }
+        CheckoutState::Missing => return Eligibility::Available,
+        CheckoutState::Conflict => "destination conflicts with repository",
+        CheckoutState::Unreadable => "destination is unreadable",
+        CheckoutState::Unknown | CheckoutState::Pattern => {
+            "checkout state is unknown until it is observed"
+        }
+    })
+}
+
+/// What a removal target froze beyond its path and identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Removal {
+    /// The canonical path the guards accepted. Only a target with one can be deleted.
+    pub exact: Option<PathBuf>,
+    /// The filesystem identity of the checkout the guards inspected. Another checkout put at
+    /// the same path is not the confirmed one.
+    pub directories: String,
+    /// The local-state losses disclosed in the confirmation. Deleting needs them acknowledged
+    /// and unchanged.
+    pub losses: Vec<String>,
+    /// Checkouts of the same identity that are not selected: unregistering changes their
+    /// registration, their files stay.
+    pub shared: Vec<PathBuf>,
+    /// The identity another declaration configures the found path for. That declaration is
+    /// not this target's and stays.
+    pub occupies: Option<String>,
+}
+
 /// One exact target, fixed when the batch starts; refreshes never change it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchTarget {
@@ -339,6 +407,7 @@ pub struct BatchTarget {
     pub registration: Registration,
     /// The checkout found at another path than the clone destination in `path`.
     pub elsewhere: Option<PathBuf>,
+    pub removal: Removal,
 }
 
 impl BatchTarget {
@@ -378,7 +447,67 @@ impl BatchTarget {
                 Eligibility::Available | Eligibility::Unavailable(_) => None,
             },
             elsewhere: None,
+            removal: Removal::default(),
         }
+    }
+
+    /// Freezes a row for a removal action: the guards `lager remove` uses run once on the
+    /// exact found path, and their answer is what the confirmation lists. A declaration known
+    /// missing freezes its configured destination for Remove + unregister.
+    #[allow(clippy::too_many_arguments)]
+    pub fn freeze_removal(
+        row: &InventoryRow,
+        name: String,
+        hidden: bool,
+        action: BatchAction,
+        config: &Config,
+        root: &Path,
+        rows: &[InventoryRow],
+        selected: &[RowKey],
+        git: &impl GitRemoval,
+        filesystem: &impl RemovalFilesystem,
+    ) -> Self {
+        let mut target = Self::freeze(row, name, hidden, BatchAction::Unregister, config);
+        target.noop = None;
+        target.blocked = match removal_eligibility(row, action, config) {
+            Eligibility::Unavailable(reason) => Some(reason.to_owned()),
+            Eligibility::Available | Eligibility::Noop(_) => None,
+        };
+        if let (None, Some(path)) = (&target.blocked, &row.observed_path) {
+            let reference = target.reference.as_deref().unwrap_or_default();
+            match warehouse::inspect_exact_removal(git, filesystem, root, path, reference) {
+                Ok(confirmed) => {
+                    target.removal.exact = Some(confirmed.path);
+                    target.removal.directories = confirmed.directories;
+                    target.removal.losses = confirmed.losses;
+                }
+                Err(reason) => target.blocked = Some(reason),
+            }
+            target.removal.occupies = rows.iter().find_map(|other| match &other.key {
+                RowKey::Declaration {
+                    identity,
+                    destination,
+                } if destination == path && Some(identity) != target.identity.as_ref() => {
+                    Some(identity.clone())
+                }
+                _ => None,
+            });
+        }
+        if action == BatchAction::RemoveUnregister && target.identity.is_some() {
+            target.removal.shared = rows
+                .iter()
+                .filter(|other| {
+                    !selected.contains(&other.key)
+                        && matches!(
+                            &other.key,
+                            RowKey::Checkout { identity, .. } | RowKey::Declaration { identity, .. }
+                                if Some(identity) == target.identity.as_ref()
+                        )
+                })
+                .filter_map(|other| other.observed_path.clone())
+                .collect();
+        }
+        target
     }
 
     /// Freezes a row for a clone action. The clone lands at the configured destination; a
@@ -452,6 +581,11 @@ pub struct Batch {
     pub results: Vec<TargetResult>,
     /// The user accepted a preview of these targets.
     pub previewed: bool,
+    /// The user acknowledged the losses the confirmation listed. It covers those losses at
+    /// those paths and nothing else.
+    pub acknowledged: bool,
+    /// Remaining work was cancelled; targets not yet run stay unattempted.
+    pub cancelled: bool,
 }
 
 impl Batch {
@@ -465,7 +599,30 @@ impl Batch {
             targets,
             results,
             previewed: false,
+            acknowledged: false,
+            cancelled: false,
         }
+    }
+
+    /// Stops the batch before its next target. Completed outcomes stay as they are.
+    pub fn cancel(&mut self) {
+        if self.finished() {
+            return;
+        }
+        self.cancelled = true;
+        for result in &mut self.results {
+            if result.outcome == Outcome::Unattempted {
+                result.reason = "batch cancelled".to_owned();
+            } else if result.reason.starts_with(UNREGISTER_WAITS) {
+                result.reason = "registration kept: batch cancelled".to_owned();
+            }
+        }
+    }
+
+    /// A removal target the confirmation would run: not blocked, and its losses, if any,
+    /// acknowledged.
+    pub fn removable(&self, target: &BatchTarget) -> bool {
+        target.blocked.is_none() && (target.removal.losses.is_empty() || self.acknowledged)
     }
 
     fn since(&self) -> &'static str {
@@ -481,6 +638,7 @@ impl Batch {
         self.results
             .iter()
             .position(|result| result.outcome == Outcome::Unattempted)
+            .filter(|_| !self.cancelled)
     }
 
     pub fn processed(&self) -> usize {
@@ -495,8 +653,11 @@ impl Batch {
     }
 
     /// The earlier target whose registration change this target shares, if any. Blocked and
-    /// stale targets share nothing.
+    /// stale targets share nothing, and neither do removal targets: each deletes its own path.
     pub fn shared_with(&self, index: usize) -> Option<usize> {
+        if self.action.removes() {
+            return None;
+        }
         let blocked = |index: usize| {
             self.targets[index].blocked.is_some() || self.results[index].outcome == Outcome::Blocked
         };
@@ -570,28 +731,38 @@ impl Batch {
         if Registration::of(identity, &live) != target.registration {
             return changed();
         }
-        // A clone target's own no-op covers the checkout too; its registration decides here.
-        let noop = if self.action.clones() {
-            target.registration.noop(BatchAction::Register).is_some()
-        } else {
-            target.noop.is_some()
+        // A clone or removal target's own no-op covers the checkout too; its registration
+        // decides here.
+        let (noop, unregisters) = match self.action {
+            BatchAction::Register => (target.noop.is_some(), false),
+            BatchAction::Unregister => (target.noop.is_some(), true),
+            BatchAction::Clone | BatchAction::CloneRegister => (
+                target.registration.noop(BatchAction::Register).is_some(),
+                false,
+            ),
+            BatchAction::RemoveUnregister => (
+                target.registration.noop(BatchAction::Unregister).is_some(),
+                true,
+            ),
+            // Remove only keeps registration.
+            BatchAction::Remove => return TargetResult::new(Outcome::Noop, "", ""),
         };
         if noop {
             return TargetResult::new(
                 Outcome::Noop,
                 "",
-                match self.action {
-                    BatchAction::Unregister => "already unregistered",
-                    _ => "already registered",
+                if unregisters {
+                    "already unregistered"
+                } else {
+                    "already registered"
                 },
             );
         }
         let references = [target.reference.clone().unwrap_or_default()];
-        let written = match self.action {
-            BatchAction::Unregister => {
-                crate::application::configuration::unregister(store, config_path, &references)
-            }
-            _ => crate::application::registry::register_batch(
+        let written = if unregisters {
+            crate::application::configuration::unregister(store, config_path, &references)
+        } else {
+            crate::application::registry::register_batch(
                 store,
                 config_path,
                 &references,
@@ -604,7 +775,7 @@ impl Batch {
                 RegistrationError::Interaction(message) | RegistrationError::Store(message) => {
                     message
                 }
-            }),
+            })
         };
         match written {
             Ok(mutations) if mutations.contains(&Mutation::Changed) => {
@@ -764,6 +935,182 @@ impl Batch {
     }
 }
 
+impl Batch {
+    /// Runs the next target of a removal action and returns its index.
+    ///
+    /// Nothing is deleted unless the target is what was confirmed: no frozen blocker, losses
+    /// acknowledged, the live configuration still declaring the identity as frozen, the
+    /// checkout still at its exact path with the same origin, and every `lager remove` guard
+    /// passing against the live root with exactly the disclosed losses. Anything else blocks
+    /// the target as stale and the batch goes on.
+    ///
+    /// Remove + unregister writes once per identity, with the last selected target of it, and
+    /// only when every selected target of that identity is gone from disk.
+    pub fn step_remove<S, G, F>(
+        &mut self,
+        store: &S,
+        git: &G,
+        filesystem: &F,
+        config_path: &Path,
+        home: &Path,
+    ) -> Option<usize>
+    where
+        S: AtomicRegistrationStore,
+        G: GitRemoval + GitState,
+        F: RemovalFilesystem,
+    {
+        let index = self.active()?;
+        self.results[index] = self.remove_target(index, store, git, filesystem, config_path, home);
+        // The last selected target of an identity settles what the earlier ones waited for.
+        let same = |other: &usize| self.targets[*other].identity == self.targets[index].identity;
+        if self.action == BatchAction::RemoveUnregister
+            && !(index + 1..self.targets.len()).any(|other| same(&other))
+        {
+            let last = &self.results[index];
+            let name = &self.targets[index].name;
+            let settled = if last.config == "updated" {
+                format!("unregistered with {name}")
+            } else if last.outcome == Outcome::Succeeded {
+                "was not registered".to_owned()
+            } else if last.disk.is_empty() {
+                format!("registration kept: {name} was not removed")
+            } else {
+                format!("registration kept: see {name}")
+            };
+            for earlier in (0..index).filter(same).collect::<Vec<_>>() {
+                if self.results[earlier].reason.starts_with(UNREGISTER_WAITS) {
+                    self.results[earlier].reason = settled.clone();
+                }
+            }
+        }
+        Some(index)
+    }
+
+    fn remove_target<S, G, F>(
+        &self,
+        index: usize,
+        store: &S,
+        git: &G,
+        filesystem: &F,
+        config_path: &Path,
+        home: &Path,
+    ) -> TargetResult
+    where
+        S: AtomicRegistrationStore,
+        G: GitRemoval + GitState,
+        F: RemovalFilesystem,
+    {
+        let target = &self.targets[index];
+        let blocked = |reason: String| TargetResult::new(Outcome::Blocked, "", reason);
+        let failed = |reason: String| TargetResult::new(Outcome::Failed, "", reason);
+        if let Some(reason) = &target.blocked {
+            return blocked(reason.clone());
+        }
+        if !self.removable(target) {
+            return blocked(format!(
+                "losses not acknowledged: {}",
+                target.removal.losses.join(", ")
+            ));
+        }
+        // A target without an identity owns no registration and no confirmed checkout.
+        let Some(identity) = target.identity.as_deref() else {
+            return blocked("no identity was confirmed".to_owned());
+        };
+        let live = match store.load(config_path) {
+            Ok(live) => live,
+            Err(error) => return failed(error.to_string()),
+        };
+        if Registration::of(identity, &live) != target.registration {
+            return blocked(format!("stale: registration changed {}", self.since()));
+        }
+        let disk = match (&target.path, &target.removal.exact) {
+            (Some(path), Some(exact)) if target.found => {
+                if let Some(reason) = self.stale(target, git) {
+                    return blocked(reason);
+                }
+                let root = match live.resolve_root(home) {
+                    Ok(root) => root,
+                    Err(error) => return failed(error.to_string()),
+                };
+                match warehouse::remove_exact(
+                    git,
+                    filesystem,
+                    &root,
+                    path,
+                    target.reference.as_deref().unwrap_or_default(),
+                    &ConfirmedCheckout {
+                        path: exact.clone(),
+                        directories: target.removal.directories.clone(),
+                        losses: target.removal.losses.clone(),
+                    },
+                ) {
+                    Ok(()) => "removed",
+                    Err(ExactRemovalError::Stale(reason)) => {
+                        return blocked(format!("stale: {reason} {}", self.since()));
+                    }
+                    Err(ExactRemovalError::Failed(reason)) => {
+                        return TargetResult {
+                            disk: "delete failed".to_owned(),
+                            ..failed(reason)
+                        };
+                    }
+                }
+            }
+            // Known missing at invocation: the destination must be the same and still absent.
+            _ if self.action == BatchAction::RemoveUnregister && !target.found => {
+                if let Some(result) = self.stale_clone(target, store, git, config_path, home) {
+                    return result;
+                }
+                ""
+            }
+            _ => return blocked("no exact checkout was confirmed".to_owned()),
+        };
+        let done = |outcome, config: &str, reason: String| TargetResult {
+            outcome,
+            disk: disk.to_owned(),
+            config: config.to_owned(),
+            reason,
+        };
+        if self.action != BatchAction::RemoveUnregister {
+            return done(Outcome::Succeeded, "", String::new());
+        }
+        let same = |other: &usize| self.targets[*other].identity == target.identity;
+        if let Some(last) = (index + 1..self.targets.len()).rev().find(same) {
+            return done(
+                Outcome::Succeeded,
+                "",
+                format!("{UNREGISTER_WAITS} {}", self.targets[last].name),
+            );
+        }
+        // One selected checkout of the identity that stays keeps the registration.
+        if let Some(kept) = (0..index)
+            .find(|other| same(other) && self.results[*other].outcome != Outcome::Succeeded)
+        {
+            return done(
+                Outcome::Blocked,
+                "",
+                format!(
+                    "registration kept: {} was not removed",
+                    self.targets[kept].name
+                ),
+            );
+        }
+        let written = self.write_registration(index, store, config_path);
+        match written.outcome {
+            Outcome::Noop => done(Outcome::Succeeded, "", "was not registered".to_owned()),
+            Outcome::Succeeded if disk.is_empty() => done(
+                Outcome::Succeeded,
+                &written.config,
+                "absent · rechecked".to_owned(),
+            ),
+            outcome => done(outcome, &written.config, written.reason),
+        }
+    }
+}
+
+/// The reason of a removed target whose identity is unregistered with a later target.
+const UNREGISTER_WAITS: &str = "unregister waits for";
+
 /// Batches never ask; registration runs without a post-clone hook choice.
 struct NoPrompts;
 
@@ -903,6 +1250,154 @@ mod tests {
         }
     }
 
+    impl crate::application::ports::GitState for Origins {
+        fn classify_destination(&self, _: &Path, _: &str) -> crate::domain::state::LocalState {
+            crate::domain::state::LocalState::Missing
+        }
+    }
+
+    /// Known-missing targets never reach the filesystem.
+    struct NoFiles;
+
+    impl crate::application::ports::RemovalFilesystem for NoFiles {
+        type Error = String;
+        fn canonicalize(&self, _: &Path) -> Result<std::path::PathBuf, String> {
+            unreachable!()
+        }
+        fn is_symlink(&self, _: &Path) -> Result<bool, String> {
+            unreachable!()
+        }
+        fn exists(&self, _: &Path) -> bool {
+            unreachable!()
+        }
+        fn contains_symlink(&self, _: &Path) -> Result<bool, String> {
+            unreachable!()
+        }
+        fn remove_dir_all(&self, _: &Path) -> Result<(), String> {
+            unreachable!()
+        }
+        fn discover_checkouts(&self, _: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn cancelling_before_the_last_checkout_of_an_identity_keeps_its_registration() {
+        let alpha = "github.com/org/alpha";
+        let home = Path::new("/h");
+        let store = CountingStore(RefCell::default(), vec![alpha], false);
+        let live = store.load(Path::new("config")).unwrap();
+        let missing = BatchTarget {
+            path: Some(crate::application::inventory::configured_destination(
+                &live,
+                &crate::domain::repository::RepositoryRef::parse(alpha).unwrap(),
+                &live.resolve_root(home).unwrap(),
+            )),
+            registration: Registration {
+                explicit: true,
+                exclusions: Vec::new(),
+            },
+            ..target("alpha", Some(alpha), None)
+        };
+        let mut batch = Batch::new(
+            BatchAction::RemoveUnregister,
+            vec![missing.clone(), missing],
+        );
+        batch.step_remove(&store, &Origins(None), &NoFiles, Path::new("config"), home);
+        assert_eq!(batch.results[0].reason, "unregister waits for alpha");
+        batch.cancel();
+        assert!(batch.finished());
+        assert_eq!(
+            batch.step_remove(&store, &Origins(None), &NoFiles, Path::new("config"), home),
+            None
+        );
+        assert_eq!(
+            (batch.results[0].outcome, batch.results[0].reason.as_str()),
+            (Outcome::Succeeded, "registration kept: batch cancelled")
+        );
+        assert_eq!(
+            (batch.results[1].outcome, batch.results[1].reason.as_str()),
+            (Outcome::Unattempted, "batch cancelled")
+        );
+        assert!(store.0.borrow().is_empty());
+    }
+
+    #[test]
+    fn only_a_selected_target_of_the_same_identity_that_stays_keeps_the_registration() {
+        let alpha = "github.com/org/alpha";
+        let home = Path::new("/h");
+        let unlisted = Some("the entry is no longer listed");
+        // The other target: its identity, whether it is blocked and comes first, and whether
+        // alpha is then unregistered.
+        for (identity, blocked, first, unregistered) in [
+            (Some(alpha), unlisted, true, false),
+            (Some(alpha), unlisted, false, false),
+            (None, unlisted, true, true),
+            (None, None, true, true),
+            (Some("github.com/org/beta"), unlisted, true, true),
+        ] {
+            let store = CountingStore(RefCell::default(), vec![alpha], false);
+            let live = store.load(Path::new("config")).unwrap();
+            let missing = BatchTarget {
+                path: Some(crate::application::inventory::configured_destination(
+                    &live,
+                    &crate::domain::repository::RepositoryRef::parse(alpha).unwrap(),
+                    &live.resolve_root(home).unwrap(),
+                )),
+                registration: Registration {
+                    explicit: true,
+                    exclusions: Vec::new(),
+                },
+                ..target("alpha", Some(alpha), None)
+            };
+            let mut targets = vec![target("other", identity, blocked), missing];
+            if !first {
+                targets.reverse();
+            }
+            let mut batch = Batch::new(BatchAction::RemoveUnregister, targets);
+            while batch
+                .step_remove(&store, &Origins(None), &NoFiles, Path::new("config"), home)
+                .is_some()
+            {}
+            let (other, kept) = if first { (0, 1) } else { (1, 0) };
+            assert_eq!(batch.results[other].outcome, Outcome::Blocked);
+            assert_eq!(
+                batch.results[other].reason,
+                blocked.unwrap_or("no identity was confirmed")
+            );
+            assert_eq!(
+                *store.0.borrow(),
+                if unregistered {
+                    vec![alpha.to_owned()]
+                } else {
+                    Vec::new()
+                },
+                "{identity:?} {blocked:?} first: {first}"
+            );
+            assert_eq!(
+                (
+                    batch.results[kept].outcome,
+                    batch.results[kept].config.as_str(),
+                    batch.results[kept].reason.as_str()
+                ),
+                match (unregistered, first) {
+                    (true, _) => (Outcome::Succeeded, "updated", "absent · rechecked"),
+                    (false, true) => (
+                        Outcome::Blocked,
+                        "",
+                        "registration kept: other was not removed"
+                    ),
+                    // Settled once the later target is known to stay.
+                    (false, false) => (
+                        Outcome::Succeeded,
+                        "",
+                        "registration kept: other was not removed"
+                    ),
+                }
+            );
+        }
+    }
+
     fn target(name: &str, identity: Option<&str>, blocked: Option<&str>) -> BatchTarget {
         BatchTarget {
             key: RowKey::Path(name.into()),
@@ -916,6 +1411,7 @@ mod tests {
             noop: None,
             registration: Registration::default(),
             elsewhere: None,
+            removal: Default::default(),
         }
     }
 

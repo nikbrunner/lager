@@ -53,6 +53,13 @@ impl RemovalFilesystem for Filesystem {
         Ok(false)
     }
 
+    #[cfg(unix)]
+    fn directory_identity(&self, path: &Path) -> Result<String, Self::Error> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(path)?;
+        Ok(format!("{}:{}", metadata.dev(), metadata.ino()))
+    }
+
     fn remove_dir_all(&self, path: &Path) -> Result<(), Self::Error> {
         std::fs::remove_dir_all(path)
     }

@@ -302,7 +302,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
             &["  j/k rows  / search  a add  Enter inspect  R refresh  m menu  ? help  q quit"]
         } else {
             &[
-                "  j/k rows  / search  Space mark  a add  Enter inspect  R refresh  m menu  ? help  q quit",
+                "  j/k rows  / search  Space mark  a add  r remove  Enter inspect  R refresh  m menu  ? help  q quit",
             ]
         };
         let status = rows - 1 - footer.len();
@@ -3363,8 +3363,8 @@ fn inventory_inspect_explains_unavailable_actions_without_changing_the_checkout(
                     "pair: Register no-op",
                     "pair: Unregister available",
                     "pair: Clone no-op",
-                    "pair: Remove unavailable",
-                    "read-only inventory",
+                    "pair: Remove available",
+                    "removes the found path",
                 ],
                 b"ar \x1b".to_vec(),
             ),
@@ -3373,10 +3373,8 @@ fn inventory_inspect_explains_unavailable_actions_without_changing_the_checkout(
         24,
         80,
     );
-    assert!(!screen_has_pair(
-        &screen_text(&transcript, 24, 80),
-        "Remove available"
-    ));
+    // Typed inside Inspect, `r` is no action: no removal confirmation ever opened.
+    assert!(!transcript.contains("Remove checkouts /"));
     assert_eq!(fs::read_to_string(&config).unwrap(), settings);
     assert_eq!(fs::read(repository.join(".git/HEAD")).unwrap(), head);
     assert_eq!(
@@ -4239,13 +4237,35 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
                 ],
                 b"\x1b".to_vec(),
             ),
-            (vec!["NORMAL", "absent: Batch /"], repository(4)),
+            // Removal needs the observed checkout too.
             (
-                vec!["Remove only is unavailable in this build"],
-                repository(5),
+                vec!["NORMAL", "absent: Batch /", "absent: Scanning"],
+                repository(4),
             ),
             (
-                vec!["Remove + unregister is unavailable in this build"],
+                vec![
+                    "Remove checkouts / keep registration",
+                    "LOSS ACKNOWLEDGMENT REQUIRED alpha",
+                    "no upstream",
+                    // At 80 columns the exit routes stay in the popup and in the hint line.
+                    "Space acknowledge · Enter choose · Esc cancel",
+                    "Space acknowledge  Enter choose  Esc cancel",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec![
+                    "Remove only cancelled · nothing changed",
+                    "absent: Remove checkouts /",
+                ],
+                repository(5),
+            ),
+            (vec!["Remove checkouts / unregister"], b"\x1b".to_vec()),
+            (
+                vec![
+                    "Remove + unregister cancelled · nothing changed",
+                    "absent: Remove checkouts /",
+                ],
                 b"m\r\x1b".to_vec(),
             ),
             (
@@ -6425,6 +6445,1316 @@ fn inventory_failed_registration_write_is_one_problem_per_identity_and_keeps_col
     }
     assert_eq!(fs::read_to_string(&config).unwrap(), original);
     assert_eq!(checkout_tree(&root), tree);
+}
+
+/// A fixture checkout whose branch tracks its origin, so removal finds nothing to lose.
+#[cfg(unix)]
+fn tracked_repo(path: &std::path::Path, origin: &str) {
+    init_repo(path, origin, true);
+    run_git(path, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    run_git(path, &["branch", "-q", "--set-upstream-to=origin/main"]);
+}
+
+/// A primary checkout Git still lists a linked worktree for, outside the root.
+#[cfg(unix)]
+fn add_dependent_worktree(primary: &std::path::Path, outside: &std::path::Path) {
+    run_git(
+        primary,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            outside.to_str().unwrap(),
+        ],
+    );
+}
+
+/// alpha is clean and declared, core has a dependent worktree, draft has local changes.
+#[cfg(unix)]
+fn removal_fixture(root: &std::path::Path, outside: &std::path::Path) {
+    for name in ["alpha", "core", "draft"] {
+        tracked_repo(
+            &root.join("org").join(name),
+            &format!("git@github.com:org/{name}.git"),
+        );
+    }
+    add_dependent_worktree(&root.join("org/core"), outside);
+    fs::write(root.join("org/draft/README"), "modified\n").unwrap();
+    fs::write(root.join("org/draft/notes"), "untracked\n").unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_removal_confirmation_lists_clean_loss_and_blocked_targets_and_cancelling_changes_nothing()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n";
+    fs::write(&config, original).unwrap();
+    removal_fixture(&root, &temp.path().join("dependent"));
+    init_repo_without_origin(&root.join("scratch/local"));
+    let tree = checkout_tree(&root);
+    let kept = |message: &'static str| {
+        vec![
+            "NORMAL · 1 row",
+            "absent: Remove checkouts /",
+            message,
+            "4 marked · 3 hidden",
+            "selected: draft",
+            "absent: problem",
+            "absent: Batch /",
+        ]
+    };
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 4 rows", "absent: Scanning"],
+                b"kk j j j /github.com/org/draft\r".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "4 marked · 3 hidden", "pair: r remove"],
+                b"r".to_vec(),
+            ),
+            (
+                vec![
+                    "CONFIRM",
+                    "Remove checkouts / keep registration",
+                    "4 exact targets · 3 hidden by filter",
+                    "Registration and exclusions stay unchanged. ensure can recreate these checkouts.",
+                    "ELIGIBLE alpha (hidden by filter)",
+                    "~/repos/org/alpha · github.com/org/alpha · clean",
+                    "BLOCKED core (hidden by filter)",
+                    "dependent worktree metadata",
+                    "force cannot waive this",
+                    "LOSS ACKNOWLEDGMENT REQUIRED draft",
+                    "~/repos/org/draft · github.com/org/draft · unstaged changes, untracked files",
+                    "BLOCKED local (hidden by filter)",
+                    "~/repos/scratch/local · no identity · no supported origin observed",
+                    "[ ] Also remove draft and accept its listed losses",
+                    "pair: losses Space",
+                    "pair: Cancel default",
+                    "Remove 1 checkout",
+                    "alpha · cannot be undone",
+                    "Nothing changes until you confirm",
+                    "Space acknowledge",
+                    "pair: Esc cancel",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                kept("Remove only cancelled · nothing changed"),
+                b"r".to_vec(),
+            ),
+            (
+                vec!["[ ] Also remove draft and accept its listed losses"],
+                b" ".to_vec(),
+            ),
+            (
+                vec![
+                    "[x] Also remove draft and accept its listed losses",
+                    "Remove 2 checkouts",
+                    "alpha, draft · cannot be undone",
+                    "pair: Cancel default",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                kept("Remove only cancelled · nothing changed"),
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_remove_only_continues_past_blocked_targets_and_keeps_registration() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n";
+    fs::write(&config, original).unwrap();
+    removal_fixture(&root, &temp.path().join("dependent"));
+    let kept = [
+        checkout_tree(&root.join("org/core")),
+        checkout_tree(&root.join("org/draft")),
+    ];
+
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 3 rows", "absent: Scanning"],
+                b"kk j j ".to_vec(),
+            ),
+            (vec!["3 marked · 0 hidden"], b"r".to_vec()),
+            (
+                vec![
+                    "Remove checkouts / keep registration",
+                    "ELIGIBLE alpha",
+                    "BLOCKED core",
+                    "LOSS ACKNOWLEDGMENT REQUIRED draft",
+                    "[ ] Also remove draft",
+                    "Remove 1 checkout",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Remove only",
+                    "3 / 3 processed",
+                    "pair: SUCCEEDED alpha",
+                    "pair: alpha removed",
+                    "pair: BLOCKED core",
+                    "dependent worktree metadata",
+                    "pair: BLOCKED draft",
+                    "losses not acknowledged: unstaged changes",
+                    "Remove only: 1 succeeded, 2 blocked",
+                    "· 2 problems",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 3 rows", "absent: Batch /", "absent: Scanning"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        1,
+        |_| {},
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert!(!root.join("org/alpha").exists());
+    assert_eq!(
+        [
+            checkout_tree(&root.join("org/core")),
+            checkout_tree(&root.join("org/draft"))
+        ],
+        kept
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_acknowledged_losses_are_removed_while_a_blocker_and_a_new_loss_stay() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    removal_fixture(&root, &temp.path().join("dependent"));
+    fs::remove_dir_all(root.join("org/alpha")).unwrap();
+    // The blocker is dirty too: the acknowledgment must not reach it.
+    fs::write(root.join("org/core/notes"), "untracked\n").unwrap();
+    tracked_repo(&root.join("org/shifty"), "git@github.com:org/shifty.git");
+    fs::write(root.join("org/shifty/notes"), "untracked\n").unwrap();
+    let core = checkout_tree(&root.join("org/core"));
+
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 3 rows", "absent: Scanning"],
+                b"kk j j ".to_vec(),
+            ),
+            (vec!["3 marked · 0 hidden"], b"r".to_vec()),
+            (
+                vec![
+                    "BLOCKED core",
+                    "LOSS ACKNOWLEDGMENT REQUIRED draft",
+                    "LOSS ACKNOWLEDGMENT REQUIRED shifty",
+                    "~/repos/org/shifty · github.com/org/shifty · untracked files",
+                    "[ ] Also remove 2 checkouts and accept their listed losses",
+                    "Remove 0 checkouts",
+                ],
+                b" ".to_vec(),
+            ),
+            (
+                vec![
+                    "[x] Also remove 2 checkouts and accept their listed losses",
+                    "Remove 2 checkouts",
+                    "draft, shifty · cannot be undone",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Remove only",
+                    "3 / 3 processed",
+                    "pair: BLOCKED core",
+                    "dependent worktree metadata",
+                    "pair: SUCCEEDED draft",
+                    "pair: draft removed",
+                    "pair: BLOCKED shifty",
+                    "stale: local state changed after preview",
+                    "Remove only: 1 succeeded, 2 blocked",
+                    "· 2 problems",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "absent: Batch /", "absent: Scanning"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        1,
+        |action| {
+            if action == 3 {
+                // A loss class that was not on the list when the box was ticked.
+                fs::write(root.join("org/shifty/README"), "modified\n").unwrap();
+            }
+        },
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert!(!root.join("org/draft").exists());
+    assert_eq!(checkout_tree(&root.join("org/core")), core);
+    assert_eq!(
+        fs::read_to_string(root.join("org/shifty/README")).unwrap(),
+        "modified\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("org/shifty/notes")).unwrap(),
+        "untracked\n"
+    );
+    assert!(root.join("org/shifty/.git").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_remove_unregister_reports_a_deleted_checkout_and_a_failed_config_write_separately() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let directory = temp.path().join("etc");
+    let config = directory.join("config.toml");
+    fs::create_dir_all(&directory).unwrap();
+    let original = "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n";
+    fs::write(&config, original).unwrap();
+    for directory in ["org", "archive"] {
+        tracked_repo(
+            &root.join(directory).join("alpha"),
+            "git@github.com:org/alpha.git",
+        );
+    }
+    tracked_repo(&root.join("org/beta"), "git@github.com:org/beta.git");
+    let beta = checkout_tree(&root.join("org/beta"));
+    // The lock lives in the test cache beside the config; only the config's own directory is read-only.
+    fs::create_dir_all(directory.join("lager-test-cache")).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_inventory_pty_with_exit(
+            support::lager(&home, &config).arg("inventory"),
+            &[
+                (
+                    vec!["NORMAL · 3 rows", "absent: Scanning"],
+                    b"kk j ".to_vec(),
+                ),
+                (vec!["2 marked · 0 hidden"], b"m\rjjjjj\r".to_vec()),
+                (
+                    vec![
+                        "Remove checkouts / unregister",
+                        "2 exact targets",
+                        "ELIGIBLE alpha",
+                        "ELIGIBLE alpha (copy)",
+                        "Remove + unregister 2 targets",
+                    ],
+                    b"j\r".to_vec(),
+                ),
+                (
+                    vec![
+                        "Batch / Remove + unregister",
+                        "2 / 2 processed",
+                        "pair: SUCCEEDED alpha",
+                        // The first checkout is gone; its row points at the one that failed.
+                        "registration kept: see alpha (copy)",
+                        "pair: FAILED alpha",
+                        "pair: (copy) removed",
+                        "pair: removed write",
+                        "pair: write failed",
+                        "could not write config",
+                        "Remove + unregister: 1 succeeded, 1 failed",
+                        "· 1 problem",
+                    ],
+                    b"\x1b".to_vec(),
+                ),
+                (
+                    vec!["NORMAL", "absent: Batch /", "absent: Scanning"],
+                    b"q".to_vec(),
+                ),
+            ],
+            32,
+            132,
+            1,
+            |_| {},
+        );
+    }));
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert!(!root.join("org/alpha").exists());
+    assert!(!root.join("archive/alpha").exists());
+    assert_eq!(checkout_tree(&root.join("org/beta")), beta);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_remove_unregister_keeps_registration_while_a_selected_checkout_of_the_identity_stays()
+{
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n";
+    fs::write(&config, original).unwrap();
+    for directory in ["org", "archive"] {
+        tracked_repo(
+            &root.join(directory).join("alpha"),
+            "git@github.com:org/alpha.git",
+        );
+    }
+    add_dependent_worktree(&root.join("org/alpha"), &temp.path().join("dependent"));
+    let declared = checkout_tree(&root.join("org/alpha"));
+
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 2 rows", "absent: Scanning"],
+                b"kk j ".to_vec(),
+            ),
+            (vec!["2 marked · 0 hidden"], b"m\rjjjjj\r".to_vec()),
+            (
+                vec![
+                    "Remove checkouts / unregister",
+                    "2 exact targets",
+                    "BLOCKED alpha",
+                    "~/repos/org/alpha · github.com/org/alpha",
+                    "ELIGIBLE alpha (copy)",
+                    "~/repos/archive/alpha · github.com/org/alpha · clean",
+                    "Remove + unregister 1 target",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Remove + unregister",
+                    "2 / 2 processed",
+                    "pair: BLOCKED alpha",
+                    "dependent worktree metadata",
+                    "pair: (copy) removed",
+                    "registration kept: alpha was not removed",
+                    "Remove + unregister: 2 blocked",
+                    "· 2 problems",
+                    "absent: updated",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "absent: Batch /", "absent: Scanning"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        1,
+        |_| {},
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert!(!root.join("archive/alpha").exists());
+    assert_eq!(checkout_tree(&root.join("org/alpha")), declared);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_remove_unregister_writes_once_per_identity_and_previews_the_unselected_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/beta\"\n[[repositories]]\nurl = \"github.com/org/gone\"\n";
+    fs::write(&config, original).unwrap();
+    for directory in ["org", "archive", "keep"] {
+        tracked_repo(
+            &root.join(directory).join("beta"),
+            "git@github.com:org/beta.git",
+        );
+    }
+    let unselected = checkout_tree(&root.join("keep/beta"));
+    let mut configs = Vec::new();
+
+    run_inventory_pty_actions_with_hook(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 4 rows", "absent: Scanning"],
+                b"kk j j ".to_vec(),
+            ),
+            (vec!["3 marked · 0 hidden"], b"m\rjjjjj\r".to_vec()),
+            (
+                vec![
+                    "Remove checkouts / unregister",
+                    "3 exact targets",
+                    "ELIGIBLE beta",
+                    "~/repos/org/beta · github.com/org/beta · clean",
+                    "also unregisters ~/repos/keep/beta · not selected, its files stay",
+                    "ELIGIBLE gone",
+                    "~/repos/org/gone · github.com/org/gone · known missing · absence is rechecked first",
+                    "ELIGIBLE beta (copy)",
+                    "~/repos/archive/beta · github.com/org/beta · clean",
+                    "Remove + unregister 3 targets",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Remove + unregister",
+                    "3 / 3 processed",
+                    "pair: SUCCEEDED beta",
+                    "pair: beta removed",
+                    "unregistered with beta (copy)",
+                    "pair: SUCCEEDED gone",
+                    "pair: gone updated",
+                    "absent · rechecked",
+                    "pair: (copy) removed",
+                    "pair: removed updated",
+                    "Remove + unregister: 3 succeeded",
+                    "absent: problem",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Batch /", "absent: Scanning"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        |action| {
+            if action == 2 {
+                configs.push(fs::read_to_string(&config).unwrap());
+            }
+        },
+    );
+    let gone = cli_config(&home, original, &["unregister", "github.com/org/gone"]);
+    let both = cli_config(&home, &gone, &["unregister", "git@github.com:org/beta.git"]);
+    assert!(!both.contains("[[repositories]]"), "{both}");
+    assert_eq!(configs, [original]);
+    assert_eq!(fs::read_to_string(&config).unwrap(), both);
+    assert!(!root.join("org/beta").exists());
+    assert!(!root.join("archive/beta").exists());
+    assert_eq!(checkout_tree(&root.join("keep/beta")), unselected);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_removal_blocks_targets_whose_origin_path_or_registration_changed_after_confirmation() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n[[repositories]]\nurl = \"github.com/org/delta\"\n[[repositories]]\nurl = \"github.com/org/gamma\"\n";
+    fs::write(&config, original).unwrap();
+    for name in ["alpha", "beta", "delta", "gamma"] {
+        tracked_repo(
+            &root.join("org").join(name),
+            &format!("git@github.com:org/{name}.git"),
+        );
+    }
+    let gamma = ["unregister", "github.com/org/gamma"];
+    let mut changed = None;
+
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 4 rows", "absent: Scanning"],
+                b"kk j j j ".to_vec(),
+            ),
+            (vec!["4 marked · 0 hidden"], b"m\rjjjjj\r".to_vec()),
+            (
+                vec![
+                    "Remove checkouts / unregister",
+                    "4 exact targets",
+                    "ELIGIBLE alpha",
+                    "ELIGIBLE delta",
+                    "ELIGIBLE gamma",
+                    "ELIGIBLE beta",
+                    "Remove + unregister 4 targets",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Remove + unregister",
+                    "4 / 4 processed",
+                    "pair: BLOCKED alpha",
+                    "stale: origin changed after preview",
+                    "pair: SUCCEEDED delta",
+                    "pair: delta removed",
+                    "pair: removed updated",
+                    "pair: BLOCKED gamma",
+                    "stale: registration changed after preview",
+                    "pair: BLOCKED beta",
+                    "stale: checkout is gone or unreadable",
+                    "Remove + unregister: 1 succeeded, 3 blocked",
+                    "· 3 problems",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "absent: Batch /", "absent: Scanning"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        1,
+        |action| {
+            if action == 2 {
+                run_git(
+                    &root.join("org/alpha"),
+                    &[
+                        "remote",
+                        "set-url",
+                        "origin",
+                        "git@github.com:org/other.git",
+                    ],
+                );
+                fs::rename(root.join("org/beta"), root.join("org/moved")).unwrap();
+                let result = support::lager(&home, &config).args(gamma).output().unwrap();
+                assert!(result.status.success(), "{result:?}");
+                changed = Some(checkout_tree(&root));
+            }
+        },
+    );
+    let unregistered = cli_config(&home, original, &gamma);
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        cli_config(
+            &home,
+            &unregistered,
+            &["unregister", "git@github.com:org/delta.git"]
+        )
+    );
+    let mut expected = changed.expect("the hook ran");
+    expected.retain(|path, _| !path.starts_with("org/delta"));
+    assert!(expected.keys().any(|path| path.starts_with("org/moved")));
+    assert_eq!(checkout_tree(&root), expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_remove_unregister_rechecks_that_a_known_missing_destination_is_still_absent() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/gone\"\n";
+    fs::write(&config, original).unwrap();
+    fs::create_dir_all(&root).unwrap();
+
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "missing"],
+                b"kkr".to_vec(),
+            ),
+            (
+                vec![
+                    "Remove only unavailable: no checkout at the configured destination",
+                    "absent: Remove checkouts /",
+                ],
+                b"m\rjjjjj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Remove checkouts / unregister",
+                    "ELIGIBLE gone",
+                    "known missing · absence is rechecked first",
+                    "Remove + unregister 1 target",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Remove + unregister",
+                    "pair: BLOCKED gone",
+                    "stale: destination is no longer missing",
+                    "· 1 problem",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "absent: Batch /", "absent: Scanning"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        1,
+        |action| {
+            if action == 2 {
+                fs::create_dir_all(root.join("org/gone")).unwrap();
+                fs::write(root.join("org/gone/keep"), "arrived\n").unwrap();
+            }
+        },
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(
+        fs::read_to_string(root.join("org/gone/keep")).unwrap(),
+        "arrived\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_keys_typed_before_a_confirmation_is_drawn_never_answer_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    tracked_repo(&root.join("org/alpha"), "git@github.com:org/alpha.git");
+    fs::write(root.join("org/alpha/notes"), "untracked\n").unwrap();
+    let tree = checkout_tree(&root);
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            // Acknowledge, move to the run choice, choose: all typed with the `r`.
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning"],
+                b"kkr j\r".to_vec(),
+            ),
+            // The box is unticked and Enter lands on Cancel, where the cursor still is.
+            (
+                vec![
+                    "Remove checkouts / keep registration",
+                    "LOSS ACKNOWLEDGMENT REQUIRED alpha",
+                    "[ ] Also remove alpha and accept its listed losses",
+                    "pair: Cancel default",
+                    "absent: Batch /",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Remove only cancelled · nothing changed",
+                    "absent: Batch /",
+                    "absent: problem",
+                ],
+                b"kkm\r\r".to_vec(),
+            ),
+            (
+                vec!["Batch / Register", "pair: SUCCEEDED alpha"],
+                b"\x1b".to_vec(),
+            ),
+            // The same holds for a registration preview opened from the menu with marks.
+            (
+                vec!["NORMAL", "absent: Batch /", "absent: Scanning"],
+                b"kk m\rj\rj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Unregister / preview",
+                    "ELIGIBLE alpha",
+                    "pair: Cancel default",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                vec!["Unregister cancelled · nothing changed", "absent: Batch /"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    assert_eq!(checkout_tree(&root), tree);
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        cli_config(
+            &home,
+            original,
+            &["register", "git@github.com:org/alpha.git"]
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_removal_never_deletes_a_checkout_that_replaced_the_confirmed_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    let alpha = root.join("org/alpha");
+    tracked_repo(&alpha, "git@github.com:org/alpha.git");
+    let confirmed = checkout_tree(&alpha);
+    let mut replacement = None;
+
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"kkr".to_vec()),
+            (
+                vec![
+                    "Remove checkouts / keep registration",
+                    "ELIGIBLE alpha",
+                    "~/repos/org/alpha · github.com/org/alpha · clean",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Remove only",
+                    "pair: BLOCKED alpha",
+                    "stale: checkout was replaced after preview",
+                    "· 1 problem",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "absent: Batch /", "absent: Scanning"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        1,
+        |action| {
+            if action == 1 {
+                // Another clean, pushed repository of the same origin at the same path.
+                fs::rename(&alpha, temp.path().join("moved")).unwrap();
+                tracked_repo(&alpha, "git@github.com:org/alpha.git");
+                fs::write(alpha.join("REPLACEMENT"), "other work\n").unwrap();
+                run_git(&alpha, &["add", "REPLACEMENT"]);
+                run_git(&alpha, &["commit", "-qm", "replacement"]);
+                run_git(&alpha, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+                replacement = Some(checkout_tree(&alpha));
+            }
+        },
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(Some(checkout_tree(&alpha)), replacement);
+    assert_eq!(checkout_tree(&temp.path().join("moved")), confirmed);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_removal_never_follows_an_ancestor_that_became_a_symlink_to_another_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    for directory in ["archive", "org"] {
+        tracked_repo(
+            &root.join(directory).join("alpha"),
+            "git@github.com:org/alpha.git",
+        );
+    }
+    let trees = [
+        checkout_tree(&root.join("archive")),
+        checkout_tree(&root.join("org")),
+    ];
+
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 2 rows", "absent: Scanning"],
+                b"kkjr".to_vec(),
+            ),
+            (
+                vec![
+                    "Remove checkouts / keep registration",
+                    "1 exact target",
+                    "ELIGIBLE alpha (copy)",
+                    "~/repos/org/alpha · github.com/org/alpha · clean",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Remove only",
+                    "1 / 1 processed",
+                    "BLOCKED",
+                    "stale: selected clone path changed",
+                    "· 1 problem",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "absent: Batch /", "absent: Scanning"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        1,
+        |action| {
+            if action == 1 {
+                // `~/repos/org/alpha` now resolves to the other checkout of the same origin.
+                fs::rename(root.join("org"), temp.path().join("moved")).unwrap();
+                std::os::unix::fs::symlink(root.join("archive"), root.join("org")).unwrap();
+            }
+        },
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert!(root.join("org").is_symlink());
+    assert_eq!(
+        [
+            checkout_tree(&root.join("archive")),
+            checkout_tree(&temp.path().join("moved"))
+        ],
+        trees
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_remove_unregister_waits_for_a_complete_scan_and_then_previews_every_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let tools = temp.path().join("tools");
+    let release = temp.path().join("release");
+    fs::create_dir_all(&tools).unwrap();
+    let original = "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n";
+    fs::write(&config, original).unwrap();
+    for directory in ["org", "zeta"] {
+        tracked_repo(
+            &root.join(directory).join("alpha"),
+            "git@github.com:org/alpha.git",
+        );
+    }
+    let tree = checkout_tree(&root);
+    // The second checkout of the identity stays unobserved until the release.
+    fs::write(
+        tools.join("git"),
+        format!(
+            "#!/bin/sh\ncase \"$2\" in */zeta/alpha) while [ ! -f {} ]; do /bin/sleep 0.02; done;; esac\nexec {} \"$@\"\n",
+            shell_word(&release),
+            shell_word(&support::real_tool("git")),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+
+    run_inventory_pty_actions_with_hook(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        &[
+            (
+                vec!["Scanning", "pair: main clean", "selected: org/alpha"],
+                b"kkm\rjjjjj".to_vec(),
+            ),
+            // The entry says why it is unavailable, and choosing it does nothing: Esc then
+            // leaves the submenu, not a confirmation.
+            (
+                vec![
+                    "Repository actions /",
+                    "Scanning",
+                    "pair: unregister the",
+                    "the scan is not complete",
+                ],
+                b"\r\x1b".to_vec(),
+            ),
+            (
+                vec![
+                    "All actions",
+                    "Scanning",
+                    "absent: Repository actions /",
+                    "absent: Remove checkouts /",
+                ],
+                Vec::new(),
+            ),
+            (
+                vec!["All actions", "absent: Scanning"],
+                b"\rjjjjj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Remove checkouts / unregister",
+                    "1 exact target",
+                    "ELIGIBLE alpha",
+                    "also unregisters ~/repos/zeta/alpha · not selected, its files stay",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Remove + unregister cancelled · nothing changed"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        |action| {
+            if action == 2 {
+                fs::write(&release, "go").unwrap();
+            }
+        },
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_removal_names_the_declaration_whose_destination_a_found_checkout_occupies() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n";
+    fs::write(&config, original).unwrap();
+    tracked_repo(&root.join("org/alpha"), "git@github.com:org/other.git");
+    let tree = checkout_tree(&root);
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            (
+                vec!["NORMAL · 2 rows", "absent: Scanning", "conflict"],
+                b"kkr".to_vec(),
+            ),
+            // The declaration's own row has no checkout to remove.
+            (
+                vec![
+                    "Remove only unavailable: destination conflicts with repository",
+                    "absent: Remove checkouts /",
+                    "selected: alpha",
+                ],
+                b"jr".to_vec(),
+            ),
+            (
+                vec![
+                    "Remove checkouts / keep registration",
+                    "1 exact target",
+                    "ELIGIBLE other",
+                    "~/repos/org/alpha · github.com/org/other · clean",
+                    "sits at the configured destination of github.com/org/alpha · that declaration stays",
+                    "Remove 1 checkout",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Remove only cancelled · nothing changed"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+/// Three clean marked checkouts, Remove only. A `git` stub holds the batch inside beta, its
+/// second target, while `typed` is written; the keys are read once beta is done and before
+/// gamma starts. `tail` continues from there.
+#[cfg(unix)]
+fn removal_held_at_its_second_target(
+    typed: &[u8],
+    tail: Vec<(Vec<&'static str>, Vec<u8>)>,
+) -> (tempfile::TempDir, std::path::PathBuf, String) {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let tools = temp.path().join("tools");
+    let armed = temp.path().join("armed");
+    let holding = temp.path().join("holding");
+    let release = temp.path().join("release");
+    fs::create_dir_all(&tools).unwrap();
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    for name in ["alpha", "beta", "gamma"] {
+        tracked_repo(
+            &root.join("org").join(name),
+            &format!("git@github.com:org/{name}.git"),
+        );
+    }
+    fs::write(
+        tools.join("git"),
+        format!(
+            "#!/bin/sh\ncase \"$2\" in */beta) if [ -f {} ]; then : > {}; while [ ! -f {} ]; do /bin/sleep 0.02; done; fi;; esac\nexec {} \"$@\"\n",
+            shell_word(&armed),
+            shell_word(&holding),
+            shell_word(&release),
+            shell_word(&support::real_tool("git")),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    let held = vec![
+        "Batch / Remove only",
+        "1 / 3 processed",
+        "pair: SUCCEEDED alpha",
+        "pair: ACTIVE beta",
+        "pair: UNATTEMPTED gamma",
+        "Batch: 1 / 3 processed · m → cancel batch",
+        "Esc return · q quit",
+    ];
+    let mut actions = vec![
+        (
+            vec!["NORMAL · 3 rows", "absent: Scanning"],
+            b"kk j j ".to_vec(),
+        ),
+        (vec!["3 marked · 0 hidden"], b"r".to_vec()),
+        (
+            vec![
+                "Remove checkouts / keep registration",
+                "ELIGIBLE alpha",
+                "ELIGIBLE beta",
+                "ELIGIBLE gamma",
+                "Remove 3 checkouts",
+            ],
+            b"j\r".to_vec(),
+        ),
+        (held.clone(), typed.to_vec()),
+        (held, Vec::new()),
+    ];
+    actions.extend(tail);
+
+    let transcript = run_inventory_pty_actions_with_hook(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("inventory"),
+        &actions,
+        32,
+        132,
+        |action| {
+            if action == 2 {
+                fs::write(&armed, "hold").unwrap();
+            }
+            if action == 3 {
+                // The keys are written only once Git is held inside beta.
+                wait_for_file(&holding);
+            }
+            if action == 4 {
+                assert!(root.join("org/beta").exists(), "beta is held");
+                fs::write(&release, "go").unwrap();
+            }
+        },
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert!(!root.join("org/alpha").exists());
+    assert!(!root.join("org/beta").exists());
+    (temp, root, transcript)
+}
+
+#[cfg(unix)]
+fn cancelled_batch_outcomes() -> Vec<(Vec<&'static str>, Vec<u8>)> {
+    vec![
+        (
+            vec![
+                "Batch / Remove only",
+                "2 / 3 processed",
+                "pair: SUCCEEDED alpha",
+                "pair: SUCCEEDED beta",
+                "pair: UNATTEMPTED gamma",
+                "batch cancelled",
+                "Batch cancelled · 1 unattempted · completed changes remain",
+                "absent: problem",
+            ],
+            b"\x1b".to_vec(),
+        ),
+        (
+            vec!["NORMAL · 1 row", "absent: Batch /", "absent: Scanning"],
+            b"q".to_vec(),
+        ),
+    ]
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_menu_cancellation_stops_the_remaining_targets_and_keeps_completed_ones() {
+    // Fifteen keys typed while the batch is held: all are read, in order, before gamma starts.
+    // Esc directly before `m` reaches the inventory as one Alt+m and still is both keys. The
+    // extra `j` and the `k` end on Cancel active batch in the menu only: in the batch popup
+    // they would end on Return to browsing.
+    let (_temp, root, _) =
+        removal_held_at_its_second_target(b"\x1bmjjjjjjjjjjjk\r", cancelled_batch_outcomes());
+    assert!(root.join("org/gamma/.git").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_batch_popup_cancels_the_remaining_targets() {
+    let (_temp, root, _) = removal_held_at_its_second_target(b"j\r", cancelled_batch_outcomes());
+    assert!(root.join("org/gamma/.git").is_dir());
+}
+
+#[cfg(unix)]
+const QUIT_PROMPT: [&str; 7] = [
+    "CONFIRM",
+    "A batch is running",
+    "2 of 3 targets processed. Completed changes remain.",
+    "Cancelling leaves gamma unattempted.",
+    "pair: inventory default",
+    "Cancel remaining work and quit",
+    "pair: Esc return",
+];
+
+#[cfg(unix)]
+#[test]
+fn inventory_quit_during_a_batch_returns_to_it_by_default() {
+    // One `q` with the batch popup open asks; it neither closes the popup nor quits.
+    let (_temp, root, _) = removal_held_at_its_second_target(
+        b"q",
+        vec![
+            (QUIT_PROMPT.to_vec(), b"\r".to_vec()),
+            (
+                vec![
+                    "Batch / Remove only",
+                    "3 / 3 processed",
+                    "absent: A batch is running",
+                    "absent: Scanning",
+                    "Remove only: 3 succeeded",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 0 rows", "absent: Batch /"], b"q".to_vec()),
+        ],
+    );
+    assert!(!root.join("org/gamma").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_quit_during_a_batch_can_cancel_the_remaining_targets_and_quit() {
+    let (_temp, root, _) = removal_held_at_its_second_target(
+        b"q",
+        vec![
+            (QUIT_PROMPT.to_vec(), b"?".to_vec()),
+            // Help over the prompt keeps the batch waiting.
+            (
+                vec!["Keyboard / effective bindings", "Confirmation mode"],
+                b"q".to_vec(),
+            ),
+            (QUIT_PROMPT.to_vec(), b"j\r".to_vec()),
+        ],
+    );
+    assert!(root.join("org/gamma/.git").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_esc_and_the_key_typed_after_it_during_a_target_are_both_applied_in_order() {
+    // Typed while beta is held, the popup open: Esc Enter, Esc R, q. Each Esc reaches the
+    // inventory glued to the next key as Alt+Enter and Alt+Shift+R.
+    // Esc closes the popup and Enter inspects; Esc closes Inspect and R refreshes; q, now in
+    // normal mode, asks. With Enter lost nothing is ever inspected; with R lost Inspect stays
+    // open, q closes it and no prompt appears.
+    let (_temp, root, transcript) = removal_held_at_its_second_target(
+        b"\x1b\r\x1bRq",
+        vec![(QUIT_PROMPT.to_vec(), b"j\r".to_vec())],
+    );
+    assert!(transcript.contains("Inspect"), "Enter inspected a row");
+    assert!(root.join("org/gamma/.git").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_alt_keys_outside_a_batch_do_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n";
+    fs::write(&config, original).unwrap();
+    tracked_repo(&root.join("org/alpha"), "git@github.com:org/alpha.git");
+    let tree = checkout_tree(&root);
+
+    let transcript = run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            // Esc and `r` in one write are Alt+r, which no binding names: neither a quit
+            // nor a removal. Alt+Enter is no Inspect either.
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning"],
+                b"\x1br\x1b\r".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row"], b"?".to_vec()),
+            (
+                vec!["Keyboard / effective bindings", "Normal mode"],
+                b"q".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Keyboard"], b"q".to_vec()),
+        ],
+        32,
+        132,
+    );
+    assert!(!transcript.contains("Remove checkouts /"));
+    assert!(!transcript.contains("Inspect /"));
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_keys_typed_before_the_add_preview_is_drawn_never_choose_in_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n[providers.\"github.com\"]\npreset = \"github\"\n";
+    fs::write(&config, original).unwrap();
+    fs::create_dir_all(&root).unwrap();
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("inventory"),
+        &[
+            // The second Enter would choose the focused Clone + register.
+            (
+                vec!["NORMAL · 0 rows", "absent: Scanning"],
+                b"aorg/fresh\r\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Add / preview",
+                    "github.com/org/fresh",
+                    "Clone + register",
+                    "absent: Batch /",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Add / URL or reference", "absent: Add / preview"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Add cancelled · nothing changed", "absent: Batch /"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
 }
 
 /// The configuration the CLI produces from `before` for the same request.

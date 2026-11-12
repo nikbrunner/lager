@@ -503,6 +503,110 @@ fn validate_removal_path<F: RemovalFilesystem>(
     Ok(canonical)
 }
 
+/// Why one exact checkout was not deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExactRemovalError {
+    /// The checkout no longer is what was confirmed; nothing was deleted.
+    Stale(String),
+    /// Deletion started and failed; files may be partly gone.
+    Failed(String),
+}
+
+/// One checkout as the removal guards saw it. A confirmation binds to this, not to whatever
+/// sits at the path later.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfirmedCheckout {
+    pub path: PathBuf,
+    /// The filesystem identity of the checkout directory and of its Git directory.
+    pub directories: String,
+    /// The local-state losses deleting it would cause.
+    pub losses: Vec<String>,
+}
+
+/// Runs the removal guards `remove` uses on one exact checkout under the configured `root`.
+/// Returns the checkout as the guards saw it, or the guard that forbids deleting it.
+pub fn inspect_exact_removal<G, F>(
+    git: &G,
+    filesystem: &F,
+    root: &Path,
+    path: &Path,
+    reference: &str,
+) -> Result<ConfirmedCheckout, String>
+where
+    G: GitRemoval,
+    F: RemovalFilesystem,
+{
+    let reference = match RepositoryRef::parse(reference) {
+        Ok(reference) if !reference.is_wildcard() => reference,
+        Ok(_) => return Err("wildcard references cannot be removed".to_owned()),
+        Err(error) => return Err(error.to_string()),
+    };
+    if !filesystem
+        .metadata_exists(path)
+        .map_err(|error| error.to_string())?
+    {
+        return Err("selected clone path no longer exists".to_owned());
+    }
+    let root = filesystem
+        .canonicalize(root)
+        .map_err(|_| "configured root is unreadable".to_owned())?;
+    let canonical = validate_removal_path(filesystem, &root, path)?;
+    let identities = || -> Result<String, String> {
+        let identity = |directory: &Path| {
+            filesystem
+                .directory_identity(directory)
+                .map_err(|error| error.to_string())
+        };
+        Ok(format!(
+            "{} {}",
+            identity(&canonical)?,
+            identity(&canonical.join(".git"))?
+        ))
+    };
+    // Read around the Git guards: what they inspected must be one and the same checkout.
+    let directories = identities()?;
+    let losses = git.inspect_removal(&canonical, &reference.clone_url)?;
+    if identities()? != directories {
+        return Err("checkout changed while it was inspected".to_owned());
+    }
+    Ok(ConfirmedCheckout {
+        directories,
+        path: canonical,
+        losses,
+    })
+}
+
+/// Deletes one exact checkout. Every guard runs again first, and the checkout must still be
+/// the `confirmed` one: the same canonical path, the same directories and exactly the losses
+/// that were listed. An acknowledgment covers nothing that appeared since.
+pub fn remove_exact<G, F>(
+    git: &G,
+    filesystem: &F,
+    root: &Path,
+    path: &Path,
+    reference: &str,
+    confirmed: &ConfirmedCheckout,
+) -> Result<(), ExactRemovalError>
+where
+    G: GitRemoval,
+    F: RemovalFilesystem,
+{
+    let current = inspect_exact_removal(git, filesystem, root, path, reference)
+        .map_err(ExactRemovalError::Stale)?;
+    let stale = if current.path != confirmed.path {
+        "selected clone path changed"
+    } else if current.directories != confirmed.directories {
+        "checkout was replaced"
+    } else if current.losses != confirmed.losses {
+        "local state changed"
+    } else {
+        return filesystem
+            .remove_dir_all(&current.path)
+            .map_err(|error| ExactRemovalError::Failed(error.to_string()));
+    };
+    Err(ExactRemovalError::Stale(stale.to_owned()))
+}
+
 fn removal_failed(input: &str, error: &str) -> RemovalOutcome {
     RemovalOutcome {
         reference: input.to_owned(),
@@ -2062,6 +2166,106 @@ mod tests {
             RemovalStatus::Failed(_)
         ));
         assert!(interaction.prompts.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_checkout_swapped_while_the_guards_run_is_not_confirmed() {
+        /// Answers another identity from the third read on: after the Git guards.
+        struct Swapped(std::cell::Cell<u32>);
+        impl RemovalFilesystem for Swapped {
+            type Error = std::io::Error;
+            fn canonicalize(&self, path: &Path) -> Result<PathBuf, Self::Error> {
+                std::fs::canonicalize(path)
+            }
+            fn is_symlink(&self, _: &Path) -> Result<bool, Self::Error> {
+                Ok(false)
+            }
+            fn exists(&self, _: &Path) -> bool {
+                true
+            }
+            fn contains_symlink(&self, _: &Path) -> Result<bool, Self::Error> {
+                Ok(false)
+            }
+            fn directory_identity(&self, _: &Path) -> Result<String, Self::Error> {
+                self.0.set(self.0.get() + 1);
+                Ok(if self.0.get() > 2 { "b" } else { "a" }.to_owned())
+            }
+            fn remove_dir_all(&self, _: &Path) -> Result<(), Self::Error> {
+                unreachable!("nothing was confirmed")
+            }
+            fn discover_checkouts(&self, _: &Path) -> Result<Vec<PathBuf>, Self::Error> {
+                Ok(Vec::new())
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repos");
+        let checkout = root.join("org/repo");
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        let git = FakeGit {
+            cloned: RefCell::new(vec![]),
+        };
+        let inspect = |filesystem: &Swapped| {
+            inspect_exact_removal(&git, filesystem, &root, &checkout, "github.com/org/repo")
+        };
+        assert_eq!(
+            inspect(&Swapped(Default::default())),
+            Err("checkout changed while it was inspected".to_owned())
+        );
+        // Deletion inspects through the same function and stops there too.
+        let steady = inspect(&Swapped(std::cell::Cell::new(10))).unwrap();
+        assert_eq!(
+            remove_exact(
+                &git,
+                &Swapped(Default::default()),
+                &root,
+                &checkout,
+                "github.com/org/repo",
+                &steady
+            ),
+            Err(ExactRemovalError::Stale(
+                "checkout changed while it was inspected".to_owned()
+            ))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_checkout_put_at_the_confirmed_path_later_is_not_the_confirmed_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repos");
+        let checkout = root.join("org/repo");
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        let git = FakeGit {
+            cloned: RefCell::new(vec![]),
+        };
+        let filesystem = crate::infrastructure::filesystem::Filesystem;
+        let reference = "github.com/org/repo";
+        let confirmed =
+            inspect_exact_removal(&git, &filesystem, &root, &checkout, reference).unwrap();
+        let remove = || remove_exact(&git, &filesystem, &root, &checkout, reference, &confirmed);
+
+        std::fs::rename(&checkout, temp.path().join("moved")).unwrap();
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        assert_eq!(
+            remove(),
+            Err(ExactRemovalError::Stale("checkout was replaced".to_owned()))
+        );
+        assert!(checkout.join(".git").is_dir());
+
+        // Only the Git directory is another one.
+        std::fs::remove_dir_all(&checkout).unwrap();
+        std::fs::rename(temp.path().join("moved"), &checkout).unwrap();
+        std::fs::rename(checkout.join(".git"), temp.path().join("git")).unwrap();
+        std::fs::create_dir(checkout.join(".git")).unwrap();
+        assert_eq!(
+            remove(),
+            Err(ExactRemovalError::Stale("checkout was replaced".to_owned()))
+        );
+
+        std::fs::remove_dir(checkout.join(".git")).unwrap();
+        std::fs::rename(temp.path().join("git"), checkout.join(".git")).unwrap();
+        assert_eq!(remove(), Ok(()));
+        assert!(!checkout.exists());
     }
 
     #[test]

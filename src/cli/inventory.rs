@@ -28,6 +28,7 @@ use crate::application::ports::{Desktop, EnsureEvent, EnsureReporter, HookRunner
 use crate::domain::repository::validate_reference_safety;
 use crate::infrastructure::config::{CommandConfigStore, load_inventory};
 use crate::infrastructure::desktop::NativeDesktop;
+use crate::infrastructure::filesystem::Filesystem;
 use crate::infrastructure::git::NativeGit;
 use crate::infrastructure::inventory::{
     LocalInventoryFilesystem, ScanContext, ScanEvent, ScanHandle, start_local_scan_with_context,
@@ -324,6 +325,14 @@ impl InventorySession {
                 &self.home,
                 &mut banner,
             )
+        } else if batch.action.removes() {
+            batch.step_remove(
+                &store,
+                &NativeGit,
+                &Filesystem,
+                &self.config_path,
+                &self.home,
+            )
         } else {
             batch.step(&store, &NativeGit, &self.config_path)
         };
@@ -366,6 +375,23 @@ impl InventorySession {
             refresh(self);
         }
         started
+    }
+
+    fn running(&self) -> bool {
+        self.batch.as_ref().is_some_and(|batch| !batch.finished())
+    }
+
+    /// Stops a running batch before its next target and refreshes what it changed.
+    fn cancel_batch(&mut self) {
+        let Some(batch) = self.batch.as_mut().filter(|batch| !batch.finished()) else {
+            return;
+        };
+        batch.cancel();
+        self.message = Some(format!(
+            "Batch cancelled · {} unattempted · completed changes remain",
+            batch.targets.len() - batch.processed()
+        ));
+        refresh(self);
     }
 
     fn batch_needs_terminal(&self) -> bool {
@@ -648,13 +674,22 @@ impl TerminalSession {
         interrupted: &dyn Fn() -> Option<i32>,
     ) -> i32 {
         let mut selection = Selection::default();
+        // An event was read in the last pass. Keys queued behind it are handled before the
+        // batch takes its next step, so cancelling reaches the batch between two targets.
+        let mut typed = false;
+        // The key typed right after an Esc that the terminal delivered as one Alt+key.
+        let mut held: Option<KeyEvent> = None;
+        // The keys being read were typed while a batch target held this loop.
+        let mut queued = false;
         loop {
             if let Some(code) = interrupted() {
                 session.worker.cancel_and_join();
                 return code;
             }
             session.receive_events();
-            if session.batch_needs_terminal() {
+            // The batch waits while the user decides whether to cancel it.
+            let deciding = selection.quit;
+            if !deciding && session.batch_needs_terminal() {
                 self.suspend();
                 let first = session.batch.as_ref().map_or(0, Batch::processed);
                 let mut ran = false;
@@ -686,8 +721,10 @@ impl TerminalSession {
                     );
                     return 1;
                 }
-            } else {
+            } else if !deciding && !typed {
+                let processed = session.batch.as_ref().map_or(0, Batch::processed);
                 session.step_batch();
+                queued |= session.batch.as_ref().map_or(0, Batch::processed) != processed;
             }
             let report = match session.report() {
                 Ok(report) => report,
@@ -698,34 +735,51 @@ impl TerminalSession {
             };
             let dropped = session.marks.reconcile(&report.rows, session.complete);
             if dropped > 0 {
-                session.message = Some(if dropped == 1 {
+                let removed = if dropped == 1 {
                     "Removed 1 mark: its entry vanished".to_owned()
                 } else {
                     format!("Removed {dropped} marks: their entries vanished")
+                };
+                session.message = Some(match session.message.take() {
+                    Some(message) => format!("{message} · {removed}"),
+                    None => removed,
                 });
             }
             let visible_rows = matching_rows(&report, &selection.query);
             selection.reconcile(&visible_rows, session.complete);
+            // A confirmation is answered only by keys typed once it is on screen.
+            if matches!(selection.view(), View::Preview | View::AddPreview)
+                && std::mem::take(&mut selection.preview_fresh)
+            {
+                discard_input();
+                held = None;
+            }
             if let Err(error) = self.draw_report(&report, &visible_rows, session, &mut selection) {
                 eprintln!("lager: terminal render failed: {}", escape(error));
                 return 1;
             }
-            let running = session
-                .batch
-                .as_ref()
-                .is_some_and(|batch| !batch.finished());
-            let ready = event::poll(if running {
-                Duration::ZERO
+            // crossterm's tty source reports nothing for a zero timeout, even with keys queued.
+            let ready = if held.is_some() {
+                Ok(true)
             } else {
-                Duration::from_millis(50)
-            });
+                event::poll(Duration::from_millis(if session.running() && !deciding {
+                    1
+                } else {
+                    50
+                }))
+            };
             if let Some(code) = interrupted() {
                 session.worker.cancel_and_join();
                 return code;
             }
+            typed = matches!(ready, Ok(true));
+            queued &= typed;
             match ready {
-                Ok(true) => match event::read() {
-                    Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                Ok(true) => match held
+                    .take()
+                    .map_or_else(event::read, |key| Ok(Event::Key(key)))
+                {
+                    Ok(Event::Key(mut key)) if key.kind == KeyEventKind::Press => {
                         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL
                         {
                             session.worker.cancel_and_join();
@@ -734,10 +788,60 @@ impl TerminalSession {
                         session.message = None;
                         let view = selection.view();
                         let mode = view.mode();
+                        // Esc and the key typed after it while a target held the loop arrive
+                        // together, and the terminal reads that as one Alt+key. They are the
+                        // two keys that were typed. Arrows and function keys encode Alt
+                        // themselves and stay chords.
+                        if queued
+                            && key.modifiers.contains(KeyModifiers::ALT)
+                            && matches!(
+                                key.code,
+                                KeyCode::Char(_)
+                                    | KeyCode::Enter
+                                    | KeyCode::Tab
+                                    | KeyCode::Backspace
+                            )
+                        {
+                            held = Some(KeyEvent::new(
+                                key.code,
+                                key.modifiers.difference(KeyModifiers::ALT),
+                            ));
+                            key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+                        }
                         match session.bindings.action(mode, key) {
+                            Some(Action::Quit) if view == View::QuitBatch => {}
+                            Some(Action::Quit) if session.running() => {
+                                selection.ask_quit();
+                            }
                             Some(Action::Quit) => return quit(session),
+                            Some(action @ (Action::Up | Action::Down))
+                                if view == View::QuitBatch =>
+                            {
+                                selection.quit_cancel = action == Action::Down;
+                            }
+                            Some(Action::Accept) if view == View::QuitBatch => {
+                                if selection.quit_cancel {
+                                    session.cancel_batch();
+                                    return quit(session);
+                                }
+                                selection.quit = false;
+                            }
+                            Some(Action::Cancel) if view == View::QuitBatch => {
+                                selection.quit = false;
+                            }
                             Some(Action::Add) if view == View::Normal => {
                                 selection.add = Some(AddForm::default());
+                            }
+                            Some(Action::Remove) if view == View::Normal => {
+                                let row = selection.selected_row(&visible_rows);
+                                confirm_removal(
+                                    session,
+                                    &mut selection,
+                                    &report,
+                                    &visible_rows,
+                                    row,
+                                    BatchAction::Remove,
+                                );
                             }
                             Some(Action::Accept) if view == View::AddInput => {
                                 let form = selection.add.as_mut().expect("Add is open");
@@ -757,6 +861,7 @@ impl TerminalSession {
                                             };
                                         form.preview = Some(preview);
                                         form.rejected = None;
+                                        selection.preview_fresh = true;
                                     }
                                     Err(reason) => {
                                         if validate_reference_safety(&form.text).is_err() {
@@ -838,9 +943,31 @@ impl TerminalSession {
                             Some(Action::Cancel | Action::Accept) if view == View::Problems => {
                                 selection.problems = false;
                             }
+                            Some(Action::Acknowledge) if view == View::Preview => {
+                                if let Some(batch) = selection.preview.as_mut()
+                                    && acknowledgment(batch).is_some()
+                                {
+                                    batch.acknowledged = !batch.acknowledged;
+                                }
+                            }
+                            Some(Action::Accept)
+                                if view == View::Preview
+                                    && selection.preview.as_ref().is_some_and(|batch| {
+                                        selection.preview_focus
+                                            < usize::from(acknowledgment(batch).is_some())
+                                    }) =>
+                            {
+                                if let Some(batch) = selection.preview.as_mut() {
+                                    batch.acknowledged = !batch.acknowledged;
+                                }
+                            }
                             Some(Action::Accept) if view == View::Preview => {
                                 let batch = selection.preview.take();
-                                if !selection.preview_run {
+                                let run = batch.as_ref().is_some_and(|batch| {
+                                    selection.preview_focus
+                                        > usize::from(acknowledgment(batch).is_some())
+                                });
+                                if !run {
                                     session.message = batch.map(|batch| {
                                         format!(
                                             "{} cancelled · nothing changed",
@@ -870,7 +997,14 @@ impl TerminalSession {
                                 });
                             }
                             Some(action @ (Action::Up | Action::Down)) if view == View::Preview => {
-                                selection.preview_run = action == Action::Down;
+                                let last = selection.preview.as_ref().map_or(1, |batch| {
+                                    1 + usize::from(acknowledgment(batch).is_some())
+                                });
+                                selection.preview_focus = if action == Action::Up {
+                                    selection.preview_focus.saturating_sub(1)
+                                } else {
+                                    (selection.preview_focus + 1).min(last)
+                                };
                             }
                             Some(Action::PageUp) if view == View::Preview => {
                                 selection.preview_scroll =
@@ -882,8 +1016,35 @@ impl TerminalSession {
                                     .saturating_add(10)
                                     .min(self.preview_scroll_limit(&selection, session));
                             }
+                            Some(Action::Accept)
+                                if view == View::Batch
+                                    && selection.batch_cancel
+                                    && session.running() =>
+                            {
+                                session.cancel_batch();
+                            }
+                            // In the popup of a running batch a quit key asks, unless it is
+                            // the key the popup shows for returning.
+                            Some(Action::Cancel)
+                                if view == View::Batch
+                                    && session.running()
+                                    && session.bindings.action(Mode::Normal, key)
+                                        == Some(Action::Quit)
+                                    && !session.bindings.is_first(
+                                        Mode::Inspection,
+                                        Action::Cancel,
+                                        key,
+                                    ) =>
+                            {
+                                selection.ask_quit();
+                            }
                             Some(Action::Cancel | Action::Accept) if view == View::Batch => {
                                 selection.batch = false;
+                            }
+                            Some(action @ (Action::Up | Action::Down))
+                                if view == View::Batch && session.running() =>
+                            {
+                                selection.batch_cancel = action == Action::Down;
                             }
                             Some(
                                 action @ (Action::Up
@@ -1070,7 +1231,8 @@ impl TerminalSession {
     fn preview_scroll_limit(&self, selection: &Selection, session: &InventorySession) -> u16 {
         selection.preview.as_ref().map_or(0, |batch| {
             let lines = preview_lines(batch, &session.home);
-            let (_, list, _) = preview_regions(self.area(), &lines);
+            let choices = preview_choices(batch, selection.preview_focus, &session.bindings);
+            let (_, list, _) = preview_regions(self.area(), &lines, choices.len() as u16);
             Paragraph::new(lines)
                 .wrap(Wrap { trim: false })
                 .line_count(list.width)
@@ -1085,7 +1247,12 @@ impl TerminalSession {
             popup_scroll_limit(
                 area,
                 WIDE_POPUP,
-                &batch_widget(batch, &session.home, popup_body_width(area, WIDE_POPUP)),
+                &batch_widget(
+                    batch,
+                    &session.home,
+                    popup_body_width(area, WIDE_POPUP),
+                    false,
+                ),
             )
         })
     }
@@ -1147,15 +1314,36 @@ impl TerminalSession {
         let bindings = &session.bindings;
         let view = selection.view();
         let compact = self.area().width < WIDE_TABLE;
+        // A running batch is the current state unless an action just reported its outcome.
+        let progress = session
+            .batch
+            .as_ref()
+            .filter(|batch| !batch.finished() && view != View::Preview)
+            .map(|batch| {
+                format!(
+                    "Batch: {} / {} processed{}",
+                    batch.processed(),
+                    batch.targets.len(),
+                    bindings
+                        .keys(Mode::Normal, Action::Menu)
+                        .first()
+                        .map(|key| format!(" · {key} → cancel batch"))
+                        .unwrap_or_default()
+                )
+            });
         let status = status_lines(
             report,
             complete,
             session.notice.as_deref(),
-            session.message.as_deref(),
+            session.message.as_deref().or(progress.as_deref()),
             view,
             compact,
             bindings,
         );
+        let acknowledges = selection
+            .preview
+            .as_ref()
+            .is_some_and(|batch| acknowledgment(batch).is_some());
         let home = session.home.as_path();
         let shown = &*selection;
         let mut table_state = shown.table.clone();
@@ -1175,7 +1363,8 @@ impl TerminalSession {
             .terminal
             .draw(|frame| {
                 let area = frame.area();
-                let footer = footer_widget(bindings, view, area.width.saturating_sub(4));
+                let footer =
+                    footer_widget(bindings, view, area.width.saturating_sub(4), acknowledges);
                 let footer_height = footer.line_count(area.width.saturating_sub(4)) as u16;
                 let [header, source, search, _, table, status_area, footer_area] =
                     Layout::vertical([
@@ -1349,8 +1538,10 @@ impl TerminalSession {
                     View::Preview => {
                         if let Some(batch) = &shown.preview {
                             let lines = preview_lines(batch, home);
+                            let choice_lines =
+                                preview_choices(batch, shown.preview_focus, bindings);
                             let ([popup, title, _, footer], list, choices) =
-                                preview_regions(area, &lines);
+                                preview_regions(area, &lines, choice_lines.len() as u16);
                             let pages = paired_keys(
                                 &bindings.keys(Mode::Confirmation, Action::PageUp),
                                 &bindings.keys(Mode::Confirmation, Action::PageDown),
@@ -1359,7 +1550,15 @@ impl TerminalSession {
                             frame.render_widget(Block::bordered().border_style(focus()), popup);
                             frame.render_widget(
                                 bar(
-                                    &format!("{} / preview", batch.action.label()),
+                                    &match batch.action {
+                                        BatchAction::Remove => {
+                                            "Remove checkouts / keep registration".to_owned()
+                                        }
+                                        BatchAction::RemoveUnregister => {
+                                            "Remove checkouts / unregister".to_owned()
+                                        }
+                                        action => format!("{} / preview", action.label()),
+                                    },
                                     "lager",
                                     title.width,
                                 ),
@@ -1371,27 +1570,31 @@ impl TerminalSession {
                                     .scroll((shown.preview_scroll, 0)),
                                 list,
                             );
+                            frame.render_widget(Paragraph::new(choice_lines), choices);
+                            let hint = |action, label| {
+                                first_key_hint(bindings, Mode::Confirmation, action, label)
+                            };
+                            let focus_hint =
+                                format!("{} focus", rows_hint(bindings, Mode::Confirmation, true));
+                            let scroll = format!("{pages} scroll");
+                            let (choose, cancel) =
+                                (hint(Action::Accept, "choose"), hint(Action::Cancel, "cancel"));
+                            // A narrow popup cuts the end of the line: the exit routes of a
+                            // removal confirmation come before the scroll hint.
+                            let hints = if acknowledges {
+                                let acknowledge = hint(Action::Acknowledge, "acknowledge");
+                                [focus_hint, acknowledge, choose, cancel, scroll]
+                            } else {
+                                [focus_hint, scroll, choose, cancel, String::new()]
+                            };
                             frame.render_widget(
-                                Paragraph::new(preview_choices(batch, shown.preview_run)),
-                                choices,
-                            );
-                            frame.render_widget(
-                                Paragraph::new(format!(
-                                    "{} focus · {pages} scroll · {} · {}",
-                                    rows_hint(bindings, Mode::Confirmation, true),
-                                    first_key_hint(
-                                        bindings,
-                                        Mode::Confirmation,
-                                        Action::Accept,
-                                        "choose"
-                                    ),
-                                    first_key_hint(
-                                        bindings,
-                                        Mode::Confirmation,
-                                        Action::Cancel,
-                                        "cancel"
-                                    )
-                                ))
+                                Paragraph::new(
+                                    hints
+                                        .into_iter()
+                                        .filter(|hint| !hint.is_empty())
+                                        .collect::<Vec<_>>()
+                                        .join(" · "),
+                                )
                                 .style(dim()),
                                 footer,
                             );
@@ -1403,14 +1606,76 @@ impl TerminalSession {
                                 frame,
                                 WIDE_POPUP,
                                 &format!("Batch / {}", batch.action.label()),
-                                batch_widget(batch, home, popup_body_width(area, WIDE_POPUP))
-                                    .scroll((shown.batch_scroll, 0)),
+                                batch_widget(
+                                    batch,
+                                    home,
+                                    popup_body_width(area, WIDE_POPUP),
+                                    shown.batch_cancel,
+                                )
+                                .scroll((shown.batch_scroll, 0)),
+                                if batch.finished() {
+                                    format!(
+                                        "{} scroll · {}",
+                                        rows_hint(bindings, Mode::Inspection, true),
+                                        first_key_hint(
+                                            bindings,
+                                            Mode::Inspection,
+                                            Action::Cancel,
+                                            "return"
+                                        )
+                                    )
+                                } else {
+                                    let back = bindings.keys(Mode::Inspection, Action::Cancel);
+                                    let quit = bindings
+                                        .keys(Mode::Normal, Action::Quit)
+                                        .into_iter()
+                                        .find(|key| {
+                                            back.first() != Some(key) && back.contains(key)
+                                        })
+                                        .map(|key| format!(" · {key} quit"))
+                                        .unwrap_or_default();
+                                    format!(
+                                        "{} focus · {} · {}{quit}",
+                                        rows_hint(bindings, Mode::Inspection, true),
+                                        first_key_hint(
+                                            bindings,
+                                            Mode::Inspection,
+                                            Action::Accept,
+                                            "choose"
+                                        ),
+                                        first_key_hint(
+                                            bindings,
+                                            Mode::Inspection,
+                                            Action::Cancel,
+                                            "return"
+                                        )
+                                    )
+                                },
+                            )
+                        }
+                    }
+                    View::QuitBatch => {
+                        if let Some(batch) = &session.batch {
+                            draw_popup(
+                                frame,
+                                POPUP,
+                                "A batch is running",
+                                quit_widget(
+                                    batch,
+                                    shown.quit_cancel,
+                                    popup_body_width(area, POPUP),
+                                ),
                                 format!(
-                                    "{} scroll · {}",
-                                    rows_hint(bindings, Mode::Inspection, true),
+                                    "{} · {}",
                                     first_key_hint(
                                         bindings,
-                                        Mode::Inspection,
+                                        Mode::Confirmation,
+                                        Action::Accept,
+                                        "choose"
+                                    ),
+                                    first_key_hint(
+                                        bindings,
+                                        Mode::Confirmation,
                                         Action::Cancel,
                                         "return"
                                     )
@@ -1520,6 +1785,7 @@ enum View {
     Problems,
     Preview,
     Batch,
+    QuitBatch,
     Help,
     AddInput,
     AddPreview,
@@ -1533,7 +1799,7 @@ impl View {
             Self::Inspect => "INSPECT",
             Self::Menu => "MENU",
             Self::Problems => "PROBLEMS",
-            Self::Preview => "CONFIRM",
+            Self::Preview | Self::QuitBatch => "CONFIRM",
             Self::Batch => "RESULTS",
             Self::Help => "HELP",
             Self::AddInput | Self::AddPreview => "INPUT",
@@ -1546,7 +1812,7 @@ impl View {
             Self::Search => Mode::Search,
             Self::Menu => Mode::Menu,
             Self::Inspect | Self::Problems | Self::Batch | Self::Help => Mode::Inspection,
-            Self::Preview | Self::AddPreview => Mode::Confirmation,
+            Self::Preview | Self::AddPreview | Self::QuitBatch => Mode::Confirmation,
             Self::AddInput => Mode::Input,
         }
     }
@@ -1653,7 +1919,12 @@ fn first_key_hint(bindings: &Bindings, mode: Mode, action: Action, label: &str) 
 }
 
 /// One line of hints; the least needed drop out when the line is too narrow.
-fn footer_widget(bindings: &Bindings, view: View, width: u16) -> Paragraph<'static> {
+fn footer_widget(
+    bindings: &Bindings,
+    view: View,
+    width: u16,
+    acknowledges: bool,
+) -> Paragraph<'static> {
     let first = |mode: Mode, action: Action| {
         bindings
             .keys(mode, action)
@@ -1684,8 +1955,21 @@ fn footer_widget(bindings: &Bindings, view: View, width: u16) -> Paragraph<'stat
                 "back to reference",
             ),
         ],
+        View::QuitBatch => vec![
+            (rows_hint(bindings, Mode::Confirmation, false), "focus"),
+            (first(Mode::Confirmation, Action::Accept), "choose"),
+            (first(Mode::Confirmation, Action::Cancel), "return"),
+        ],
         View::Preview => vec![
             (rows_hint(bindings, Mode::Confirmation, false), "focus"),
+            (
+                if acknowledges {
+                    first(Mode::Confirmation, Action::Acknowledge)
+                } else {
+                    String::new()
+                },
+                "acknowledge",
+            ),
             (
                 paired_keys(
                     &bindings.keys(Mode::Confirmation, Action::PageUp),
@@ -1707,6 +1991,7 @@ fn footer_widget(bindings: &Bindings, view: View, width: u16) -> Paragraph<'stat
                     (Action::Search, "search"),
                     (Action::Mark, "mark"),
                     (Action::Add, "add"),
+                    (Action::Remove, "remove"),
                     (Action::Inspect, "inspect"),
                     (Action::Refresh, "refresh"),
                     (Action::Menu, "menu"),
@@ -1731,7 +2016,7 @@ fn footer_widget(bindings: &Bindings, view: View, width: u16) -> Paragraph<'stat
     };
     // Least needed first; exit, help and menu routes always stay visible.
     for dropped in [
-        "mark", "add", "rows", "refresh", "search", "inspect", "delete",
+        "scroll", "mark", "remove", "add", "rows", "refresh", "search", "inspect", "delete",
     ] {
         if width_of(&items) <= usize::from(width) {
             break;
@@ -1830,7 +2115,9 @@ fn status_lines(
         View::Preview => "Nothing changes until you confirm".to_owned(),
         View::AddInput => "Ordinary keys type text · nothing is saved yet".to_owned(),
         View::AddPreview => "Nothing changes until you choose".to_owned(),
-        View::Menu | View::Help | View::Problems | View::Batch => state.to_owned(),
+        View::Menu | View::Help | View::Problems | View::Batch | View::QuitBatch => {
+            state.to_owned()
+        }
         View::Normal | View::Inspect if compact && complete && !inspect.is_empty() => format!(
             "Path and origin: {} inspects, menu copies the full value",
             inspect[0]
@@ -1913,6 +2200,7 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
             (single(Search), "live fuzzy search"),
             (single(Mark), "toggle mark"),
             (single(Add), "add a repository by reference"),
+            (single(Remove), "remove the checkout, keep registration"),
             (single(ClearSearch), "clear filter"),
             (single(Inspect), "Inspect repository"),
             (single(Refresh), "refresh local/config state"),
@@ -1945,6 +2233,7 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
         Mode::Confirmation => vec![
             (pair(Down, Up), "move focus"),
             (pair(PageUp, PageDown), "page up / down"),
+            (single(Acknowledge), "acknowledge the listed losses"),
             (single(Accept), "choose"),
             (single(Cancel), "cancel"),
             (help_quit(), "help / quit"),
@@ -2287,12 +2576,17 @@ fn inspection_widget(
         }
     };
     lines.extend(field_lines("Clone", &clone, dim(), width));
-    let reason = if row.markable {
-        "unavailable · read-only inventory"
-    } else {
-        "unavailable · patterns are inspect-only"
+    let remove = match (
+        batch::removal_eligibility(row, BatchAction::Remove, config),
+        batch::removal_eligibility(row, BatchAction::RemoveUnregister, config),
+    ) {
+        (Eligibility::Unavailable(reason), Eligibility::Available) => {
+            format!("unavailable · {reason} · Remove + unregister is available")
+        }
+        (Eligibility::Unavailable(reason), _) => format!("unavailable · {reason}"),
+        _ => "available · removes the found path".to_owned(),
     };
-    lines.extend(field_lines("Remove", reason, dim(), width));
+    lines.extend(field_lines("Remove", &remove, dim(), width));
     Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 
@@ -2321,6 +2615,7 @@ enum Entry {
     MarkVisible,
     ClearMarks,
     Run(BatchAction),
+    CancelBatch,
 }
 
 /// One popup line: a group heading or spacer without an entry, or an entry with its hint.
@@ -2379,6 +2674,10 @@ fn menu_lines(
         None => item(entry, label, "no row".to_owned(), false),
     };
     let key = |action| menu_key(&session.bindings, action);
+    // Unregistering changes every checkout of an identity; all of them must be known.
+    let scanning = |action| {
+        action == BatchAction::RemoveUnregister && (!session.complete || session.scan.incomplete)
+    };
     match menu {
         Menu::Root => {
             let problems = session.problems.entries().len();
@@ -2438,12 +2737,20 @@ fn menu_lines(
                     },
                     problems > 0,
                 ),
-                item(
-                    Entry::Unavailable("No batch is active"),
-                    "Cancel active batch",
-                    "no batch".to_owned(),
-                    false,
-                ),
+                match session.batch.as_ref().filter(|batch| !batch.finished()) {
+                    Some(batch) => item(
+                        Entry::CancelBatch,
+                        "Cancel active batch",
+                        format!("{} / {} processed", batch.processed(), batch.targets.len()),
+                        true,
+                    ),
+                    None => item(
+                        Entry::Unavailable("No batch is active"),
+                        "Cancel active batch",
+                        "no batch".to_owned(),
+                        false,
+                    ),
+                },
                 item(Entry::Help, "Help / keybindings", key(Action::Help), true),
                 item(Entry::Quit, "Quit", key(Action::Quit), true),
             ]
@@ -2453,6 +2760,8 @@ fn menu_lines(
             BatchAction::Unregister,
             BatchAction::Clone,
             BatchAction::CloneRegister,
+            BatchAction::Remove,
+            BatchAction::RemoveUnregister,
         ]
         .into_iter()
         .map(|action| {
@@ -2461,6 +2770,8 @@ fn menu_lines(
             let Some(row) = row.filter(|_| session.marks.is_empty()) else {
                 return if session.marks.is_empty() {
                     on_row(entry, label, String::new())
+                } else if scanning(action) {
+                    item(entry, label, "the scan is not complete".to_owned(), false)
                 } else {
                     item(
                         entry,
@@ -2494,6 +2805,10 @@ fn menu_lines(
                     }
                     Err(reason) => Eligibility::Unavailable(reason),
                 }
+            } else if scanning(action) {
+                Eligibility::Unavailable("the scan is not complete")
+            } else if action.removes() {
+                batch::removal_eligibility(row, action, &session.config)
             } else {
                 batch::eligibility(row, action, &session.config)
             };
@@ -2510,17 +2825,6 @@ fn menu_lines(
                 }
             }
         })
-        .chain(
-            [
-                ("Remove only", "Remove only is unavailable in this build"),
-                (
-                    "Remove + unregister",
-                    "Remove + unregister is unavailable in this build",
-                ),
-            ]
-            .into_iter()
-            .map(|(label, message)| on_row(Entry::Unavailable(message), label, String::new())),
-        )
         .collect(),
         Menu::Copy => CopyField::ALL
             .into_iter()
@@ -2658,6 +2962,11 @@ fn activate_menu_entry(
             selection.help_scroll = 0;
             return None;
         }
+        Entry::Quit if session.running() => {
+            selection.menu.clear();
+            selection.ask_quit();
+            return None;
+        }
         Entry::Quit => return Some(quit(session)),
         _ => selection.menu.clear(),
     }
@@ -2714,13 +3023,17 @@ fn activate_menu_entry(
             1 => "Cleared 1 mark".to_owned(),
             count => format!("Cleared {count} marks"),
         }),
-        (Entry::Run(_), _)
-            if session
-                .batch
-                .as_ref()
-                .is_some_and(|batch| !batch.finished()) =>
-        {
-            Some("A batch is already running".to_owned())
+        (Entry::CancelBatch, _) => {
+            session.cancel_batch();
+            // The outcomes show what was completed and what was left.
+            selection.batch = true;
+            selection.batch_cancel = false;
+            return None;
+        }
+        (Entry::Run(_), _) if session.running() => Some("A batch is already running".to_owned()),
+        (Entry::Run(action), row) if action.removes() => {
+            confirm_removal(session, selection, report, visible_rows, row, action);
+            return None;
         }
         (Entry::Run(action), _) => {
             let keys = if session.marks.is_empty() {
@@ -2751,24 +3064,7 @@ fn activate_menu_entry(
                             action,
                             &session.config,
                         ),
-                        None => BatchTarget {
-                            name: match &key {
-                                model::RowKey::Path(path) => home_relative(path, &session.home),
-                                model::RowKey::Declaration { identity, .. }
-                                | model::RowKey::Checkout { identity, .. }
-                                | model::RowKey::Pattern(identity) => escape(identity),
-                            },
-                            key,
-                            identity: None,
-                            path: None,
-                            found: false,
-                            reference: None,
-                            hidden,
-                            blocked: Some("the entry is no longer listed".to_owned()),
-                            noop: None,
-                            registration: Default::default(),
-                            elsewhere: None,
-                        },
+                        None => unlisted_target(key, hidden, &session.home),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -2780,7 +3076,8 @@ fn activate_menu_entry(
                 start_batch(session, selection, batch);
             } else {
                 selection.preview = Some(batch);
-                selection.preview_run = false;
+                selection.preview_fresh = true;
+                selection.preview_focus = 0;
                 selection.preview_scroll = 0;
             }
             None
@@ -2788,6 +3085,112 @@ fn activate_menu_entry(
         _ => None,
     };
     None
+}
+
+/// A marked entry the inventory no longer lists: it stays in the batch, blocked.
+fn unlisted_target(key: model::RowKey, hidden: bool, home: &Path) -> BatchTarget {
+    BatchTarget {
+        // Kept so a marked checkout that is not removed still holds back its unregister.
+        identity: match &key {
+            model::RowKey::Declaration { identity, .. }
+            | model::RowKey::Checkout { identity, .. } => Some(identity.clone()),
+            model::RowKey::Path(_) | model::RowKey::Pattern(_) => None,
+        },
+        name: match &key {
+            model::RowKey::Path(path) => home_relative(path, home),
+            model::RowKey::Declaration { identity, .. }
+            | model::RowKey::Checkout { identity, .. }
+            | model::RowKey::Pattern(identity) => escape(identity),
+        },
+        key,
+        path: None,
+        found: false,
+        reference: None,
+        hidden,
+        blocked: Some("the entry is no longer listed".to_owned()),
+        noop: None,
+        registration: Default::default(),
+        elsewhere: None,
+        removal: Default::default(),
+    }
+}
+
+/// Opens the removal confirmation for the marked rows, or for `row` when none are marked.
+/// Every target is frozen here with the answer of the removal guards; nothing is deleted
+/// before the confirmation is accepted.
+fn confirm_removal(
+    session: &mut InventorySession,
+    selection: &mut Selection,
+    report: &InventoryReport,
+    visible_rows: &[&model::InventoryRow],
+    row: Option<&model::InventoryRow>,
+    action: BatchAction,
+) {
+    if session.running() {
+        session.message = Some("A batch is already running".to_owned());
+        return;
+    }
+    // Unregistering changes every checkout of an identity; all of them must be known.
+    if action == BatchAction::RemoveUnregister && (!session.complete || report.incomplete) {
+        session.message = Some(format!(
+            "{} unavailable: the scan is not complete, other checkouts of an identity are not known yet",
+            action.label()
+        ));
+        return;
+    }
+    let keys = if session.marks.is_empty() {
+        let Some(row) = row else {
+            return;
+        };
+        if let Eligibility::Unavailable(reason) =
+            batch::removal_eligibility(row, action, &session.config)
+        {
+            session.message = Some(format!("{} unavailable: {reason}", action.label()));
+            return;
+        }
+        vec![row.key.clone()]
+    } else {
+        session.marks.keys().cloned().collect::<Vec<_>>()
+    };
+    let names = short_names(&report.rows);
+    let targets = keys
+        .iter()
+        .map(|key| {
+            let hidden = !visible_rows.iter().any(|row| row.key == *key);
+            match report.rows.iter().find(|row| row.key == *key) {
+                Some(row) => BatchTarget::freeze_removal(
+                    row,
+                    names[&row.key].clone(),
+                    hidden,
+                    action,
+                    &session.config,
+                    &session.root,
+                    &report.rows,
+                    &keys,
+                    &NativeGit,
+                    &Filesystem,
+                ),
+                None => unlisted_target(key.clone(), hidden, &session.home),
+            }
+        })
+        .collect();
+    let batch = Batch::new(action, targets);
+    // Cancel is the default; the acknowledgment sits above it.
+    selection.preview_focus = usize::from(acknowledgment(&batch).is_some());
+    selection.preview_scroll = 0;
+    selection.preview_fresh = true;
+    selection.preview = Some(batch);
+}
+
+/// The names of the targets whose listed losses the confirmation asks to acknowledge.
+fn acknowledgment(batch: &Batch) -> Option<Vec<&str>> {
+    let names = batch
+        .targets
+        .iter()
+        .filter(|target| target.blocked.is_none() && !target.removal.losses.is_empty())
+        .map(|target| target.name.as_str())
+        .collect::<Vec<_>>();
+    (batch.action.removes() && !names.is_empty()).then_some(names)
 }
 
 /// The Add form: the typed reference, why the last one was rejected, and its preview with the
@@ -3012,12 +3415,19 @@ fn batch_note(action: BatchAction) -> &'static str {
         BatchAction::CloneRegister => {
             "A target registers only after its clone succeeded or was a no-op. A failed configuration write does not undo a checkout. Git owns the terminal while it clones."
         }
+        BatchAction::Remove => {
+            "Registration and exclusions stay unchanged. ensure can recreate these checkouts."
+        }
+        BatchAction::RemoveUnregister => {
+            "An identity is unregistered only after every selected checkout of it is gone. A failed configuration write does not undo a deletion."
+        }
     }
 }
 
 fn start_batch(session: &mut InventorySession, selection: &mut Selection, batch: Batch) {
     session.batch = Some(batch);
     selection.batch = true;
+    selection.batch_cancel = false;
     selection.batch_scroll = 0;
 }
 
@@ -3092,7 +3502,9 @@ fn outcome_label(outcome: Outcome) -> &'static str {
     }
 }
 
-fn batch_widget(batch: &Batch, home: &Path, width: u16) -> Paragraph<'static> {
+/// The outcomes of a batch. While it runs, two choices follow them: return to browsing, the
+/// default, and `cancel` focuses cancelling the remaining work.
+fn batch_widget(batch: &Batch, home: &Path, width: u16, cancel: bool) -> Paragraph<'static> {
     let active = batch.active();
     let hidden = batch.targets.iter().filter(|target| target.hidden).count();
     let mut summary = format!("{} / {} processed", batch.processed(), batch.targets.len());
@@ -3174,7 +3586,70 @@ fn batch_widget(batch: &Batch, home: &Path, width: u16) -> Paragraph<'static> {
         Line::default(),
         Line::styled(batch_note(batch.action), dim()),
     ]);
+    if !batch.finished() {
+        let width = usize::from(width);
+        lines.extend([
+            Line::default(),
+            choice_line(
+                "Return to browsing",
+                "batch continues",
+                true,
+                !cancel,
+                width,
+            ),
+            choice_line(
+                "Cancel remaining work",
+                "completed changes remain",
+                true,
+                cancel,
+                width,
+            ),
+        ]);
+    }
     Paragraph::new(lines).wrap(Wrap { trim: false })
+}
+
+/// The prompt shown when quitting while a batch runs. Returning is the default.
+fn quit_widget(batch: &Batch, cancel: bool, width: u16) -> Paragraph<'static> {
+    let left = batch
+        .targets
+        .iter()
+        .zip(&batch.results)
+        .filter(|(_, result)| result.outcome == Outcome::Unattempted)
+        .map(|(target, _)| target.name.as_str())
+        .collect::<Vec<_>>();
+    let names = match left.as_slice() {
+        [] => "nothing".to_owned(),
+        [one] => (*one).to_owned(),
+        [first, second] => format!("{first} and {second}"),
+        [first, second, rest @ ..] => format!("{first}, {second} and {} more", rest.len()),
+    };
+    let problems = batch
+        .results
+        .iter()
+        .filter(|result| matches!(result.outcome, Outcome::Failed | Outcome::Blocked))
+        .count();
+    let mut consequence = format!("Cancelling leaves {names} unattempted.");
+    if problems > 0 {
+        consequence.push_str(&format!(
+            " The session exits 1 because {problems} {} failed or were blocked.",
+            if problems == 1 { "target" } else { "targets" }
+        ));
+    }
+    let width = usize::from(width);
+    Paragraph::new(vec![
+        Line::raw(format!(
+            "{} of {} targets processed. Completed changes remain.",
+            batch.processed(),
+            batch.targets.len()
+        )),
+        Line::default(),
+        Line::styled(consequence, dim()),
+        Line::default(),
+        choice_line("Return to inventory", "default", true, !cancel, width),
+        choice_line("Cancel remaining work and quit", "", true, cancel, width),
+    ])
+    .wrap(Wrap { trim: false })
 }
 
 /// Every frozen target before the batch runs: its exact path and identity, and whether it is
@@ -3201,6 +3676,9 @@ fn preview_lines(batch: &Batch, home: &Path) -> Vec<Line<'static>> {
         let (label, style, reason) = match (&target.blocked, &target.noop) {
             (Some(reason), _) => ("BLOCKED", tint(Color::Red), Some(reason)),
             (None, Some(reason)) => ("NO-OP", dim(), Some(reason)),
+            (None, None) if !target.removal.losses.is_empty() => {
+                ("LOSS ACKNOWLEDGMENT REQUIRED", warn(), None)
+            }
             (None, None) => ("ELIGIBLE", focus(), None),
         };
         let mut heading = vec![
@@ -3227,17 +3705,47 @@ fn preview_lines(batch: &Batch, home: &Path) -> Vec<Line<'static>> {
                 .map_or_else(|| "no identity".to_owned(), escape),
         ];
         detail.extend(reason.map(escape));
+        if batch.action.removes() {
+            detail.push(if target.blocked.is_some() {
+                "force cannot waive this".to_owned()
+            } else if !target.found {
+                "known missing · absence is rechecked first".to_owned()
+            } else if target.removal.losses.is_empty() {
+                "clean".to_owned()
+            } else {
+                escape(target.removal.losses.join(", "))
+            });
+        }
         lines.extend([
             Line::default(),
             Line::from(heading),
             Line::styled(detail.join(" · "), dim()),
         ]);
+        lines.extend(target.removal.occupies.iter().map(|identity| {
+            Line::styled(
+                format!(
+                    "sits at the configured destination of {} · that declaration stays",
+                    escape(identity)
+                ),
+                warn(),
+            )
+        }));
+        lines.extend(target.removal.shared.iter().map(|path| {
+            Line::styled(
+                format!(
+                    "also unregisters {} · not selected, its files stay",
+                    home_relative(path, home)
+                ),
+                warn(),
+            )
+        }));
     }
     lines
 }
 
-/// The preview's two choices with one cursor; `run` focuses the run choice instead of Cancel.
-fn preview_choices(batch: &Batch, run: bool) -> Vec<Line<'static>> {
+/// The preview's choices with one cursor at `focus`: the loss acknowledgment when a removal
+/// lists losses, then Cancel, then the action.
+fn preview_choices(batch: &Batch, focus: usize, bindings: &Bindings) -> Vec<Line<'static>> {
     let count = |noop: bool| {
         batch
             .targets
@@ -3263,8 +3771,66 @@ fn preview_choices(batch: &Batch, run: bool) -> Vec<Line<'static>> {
             Span::styled(format!("  {hint}"), dim()),
         ])
     };
-    vec![
-        choice("Cancel".to_owned(), "default".to_owned(), !run),
+    let mut lines = Vec::new();
+    if let Some(names) = acknowledgment(batch) {
+        lines.push(choice(
+            format!(
+                "[{}] Also remove {} and accept {} listed losses",
+                if batch.acknowledged { 'x' } else { ' ' },
+                match names.as_slice() {
+                    [name] => (*name).to_owned(),
+                    names => format!("{} checkouts", names.len()),
+                },
+                if names.len() == 1 { "its" } else { "their" }
+            ),
+            bindings
+                .keys(Mode::Confirmation, Action::Acknowledge)
+                .first()
+                .map(|key| (*key).to_owned())
+                .unwrap_or_default(),
+            focus == 0,
+        ));
+    }
+    let cancel = lines.len();
+    lines.push(choice(
+        "Cancel".to_owned(),
+        "default".to_owned(),
+        focus == cancel,
+    ));
+    lines.push(if batch.action.removes() {
+        let run = batch
+            .targets
+            .iter()
+            .filter(|target| batch.removable(target))
+            .collect::<Vec<_>>();
+        let found = run.iter().filter(|target| target.found).count();
+        choice(
+            if batch.action == BatchAction::Remove {
+                format!(
+                    "Remove {found} {}",
+                    if found == 1 { "checkout" } else { "checkouts" }
+                )
+            } else {
+                format!(
+                    "Remove + unregister {} {}",
+                    run.len(),
+                    if run.len() == 1 { "target" } else { "targets" }
+                )
+            },
+            if run.is_empty() {
+                "nothing is eligible".to_owned()
+            } else {
+                format!(
+                    "{} · cannot be undone",
+                    run.iter()
+                        .map(|target| target.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            },
+            focus > cancel,
+        )
+    } else {
         choice(
             format!(
                 "{} {changing} {}",
@@ -3275,21 +3841,25 @@ fn preview_choices(batch: &Batch, run: bool) -> Vec<Line<'static>> {
                 match batch.action {
                     BatchAction::Clone => "files only",
                     BatchAction::CloneRegister => "files, then configuration",
-                    BatchAction::Register | BatchAction::Unregister => "configuration only",
+                    _ => "configuration only",
                 }
                 .to_owned()
             } else {
                 format!("{} stay unchanged", unchanged.join(" · "))
             },
-            run,
-        ),
-    ]
+            focus > cancel,
+        )
+    });
+    lines
 }
 
 /// The preview popup's regions, its scrolling target list, and the choices pinned below it.
-fn preview_regions(area: Rect, list: &[Line<'static>]) -> ([Rect; 4], Rect, Rect) {
+fn preview_regions(area: Rect, list: &[Line<'static>], choices: u16) -> ([Rect; 4], Rect, Rect) {
     let mut sizing = list.to_vec();
-    sizing.extend(std::iter::repeat_n(Line::default(), 3));
+    sizing.extend(std::iter::repeat_n(
+        Line::default(),
+        usize::from(choices) + 1,
+    ));
     let regions = popup_regions(
         area,
         WIDE_POPUP,
@@ -3298,7 +3868,7 @@ fn preview_regions(area: Rect, list: &[Line<'static>]) -> ([Rect; 4], Rect, Rect
     let [list, _, choices] = Layout::vertical([
         Constraint::Min(0),
         Constraint::Length(1),
-        Constraint::Length(2),
+        Constraint::Length(choices),
     ])
     .areas(regions[2]);
     (regions, list, choices)
@@ -3388,10 +3958,19 @@ struct Selection {
     problems: bool,
     problems_scroll: u16,
     batch: bool,
+    /// The outcomes popup of a running batch focuses "Cancel remaining work".
+    batch_cancel: bool,
     batch_scroll: u16,
+    /// Quitting was asked for while a batch runs; the prompt is open.
+    quit: bool,
+    /// The quit prompt focuses "Cancel remaining work and quit" instead of returning.
+    quit_cancel: bool,
     /// Targets frozen for a batch that has not started; refreshes never change them.
     preview: Option<Batch>,
-    preview_run: bool,
+    /// The preview has not been drawn yet; input typed before it is discarded.
+    preview_fresh: bool,
+    /// The focused preview choice, counted from the top one.
+    preview_focus: usize,
     preview_scroll: u16,
     add: Option<AddForm>,
     help: bool,
@@ -3476,9 +4055,17 @@ impl Selection {
         self.inspection_scroll = 0;
     }
 
+    /// Opens the quit prompt with returning to the inventory focused.
+    fn ask_quit(&mut self) {
+        self.quit = true;
+        self.quit_cancel = false;
+    }
+
     fn view(&self) -> View {
         if self.help {
             View::Help
+        } else if self.quit {
+            View::QuitBatch
         } else if !self.menu.is_empty() {
             View::Menu
         } else if let Some(add) = &self.add {

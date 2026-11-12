@@ -33,4 +33,16 @@ unchanged.
 
 Declining a warning or confirmation leaves the checkout and declaration unchanged. Failed or partial disk removal also leaves configuration unchanged: configuration cleanup happens only after disk removal succeeds.
 
+## Remove from the inventory
+
+In `lager inventory`, `r` removes the current row's checkout and keeps its registration; the menu's Repository actions… also offers Remove + unregister. Both act on the marked rows when any are marked, and both run the guards above on each exact found path.
+
+The confirmation lists every target before anything is deleted: clean targets, targets with named local-state losses, and blocked targets with the guard that forbids them. Cancel is the default. Targets with losses are removed only after you tick the acknowledgment row, which covers the listed losses at the listed paths and nothing else. It never unblocks a guard.
+
+Keys typed before the confirmation is on screen are discarded, so it cannot be answered unseen.
+
+Each target is checked again immediately before deletion. A changed origin, a path that moved or vanished, another checkout put at the same path, a changed registration, or a loss that was not on the list blocks that target as stale and leaves it and its registration alone; the other targets go on. Remove + unregister needs a complete scan and unregisters an identity only after every selected checkout of it is gone, and a declared repository whose destination is missing is unregistered only if that destination is still absent.
+
+A running batch stops before its next target when you cancel it from the menu, the batch popup or the quit prompt. Completed deletions are not rolled back.
+
 See the [CLI reference](../reference/cli.md) for exit status and non-interactive rules.
