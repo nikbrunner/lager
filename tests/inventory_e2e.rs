@@ -4528,6 +4528,47 @@ fn inventory_registers_and_unregisters_the_current_row_without_touching_files() 
 
 #[cfg(unix)]
 #[test]
+fn inventory_scan_leaves_a_stat_dirty_index_untouched() {
+    use std::os::unix::fs::MetadataExt;
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    let checkout = root.join("org/alpha");
+    init_repo(&checkout, "git@github.com:org/alpha.git", true);
+    // A README whose mtime no longer matches its index entry makes a plain `git status` rewrite the index.
+    fs::File::options()
+        .write(true)
+        .open(checkout.join("README"))
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000))
+        .unwrap();
+    let index = checkout.join(".git/index");
+    let before = fs::metadata(&index).unwrap();
+
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("inventory"),
+        &[(
+            vec!["NORMAL · 1 row", "absent: Scanning", "clean"],
+            b"q".to_vec(),
+        )],
+        24,
+        100,
+        0,
+        |_| {},
+    );
+
+    let after = fs::metadata(&index).unwrap();
+    assert_eq!(
+        (after.ino(), after.mtime(), after.mtime_nsec()),
+        (before.ino(), before.mtime(), before.mtime_nsec())
+    );
+    assert!(!checkout.join(".git/index.lock").exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn inventory_registers_every_marked_row_including_hidden_ones_and_reports_each_outcome() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
@@ -5699,8 +5740,10 @@ fn init_repo_without_origin(path: &std::path::Path) {
 }
 
 fn run_git(directory: &std::path::Path, args: &[&str]) {
+    // Fixture commits otherwise spawn a detached `git maintenance run` that outlives this call.
     let output = std::process::Command::new("git")
         .current_dir(directory)
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
         .args(args)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")

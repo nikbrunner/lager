@@ -547,6 +547,8 @@ pub(crate) fn clean_git_environment(command: &mut Command) {
     ] {
         command.env_remove(OsStr::new(name));
     }
+    // Without this `git status` refreshes the index under index.lock, racing the user's own Git.
+    command.env("GIT_OPTIONAL_LOCKS", "0");
 }
 
 fn command_output(mut command: Command, cancel: &AtomicBool) -> Result<String, ProbeError> {
