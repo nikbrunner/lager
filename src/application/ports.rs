@@ -230,3 +230,122 @@ pub fn config_path(override_path: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."));
     home.join(".config/lager/config.toml")
 }
+
+/// Where a path sits in its repository, as canonical paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeLocation {
+    pub top_level: PathBuf,
+    /// The Git directory of this working tree; equals `common_dir` in a primary checkout.
+    pub git_dir: PathBuf,
+    pub common_dir: PathBuf,
+}
+
+/// One working tree as `git worktree list` reports it. The first entry is the primary.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorktreeEntry {
+    pub path: PathBuf,
+    /// Full object ID; `None` on an unborn branch.
+    pub head: Option<String>,
+    /// Full ref; `None` when HEAD is detached.
+    pub branch: Option<String>,
+    pub bare: bool,
+    pub locked: bool,
+    pub lock_reason: Option<String>,
+    pub prunable: bool,
+    pub prune_reason: Option<String>,
+}
+
+/// `git_failed`, `unreadable` or `invalid_metadata`, with a readable message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeFault {
+    pub path: Option<PathBuf>,
+    pub code: &'static str,
+    pub error: String,
+}
+
+/// Local state a removal deletes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorktreeLosses {
+    pub modified: usize,
+    pub untracked: usize,
+    pub ignored: bool,
+}
+
+impl WorktreeLosses {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// What a removal deletes from one working tree, and what it must not delete.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorktreeState {
+    pub losses: WorktreeLosses,
+    /// Untracked or ignored directories that hold a Git repository of their own.
+    pub nested_repositories: Vec<String>,
+}
+
+/// A native Git mutation that did not succeed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeCommandError {
+    pub message: String,
+    /// The child reported an interruption.
+    pub cancelled: bool,
+}
+
+/// Git facts and native worktree commands. `repository` is any working tree of the
+/// repository; every call runs without inherited Git location variables.
+pub trait WorktreeGit {
+    fn locate(&self, path: &Path) -> Result<WorktreeLocation, String>;
+    fn entries(&self, repository: &Path) -> Result<Vec<WorktreeEntry>, WorktreeFault>;
+    /// Entries under `<common_dir>/worktrees` that Git cannot read and so leaves out of its list.
+    fn metadata_faults(&self, common_dir: &Path) -> Vec<WorktreeFault>;
+    /// Normalized origin; `None` without an origin or with an unsupported one.
+    fn origin_identity(&self, repository: &Path) -> Result<Option<String>, String>;
+    /// The commit `revision` names in the local object store.
+    fn commit(&self, repository: &Path, revision: &str) -> Option<String>;
+    fn branch_exists(&self, repository: &Path, name: &str) -> Result<bool, String>;
+    fn valid_branch_name(&self, name: &str) -> bool;
+    /// `git worktree add`, with `-b branch start` when `start` is given. Native streams.
+    fn add(
+        &self,
+        repository: &Path,
+        destination: &Path,
+        branch: &str,
+        start: Option<&str>,
+    ) -> Result<(), WorktreeCommandError>;
+    /// The working tree path the linked Git directory `git_dir` points back to.
+    fn linked_path(&self, git_dir: &Path) -> Result<PathBuf, String>;
+    /// Counts files Git hides from its status (skip-worktree, assume-unchanged) as modified.
+    fn local_state(&self, worktree: &Path) -> Result<WorktreeState, String>;
+    /// Submodule paths that hold a repository in this working tree.
+    fn populated_submodules(&self, worktree: &Path) -> Result<Vec<String>, String>;
+    /// A shared branch, tag or remote ref whose commit has `commit` as an ancestor.
+    fn protecting_ref(&self, repository: &Path, commit: &str) -> Result<Option<String>, String>;
+    /// Commits on `branch` that no remote ref holds; `None` without remote refs.
+    fn unpushed(&self, repository: &Path, branch: &str) -> Option<usize>;
+    /// `git worktree remove`, with `--force` only when asked. Native streams.
+    fn remove(
+        &self,
+        repository: &Path,
+        worktree: &Path,
+        force: bool,
+    ) -> Result<(), WorktreeCommandError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathKind {
+    Missing,
+    Directory,
+    Symlink,
+    Other,
+}
+
+pub trait WorktreeFilesystem {
+    /// What sits at `path` itself, without following a symlink.
+    fn kind(&self, path: &Path) -> Result<PathKind, String>;
+    fn canonicalize(&self, path: &Path) -> Result<PathBuf, String>;
+    fn create_dir_all(&self, path: &Path) -> Result<(), String>;
+    /// What tells this directory from another one put at the same path later.
+    fn identity(&self, path: &Path) -> Result<String, String>;
+}

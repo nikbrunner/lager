@@ -25,6 +25,9 @@ Lager selects the configuration path in this order:
 | `hook` | `hook [REPOSITORY]...` | Runs hooks for explicit declarations. Without repositories, it selects explicit declarations. |
 | `status`, `list`, `ls` | `status [--remote] [--include-archived] [--registered] [--json]` | Prints the rows `tui` shows, once its scan has finished: a table, or one JSON document with `--json`. `--remote` expands wildcards through providers; `--registered` keeps declared repositories and wildcard patterns. |
 | `tui` | `tui` | Opens the offline overview with registration actions; requires TTY stdin and stdout. |
+| `worktree list` | `worktree list [REPOSITORY] [--json]` | Lists the primary checkout and every linked worktree of one repository. |
+| `worktree add` | `worktree add <REPOSITORY> <NAME> [--branch EXISTING \| --new-branch NEW] [--start REF] [--path PATH]` | Creates a linked worktree through `git worktree add`. |
+| `worktree remove` | `worktree remove <PATH> [--yes] [--force]` | Removes one linked worktree through `git worktree remove` and keeps its branch. |
 
 `list` and `ls` are visible aliases of `status`. All three names accept the same arguments, options, and configuration selection, and produce identical output and exit statuses.
 
@@ -289,6 +292,102 @@ returning. This signal policy is scoped to the binary inventory invocation;
 Use the [isolated inventory walkthrough](../how-to/verify-inventory.md) for
 acceptance testing without your normal repositories or configuration.
 
+## Worktrees
+
+`lager worktree` works on one repository at a time through native Git. The commands need Git 2.36 or later. With an older Git they exit with Git's own error and create or remove nothing. Worktrees are not declarations: the configuration file does not name them and `ensure` does not create them. The commands run without a configuration file as long as the repository is given as a path.
+
+### Naming the repository
+
+`REPOSITORY` is a checkout path or a repository reference.
+
+- An argument that is absolute, or that is `.` or `..` or starts with `./` or `../`, is a path. It has to be the root of a non-bare checkout.
+- Anything else is a repository reference, such as `org/project`, and resolves to the checkout the configuration assigns to it.
+- A linked worktree resolves to its primary checkout.
+
+`worktree list` without `REPOSITORY` uses the repository of the working directory, from any directory inside it. Outside a repository it exits `2`. `worktree add` and `worktree remove` always take their target as an argument.
+
+### `worktree list`
+
+The human listing has one line per working tree with three columns, two spaces apart: the path, the branch, and the state. A detached HEAD reads `detached` followed by the short commit ID. The state column holds `primary`, `locked` and `prunable`, the last two with Git's reason when there is one. Worktrees placed outside the default location and worktrees created by other tools are listed too. With `--json` the command prints one document; see [worktree JSON](worktree-json.md).
+
+A failure after the repository is found is one line on stderr and exit `1`, with the readable rows still printed.
+
+### `worktree add`
+
+| Options | Branch | Starts at |
+| --- | --- | --- |
+| none | A new branch named `NAME` | The primary checkout's HEAD, also when the command runs in a linked worktree |
+| `--new-branch NEW` | A new branch named `NEW` | The primary checkout's HEAD |
+| `--branch EXISTING` | The existing local branch | Where the branch is |
+| `--start REF` with a new branch | The new branch | The commit `REF` names in the local repository |
+
+`--start` applies only to a new branch, and `--branch` conflicts with `--new-branch`; both mistakes exit `2`. A new branch whose name exists, an `--branch` that names no local branch, and a `--start` that names no local commit exit `1`. Lager never fetches, never moves an existing branch, and leaves a branch that is checked out elsewhere to Git, which refuses it.
+
+`NAME` is one path component: ASCII letters, digits, `.`, `_` and `-`, starting with a letter or digit. Git checks the branch name separately.
+
+The destination is the first of these that applies:
+
+1. `--path PATH`, absolute or relative to the working directory. `..` is resolved by name. The path can lie outside the repository root and is never written to the configuration.
+2. With [`worktree_root`](config.md#top-level-fields) set: `<worktree_root>/<primary relative to root>.worktrees/<NAME>`. A primary checkout outside `root` needs `--path`.
+3. `<primary>.worktrees/<NAME>`, beside the primary checkout.
+
+Every destination has to be a path where nothing exists, an empty directory included. Lager refuses a destination below a symlink, inside a checkout, inside a Git directory, or still registered as a worktree whose directory is gone. On macOS `/tmp` and `/var` are symlinks, so an explicit path there is written as `/private/tmp/...`. Missing parent directories are created after every check has passed.
+
+Git's own output appears on its own streams, followed by one line from Lager:
+
+```text
+$ lager worktree add org/project hotfix
+Preparing worktree (new branch 'hotfix')
+HEAD is now at 4be1d02 Release 2.3.1
+Created worktree /home/dev/repos/org/project.worktrees/hotfix on new branch hotfix
+```
+
+A new worktree holds what Git checks out. Lager copies no environment files, dependencies or ignored files into it and runs none of its own hooks for it. Git runs the repository's `post-checkout` hook as it does for any `git worktree add`.
+
+When Git fails, Lager rolls nothing back. It exits `1` and names what is left, one `remaining:` line each for a directory, a new branch and worktree metadata, or `remaining: nothing`.
+
+### `worktree remove`
+
+`PATH` is the exact path of a linked worktree, absolute or relative to the working directory. A branch name does not select a worktree. Removal goes through `git worktree remove`; Lager deletes no directory itself and never prunes or repairs. The branch always stays.
+
+Lager prints what it is about to remove, then asks:
+
+```text
+$ lager worktree remove /home/dev/repos/org/project.worktrees/hotfix
+Remove worktree
+  path      /home/dev/repos/org/project.worktrees/hotfix
+  branch    hotfix · kept · 2 commits not pushed
+  losses    none
+```
+
+The confirmation defaults to no. Declining prints `Skipped PATH` and exits `0`; Ctrl-C exits `130`. `--yes` skips the question. Commits on the branch that no remote holds are counted in the summary and never block the removal.
+
+`losses` lists modified files, untracked files and ignored files. A tracked file marked skip-worktree or assume-unchanged counts as modified whether or not it was edited, because Git's status hides it. A repository deeper inside an ignored directory is part of the ignored files. With any of them the command exits `1` unless `--force` is given, and the question then reads "Accept these losses and remove this worktree?". Git receives `--force` only in that case.
+
+These block the removal with or without `--force`. Each prints `error: blocked: ...` and, where Git has a command for it, a `hint:` line:
+
+| Blocker | Hint |
+| --- | --- |
+| The path is the primary checkout | `lager remove IDENTITY` |
+| The path is not the root of a Git worktree, or is a symlink | none |
+| The path and the Git directory its `.git` file names do not name each other | none; the message names that Git directory |
+| The worktree is locked | `git worktree unlock` |
+| The path is absent | `git worktree prune` |
+| HEAD is detached, or names a ref outside `refs/heads/`, at a commit that no branch, tag or remote ref holds | `git branch keep-NAME` in the worktree |
+| A submodule is populated | `git submodule deinit` |
+| Git keeps submodule repositories for the worktree in its Git directory (`modules`) | none |
+| A stopped rebase or merge, or an interrupted checkout, holds an autostash in the worktree's Git directory (`rebase-merge/autostash`, `rebase-apply/autostash`, `MERGE_AUTOSTASH` or `CHECKOUT_AUTOSTASH_HEAD`) | `git rebase --abort` or `git merge --abort` in the worktree, which puts the stashed changes back; for a checkout, `git stash apply` with the commit the file names, then deleting the file |
+| An untracked directory, or an ignored directory itself, is a Git repository of its own, or a directory with tracked or untracked files holds a `.git` entry | none; the message names the directory |
+| Submodule state, local state or HEAD cannot be read | none |
+
+A detached commit counts as held when it is an ancestor of a commit under `refs/heads/`, `refs/tags/` (peeled to a commit) or `refs/remotes/`. HEAD, reflogs, the stash, per-worktree refs and replacement refs do not count. Only a ref under `refs/heads/` is a branch that stays: a HEAD that names any other ref is checked like a detached one, and the summary reads `detached` with the short commit ID. A submodule that `.gitmodules` declares and that holds no repository in the worktree does not block while its directory is empty. Git reports nothing inside a submodule path, so any entry in that directory blocks as unreadable submodule state; the message names the path.
+
+For an absent path Lager names the owning repository when the command runs inside it. No remote origin is needed for any of this.
+
+Lager checks again immediately before it calls Git. If the worktree differs from what the summary showed (its losses, its HEAD, its lock, its ownership), the command exits `1` and removes nothing.
+
+The worktree commands print `error:` and `hint:` lines; the other commands prefix diagnostics with `lager:`.
+
 ## Non-interactive use
 
 Outside a terminal, Lager never prompts:
@@ -297,6 +396,7 @@ Outside a terminal, Lager never prompts:
 - `add` requires exactly one of `--register` or `--no-register`, unless `--post-clone` supplies registration.
 - `remove` requires exactly one of `--unregister` or `--keep-registered`, plus `--yes`.
 - `tui` requires TTY stdin and stdout; use `status --json` for automation.
+- `worktree remove` requires `--yes`, and `--force` as well when the worktree has local losses.
 
 `--post-clone` conflicts with `--no-register`. `status --include-archived` requires `--remote`. Explicit repository arguments bypass the picker.
 
@@ -321,4 +421,4 @@ candidates by hidden row ID, in the order returned by the picker.
 
 A picker or repository interaction cancellation exits 130. Inventory's `q` and Esc use the session exit status described above. Invalid usage exits 2. Configuration, provider, Git, hook, filesystem, and aggregate failures exit 1. Success, no-op, empty selections, and explicitly skipped removals exit 0.
 
-See [status JSON](status-json.md), [exit codes](exit-codes.md), [automation](../how-to/automation.md), and [safe removal](../how-to/remove-safely.md) for the detailed contracts.
+See [status JSON](status-json.md), [worktree JSON](worktree-json.md), [exit codes](exit-codes.md), [automation](../how-to/automation.md), and [safe removal](../how-to/remove-safely.md) for the detailed contracts.

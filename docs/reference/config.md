@@ -23,8 +23,18 @@ post_clone = "make setup"
 | `providers` | No | Empty table | Provider entries are keyed by lowercase host names. |
 | `repositories` | No | Empty array | Each item is an explicit repository or a trailing `/*` wildcard. |
 | `inventory` | No | Default bindings | Mode-aware inventory key maps. |
+| `worktree_root` | No | None | Base directory for new worktrees: `~`, `~/relative`, or a relative path under `HOME`. Absolute paths and `..` are rejected. |
 
 `root` resolves from `HOME`, never from the working directory. `init` converts an absolute root under `HOME` to a portable `~` path before writing it.
+
+Without `worktree_root`, `lager worktree add` places a worktree beside its primary checkout at `<primary>.worktrees/<NAME>`. With it, the worktree goes to `<worktree_root>/<primary relative to root>.worktrees/<NAME>`:
+
+```toml
+root = "~/repos"
+worktree_root = "~/worktrees"
+```
+
+`lager worktree add org/project hotfix` then creates `~/worktrees/org/project.worktrees/hotfix`. A primary checkout outside `root` has no such path and needs `--path`. An invalid `worktree_root` fails every command when the configuration is loaded. You set the key by editing the file; configuration mutations keep it as written.
 
 ## Provider fields
 

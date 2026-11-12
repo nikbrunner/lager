@@ -1638,7 +1638,11 @@ where
     Ok(report)
 }
 
-fn destination(config: &Config, reference: &RepositoryRef, home: &Path) -> Result<PathBuf, String> {
+pub(crate) fn destination(
+    config: &Config,
+    reference: &RepositoryRef,
+    home: &Path,
+) -> Result<PathBuf, String> {
     let root = config
         .resolve_root(home)
         .map_err(|error| error.to_string())?;

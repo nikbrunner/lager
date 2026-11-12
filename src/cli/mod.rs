@@ -3,6 +3,7 @@ pub mod controller;
 pub mod interaction;
 mod inventory;
 mod signals;
+mod worktree;
 use std::io::IsTerminal;
 
 use crate::infrastructure::{fzf::Fzf, tools::NativeTools};

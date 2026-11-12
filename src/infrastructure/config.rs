@@ -371,7 +371,35 @@ fn decode_config(path: &Path, document: &Document<String>) -> Result<Config, Con
     })?;
     config.validate()?;
     config.resolve_root(&home_dir())?;
+    worktree_root(document)?;
     Ok(config)
+}
+
+/// The optional top-level `worktree_root` as written, once it is known to be portable.
+fn worktree_root(document: &Document<String>) -> Result<Option<String>, ConfigError> {
+    let Some(item) = document.as_table().get("worktree_root") else {
+        return Ok(None);
+    };
+    let value = item
+        .as_str()
+        .ok_or_else(|| ConfigError::Semantic("worktree_root must be a string".to_owned()))?;
+    crate::domain::config::resolve_worktree_root(value, &home_dir())?;
+    Ok(Some(value.to_owned()))
+}
+
+/// The configuration, its `worktree_root` as written and the unknown-key warnings, for the
+/// worktree commands and the inventory popup. Prints nothing.
+pub(crate) fn load_worktrees(
+    path: &Path,
+) -> Result<(Config, Option<String>, Vec<String>), ConfigStoreError> {
+    let content = fs::read_to_string(path).map_err(|source| ConfigStoreError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let document = parse_document(path, &content)?;
+    let config = decode_config(path, &document)?;
+    let root = worktree_root(&document)?;
+    Ok((config, root, unknown_key_warnings(&document.into_mut())))
 }
 
 fn parse_document(path: &Path, content: &str) -> Result<Document<String>, ConfigStoreError> {
@@ -524,7 +552,10 @@ fn relative_wildcard_name(pattern: &RepositoryRef, candidate: &RepositoryRef) ->
 fn unknown_key_warnings(document: &DocumentMut) -> Vec<String> {
     let mut warnings = Vec::new();
     for (key, _) in document.iter() {
-        if !matches!(key, "root" | "providers" | "repositories" | "inventory") {
+        if !matches!(
+            key,
+            "root" | "providers" | "repositories" | "inventory" | "worktree_root"
+        ) {
             warnings.push(format!("unknown config key `{}`", escape(key)));
         }
     }

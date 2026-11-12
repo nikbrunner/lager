@@ -1,5 +1,6 @@
 use std::ffi::{CString, OsStr};
 use std::fs::File;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path};
 use std::process::{Command, ExitStatus, Stdio};
@@ -7,7 +8,10 @@ use std::process::{Command, ExitStatus, Stdio};
 use rustix::fd::OwnedFd;
 use rustix::fs::{AtFlags, Dir, Mode, OFlags, mkdirat, openat, unlinkat};
 
-use crate::application::ports::{GitClient, GitRemoval, GitState};
+use crate::application::ports::{
+    GitClient, GitRemoval, GitState, WorktreeCommandError, WorktreeEntry, WorktreeFault,
+    WorktreeGit, WorktreeLocation, WorktreeState,
+};
 use crate::domain::repository::normalize_remote;
 use crate::domain::state::LocalState;
 
@@ -483,6 +487,452 @@ pub fn classify_destination(destination: &Path, expected_url: &str) -> LocalStat
         (Ok(actual), Ok(expected)) if actual == expected => LocalState::Cloned,
         (Ok(_), Ok(_)) => LocalState::Conflict,
         _ => LocalState::Conflict,
+    }
+}
+
+fn git_at(directory: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(directory);
+    crate::infrastructure::inventory::clean_git_environment(&mut command);
+    command
+}
+
+fn captured(command: &mut Command) -> Result<Vec<u8>, String> {
+    let output = command
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("could not start git: {error}"))?;
+    if output.status.success() {
+        return Ok(output.stdout);
+    }
+    let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Err(if message.is_empty() {
+        format!(
+            "git exited with {}",
+            super::exit_status::describe(&output.status)
+        )
+    } else {
+        message
+    })
+}
+
+fn captured_text(command: &mut Command) -> Result<String, String> {
+    captured(command).map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
+}
+
+/// Runs a mutation on the caller's own streams.
+fn native(command: &mut Command) -> Result<(), WorktreeCommandError> {
+    match command.status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(WorktreeCommandError {
+            message: format!("git exited with {}", super::exit_status::describe(&status)),
+            cancelled: super::exit_status::is_cancelled(status),
+        }),
+        Err(error) => Err(WorktreeCommandError {
+            message: format!("could not start git: {error}"),
+            cancelled: false,
+        }),
+    }
+}
+
+fn fault(path: &Path, code: &'static str, error: impl ToString) -> WorktreeFault {
+    WorktreeFault {
+        path: Some(path.to_path_buf()),
+        code,
+        error: error.to_string(),
+    }
+}
+
+/// Reads `git worktree list --porcelain -z`: NUL ends an attribute, an empty one ends a record.
+fn parse_worktree_entries(bytes: &[u8]) -> Result<Vec<WorktreeEntry>, String> {
+    let text = |value: Option<&[u8]>| {
+        String::from_utf8(value.unwrap_or_default().to_vec())
+            .map_err(|_| "worktree attribute is not UTF-8".to_owned())
+    };
+    let reason = |value: Option<&[u8]>| value.map(|bytes| String::from_utf8_lossy(bytes).into());
+    let mut entries = Vec::new();
+    let mut current: Option<WorktreeEntry> = None;
+    for field in bytes.split(|byte| *byte == 0) {
+        if field.is_empty() {
+            entries.extend(current.take());
+            continue;
+        }
+        let (key, value) = match field.iter().position(|byte| *byte == b' ') {
+            Some(space) => (&field[..space], Some(&field[space + 1..])),
+            None => (field, None),
+        };
+        if key == b"worktree" {
+            let path = value.filter(|path| !path.is_empty());
+            if current.is_some() || path.is_none() {
+                return Err("worktree record is malformed".to_owned());
+            }
+            current = Some(WorktreeEntry {
+                path: std::path::PathBuf::from(OsStr::from_bytes(path.unwrap_or_default())),
+                ..WorktreeEntry::default()
+            });
+            continue;
+        }
+        let entry = current
+            .as_mut()
+            .ok_or_else(|| "worktree attribute precedes its record".to_owned())?;
+        match key {
+            b"HEAD" => {
+                let id = text(value)?;
+                entry.head = (!id.bytes().all(|byte| byte == b'0')).then_some(id);
+            }
+            b"branch" => entry.branch = Some(text(value)?),
+            b"bare" => entry.bare = true,
+            b"locked" => {
+                entry.locked = true;
+                entry.lock_reason = reason(value);
+            }
+            b"prunable" => {
+                entry.prunable = true;
+                entry.prune_reason = reason(value);
+            }
+            _ => {}
+        }
+    }
+    entries.extend(current);
+    if entries.is_empty() {
+        return Err("Git listed no worktree".to_owned());
+    }
+    Ok(entries)
+}
+
+impl WorktreeGit for NativeGit {
+    fn locate(&self, path: &Path) -> Result<WorktreeLocation, String> {
+        let output = captured_text(git_at(path).args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--absolute-git-dir",
+            "--git-common-dir",
+        ]))?;
+        let [top_level, git_dir, common_dir] = output.lines().collect::<Vec<_>>()[..] else {
+            return Err("unexpected Git location output".to_owned());
+        };
+        let canonical = |path: &str| std::fs::canonicalize(path).map_err(|error| error.to_string());
+        Ok(WorktreeLocation {
+            top_level: canonical(top_level)?,
+            git_dir: canonical(git_dir)?,
+            common_dir: canonical(common_dir)?,
+        })
+    }
+
+    fn entries(&self, repository: &Path) -> Result<Vec<WorktreeEntry>, WorktreeFault> {
+        let output = captured(git_at(repository).args(["worktree", "list", "--porcelain", "-z"]))
+            .map_err(|error| fault(repository, "git_failed", error))?;
+        parse_worktree_entries(&output)
+            .map_err(|error| fault(repository, "invalid_metadata", error))
+    }
+
+    fn metadata_faults(&self, common_dir: &Path) -> Vec<WorktreeFault> {
+        use std::io::ErrorKind;
+        let directory = common_dir.join("worktrees");
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Vec::new(),
+            Err(error) => return vec![fault(&directory, "unreadable", error)],
+        };
+        let mut faults = Vec::new();
+        for entry in entries {
+            let path = match entry {
+                Ok(entry) => entry.path(),
+                Err(error) => {
+                    faults.push(fault(&directory, "unreadable", error));
+                    continue;
+                }
+            };
+            match std::fs::read_to_string(path.join("gitdir")) {
+                Ok(text) if text.trim().is_empty() => {
+                    faults.push(fault(&path, "invalid_metadata", "gitdir file is empty"));
+                }
+                Ok(_) => {}
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
+                {
+                    faults.push(fault(
+                        &path,
+                        "invalid_metadata",
+                        "worktree entry has no gitdir file",
+                    ));
+                }
+                Err(error) => faults.push(fault(&path, "unreadable", error)),
+            }
+        }
+        faults
+    }
+
+    fn origin_identity(&self, repository: &Path) -> Result<Option<String>, String> {
+        let remotes = captured_text(git_at(repository).arg("remote"))?;
+        if !remotes.lines().any(|remote| remote == "origin") {
+            return Ok(None);
+        }
+        let url = captured_text(git_at(repository).args(["remote", "get-url", "origin"]))?;
+        Ok(normalize_remote(&url).ok())
+    }
+
+    fn commit(&self, repository: &Path, revision: &str) -> Option<String> {
+        captured_text(git_at(repository).args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &format!("{revision}^{{commit}}"),
+        ]))
+        .ok()
+        .filter(|commit| !commit.is_empty())
+    }
+
+    fn branch_exists(&self, repository: &Path, name: &str) -> Result<bool, String> {
+        let output = git_at(repository)
+            .args(["show-ref", "--verify", "--quiet"])
+            .arg(format!("refs/heads/{name}"))
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| format!("could not start git: {error}"))?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
+        }
+    }
+
+    fn valid_branch_name(&self, name: &str) -> bool {
+        let mut command = Command::new("git");
+        crate::infrastructure::inventory::clean_git_environment(&mut command);
+        !name.starts_with('-')
+            && name != "HEAD"
+            && captured(command.args(["check-ref-format", &format!("refs/heads/{name}")])).is_ok()
+    }
+
+    fn add(
+        &self,
+        repository: &Path,
+        destination: &Path,
+        branch: &str,
+        start: Option<&str>,
+    ) -> Result<(), WorktreeCommandError> {
+        let mut command = git_at(repository);
+        command.args(["worktree", "add"]);
+        if start.is_some() {
+            command.args(["-b", branch]);
+        }
+        command
+            .arg("--")
+            .arg(destination)
+            .arg(start.unwrap_or(branch));
+        native(&mut command)
+    }
+
+    fn linked_path(&self, git_dir: &Path) -> Result<std::path::PathBuf, String> {
+        let text =
+            std::fs::read_to_string(git_dir.join("gitdir")).map_err(|error| error.to_string())?;
+        // Git writes this pointer absolute, or relative to the linked Git directory.
+        let pointer = git_dir.join(text.trim_end_matches(['\n', '\r']));
+        let worktree = pointer
+            .parent()
+            .filter(|_| pointer.file_name() == Some(OsStr::new(".git")))
+            .ok_or_else(|| "gitdir file does not name a .git file".to_owned())?;
+        std::fs::canonicalize(worktree).map_err(|error| error.to_string())
+    }
+
+    fn local_state(&self, worktree: &Path) -> Result<WorktreeState, String> {
+        let output = captured(git_at(worktree).args([
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ]))?;
+        let mut state = WorktreeState::default();
+        // Every directory below the root that holds a tracked or untracked path.
+        let mut directories = std::collections::BTreeSet::new();
+        let mut holds = |path: &[u8]| {
+            let mut directory = Path::new(OsStr::from_bytes(path)).parent();
+            while let Some(parent) = directory.filter(|parent| !parent.as_os_str().is_empty()) {
+                if !directories.insert(parent.to_path_buf()) {
+                    break;
+                }
+                directory = parent.parent();
+            }
+        };
+        let mut fields = output
+            .split(|byte| *byte == 0)
+            .filter(|field| !field.is_empty());
+        while let Some(field) = fields.next() {
+            let (Some(code), Some(path)) = (field.get(..2), field.get(3..)) else {
+                return Err("unexpected Git status output".to_owned());
+            };
+            let directory = path
+                .strip_suffix(b"/")
+                .map(|path| Path::new(OsStr::from_bytes(path)));
+            match (code, directory) {
+                // With every untracked file listed, a directory entry is an embedded repository.
+                (b"??", Some(directory)) => state
+                    .nested_repositories
+                    .push(directory.display().to_string()),
+                (b"??", None) => {
+                    holds(path);
+                    state.losses.untracked += 1;
+                }
+                (b"!!", directory) => {
+                    state.losses.ignored = true;
+                    // Only the ignored directory itself: its contents are ignored-file loss.
+                    if let Some(directory) = directory
+                        && std::fs::symlink_metadata(worktree.join(directory).join(".git")).is_ok()
+                    {
+                        state
+                            .nested_repositories
+                            .push(directory.display().to_string());
+                    }
+                }
+                _ => {
+                    state.losses.modified += 1;
+                    // A rename or copy carries its source path as a second field.
+                    if code.contains(&b'R') || code.contains(&b'C') {
+                        fields.next();
+                    }
+                }
+            }
+        }
+        // Status skips files marked skip-worktree (`S`) or assume-unchanged (lower case),
+        // edited or not; a present one counts as modified.
+        let hidden = captured(git_at(worktree).args(["ls-files", "-v", "-z"]))?;
+        for entry in hidden.split(|byte| *byte == 0) {
+            let (Some(tag), Some(path)) = (entry.first(), entry.get(2..)) else {
+                continue;
+            };
+            holds(path);
+            if (*tag == b'S' || tag.is_ascii_lowercase())
+                && std::fs::symlink_metadata(worktree.join(OsStr::from_bytes(path))).is_ok()
+            {
+                state.losses.modified += 1;
+            }
+        }
+        // Status names a repository only where the directory is untracked or ignored; one
+        // beside tracked files, or one Git does not accept, shows as a `.git` entry alone.
+        for directory in directories {
+            match std::fs::symlink_metadata(worktree.join(&directory).join(".git")) {
+                Ok(_) => {
+                    let name = directory.display().to_string();
+                    if !state.nested_repositories.contains(&name) {
+                        state.nested_repositories.push(name);
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) => {}
+                Err(error) => return Err(format!("{}: {error}", directory.display())),
+            }
+        }
+        Ok(state)
+    }
+
+    fn populated_submodules(&self, worktree: &Path) -> Result<Vec<String>, String> {
+        let output = captured(git_at(worktree).args(["ls-files", "-z", "--stage"]))?;
+        let mut populated = Vec::new();
+        for field in output.split(|byte| *byte == 0) {
+            let Some(tab) = field.iter().position(|byte| *byte == b'\t') else {
+                continue;
+            };
+            if !field.starts_with(b"160000 ") {
+                continue;
+            }
+            let path = Path::new(OsStr::from_bytes(&field[tab + 1..]));
+            match std::fs::symlink_metadata(worktree.join(path).join(".git")) {
+                Ok(_) => {
+                    let name = path.display().to_string();
+                    if !populated.contains(&name) {
+                        populated.push(name);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // Git does not walk a submodule path, so its status names nothing in here.
+                    // A symlink there is not a directory to read.
+                    let directory = worktree.join(path);
+                    if std::fs::symlink_metadata(&directory).is_ok_and(|entry| entry.is_dir()) {
+                        match std::fs::read_dir(&directory) {
+                            Ok(mut entries) => {
+                                if entries.next().is_some() {
+                                    return Err(format!(
+                                        "{}: unpopulated submodule directory holds files Git does not report",
+                                        path.display()
+                                    ));
+                                }
+                            }
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::NotFound
+                                        | std::io::ErrorKind::NotADirectory
+                                ) => {}
+                            Err(error) => return Err(format!("{}: {error}", path.display())),
+                        }
+                    }
+                }
+                Err(error) => return Err(format!("{}: {error}", path.display())),
+            }
+        }
+        Ok(populated)
+    }
+
+    fn protecting_ref(&self, repository: &Path, commit: &str) -> Result<Option<String>, String> {
+        // Replacement refs rewrite ancestry, so the proof reads the real objects.
+        // A grafts file rewrites ancestry the same way; the proof reads none.
+        let protecting =
+            captured_text(git_at(repository).env("GIT_GRAFT_FILE", "/dev/null").args([
+                "--no-replace-objects",
+                "for-each-ref",
+                "--count=1",
+                "--format=%(refname)",
+                "--contains",
+                commit,
+                "refs/heads/",
+                "refs/tags/",
+                "refs/remotes/",
+            ]))?;
+        Ok((!protecting.is_empty()).then_some(protecting))
+    }
+
+    fn unpushed(&self, repository: &Path, branch: &str) -> Option<usize> {
+        let remote = captured_text(git_at(repository).args([
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname)",
+            "refs/remotes/",
+        ]))
+        .ok()?;
+        if remote.is_empty() {
+            return None;
+        }
+        captured_text(git_at(repository).args([
+            "rev-list",
+            "--count",
+            branch,
+            "--not",
+            "--remotes",
+        ]))
+        .ok()?
+        .parse()
+        .ok()
+    }
+
+    fn remove(
+        &self,
+        repository: &Path,
+        worktree: &Path,
+        force: bool,
+    ) -> Result<(), WorktreeCommandError> {
+        let mut command = git_at(repository);
+        command.args(["worktree", "remove"]);
+        if force {
+            command.arg("--force");
+        }
+        native(command.arg("--").arg(worktree))
     }
 }
 

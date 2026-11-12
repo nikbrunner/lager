@@ -62,6 +62,9 @@ pub fn run(
         Command::Hook(command) => hook(&config_path, command, selector),
         Command::Status(command) => super::inventory::status::run(&config_path, command),
         Command::Inventory(command) => inventory(&config_path, command),
+        Command::Worktree(command) => {
+            super::worktree::run(&config_path, command, interaction, interactive)
+        }
     }
 }
 

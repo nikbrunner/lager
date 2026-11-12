@@ -320,3 +320,13 @@ pub fn resolve_portable_path(value: &str, home: &Path) -> Result<PathBuf, Config
     }
     Ok(home.join(path))
 }
+
+/// Resolves the optional top-level `worktree_root`, which follows the rules of `root`.
+pub fn resolve_worktree_root(value: &str, home: &Path) -> Result<PathBuf, ConfigError> {
+    resolve_portable_path(value, home).map_err(|_| {
+        ConfigError::Semantic(
+            "worktree_root must be `~`, `~/relative` or a relative path under HOME without `..`"
+                .to_owned(),
+        )
+    })
+}

@@ -45,6 +45,86 @@ pub enum Command {
     Status(StatusArgs),
     #[command(name = "tui", about = "Open the repository inventory")]
     Inventory(InventoryArgs),
+    #[command(
+        subcommand,
+        about = "List, create and remove worktrees of one repository"
+    )]
+    Worktree(WorktreeCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorktreeCommand {
+    #[command(about = "List the primary checkout and every linked worktree")]
+    List(WorktreeListArgs),
+    #[command(
+        about = "Create a linked worktree through git worktree add",
+        after_help = "Examples:\n  lager worktree add org/project hotfix\n  lager worktree add . review --branch feature/login\n  lager worktree add . spike --new-branch dev/spike --start v2.3.0 --path ../spike"
+    )]
+    Add(WorktreeAddArgs),
+    #[command(
+        about = "Remove one linked worktree through git worktree remove; its branch stays",
+        after_help = "--force accepts the listed modified, untracked and ignored files only; ownership, lock, primary-checkout, detached-commit and submodule checks remain active."
+    )]
+    Remove(WorktreeRemoveArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct WorktreeListArgs {
+    #[arg(
+        value_name = "REPOSITORY",
+        help = "Checkout path (absolute, or starting with . or ..) or repository reference; omit for the current repository"
+    )]
+    pub repository: Option<String>,
+    #[arg(long, help = "Render one stable JSON document")]
+    pub json: bool,
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct WorktreeAddArgs {
+    #[arg(
+        value_name = "REPOSITORY",
+        help = "Checkout path (absolute, or starting with . or ..) or repository reference"
+    )]
+    pub repository: String,
+    #[arg(
+        value_name = "NAME",
+        help = "Directory name, and the new branch name unless a branch option is given"
+    )]
+    pub name: String,
+    #[arg(
+        long,
+        value_name = "EXISTING",
+        conflicts_with = "new_branch",
+        help = "Check out an existing local branch"
+    )]
+    pub branch: Option<String>,
+    #[arg(long = "new-branch", value_name = "NEW", help = "Name the new branch")]
+    pub new_branch: Option<String>,
+    #[arg(
+        long,
+        value_name = "REF",
+        help = "Local commit the new branch starts at; defaults to the primary checkout's HEAD"
+    )]
+    pub start: Option<String>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Destination, absolute or relative to the working directory"
+    )]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct WorktreeRemoveArgs {
+    #[arg(value_name = "PATH", help = "Exact path of the linked worktree")]
+    pub path: PathBuf,
+    #[arg(long, help = "Confirm removal without an interactive prompt")]
+    pub yes: bool,
+    #[arg(
+        long,
+        help = "Accept the listed local file losses; safety checks still apply"
+    )]
+    pub force: bool,
 }
 
 #[derive(Debug, ClapArgs)]

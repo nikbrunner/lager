@@ -85,3 +85,28 @@ impl RemovalFilesystem for Filesystem {
         Ok(checkouts)
     }
 }
+
+impl crate::application::ports::WorktreeFilesystem for Filesystem {
+    fn kind(&self, path: &Path) -> Result<crate::application::ports::PathKind, String> {
+        use crate::application::ports::PathKind;
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => Ok(PathKind::Symlink),
+            Ok(metadata) if metadata.is_dir() => Ok(PathKind::Directory),
+            Ok(_) => Ok(PathKind::Other),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(PathKind::Missing),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn canonicalize(&self, path: &Path) -> Result<PathBuf, String> {
+        std::fs::canonicalize(path).map_err(|error| error.to_string())
+    }
+
+    fn create_dir_all(&self, path: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(path).map_err(|error| error.to_string())
+    }
+
+    fn identity(&self, path: &Path) -> Result<String, String> {
+        RemovalFilesystem::directory_identity(self, path).map_err(|error| error.to_string())
+    }
+}

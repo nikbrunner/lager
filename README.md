@@ -101,6 +101,7 @@ See the [configuration reference](docs/reference/config.md) for every field, def
 | `ensure` | Creates missing declared checkouts. | `--include-archived` |
 | `hook` | Runs a declared repository's post-clone hook again. | — |
 | `status`, `list`, `ls` | Prints the rows `tui` shows: declarations, checkouts and their state. | `--remote`, `--include-archived`, `--registered`, `--json` |
+| `worktree list`, `add`, `remove` | Lists, creates and removes linked worktrees of one repository through native Git. | `--json`, `--branch`, `--new-branch`, `--start`, `--path`, `--yes`, `--force` |
 | `tui` | Opens an offline overview in a terminal that registers, unregisters, clones and removes repositories. | `r` removes a checkout after confirmation; `m` opens the actions; `R` refreshes; `q` or Esc quits. |
 
 `list` and `ls` are identical aliases of `status`, which is offline by default and needs no terminal. Use `status --json` for stable machine-readable output. The [CLI reference](docs/reference/cli.md) documents every option, default, and interactive behavior.
@@ -117,7 +118,7 @@ worktree guards.
 - [CLI reference](docs/reference/cli.md) · [configuration reference](docs/reference/config.md)
 - [Provider setup](docs/how-to/providers.md) · [automation](docs/how-to/automation.md)
 - [Safe removal](docs/how-to/remove-safely.md) · [wildcards](docs/how-to/wildcards.md)
-- [status JSON](docs/reference/status-json.md) · [exit codes](docs/reference/exit-codes.md)
+- [status JSON](docs/reference/status-json.md) · [worktree JSON](docs/reference/worktree-json.md) · [exit codes](docs/reference/exit-codes.md)
 - [Declarations and local state](docs/explanation/declarations-and-local-state.md)
 
 ## Development

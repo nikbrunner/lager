@@ -25,6 +25,15 @@ exits `130` without returning to the inventory, and completed targets keep their
 checkouts and registrations. SIGTERM during that time takes effect when the
 child returns; the session then exits `143`.
 
+For `worktree`, `1` covers a repository that cannot be found, a refused
+destination or branch, a blocked removal, local losses without `--force`, a
+worktree that changed after its summary was shown, a failed Git command and any
+entry in the `errors` of `worktree list --json`. `2` covers invalid `NAME` or
+branch names, `--start` without a new branch, `worktree list` outside a
+repository without a target, `worktree_root` placement of a primary checkout
+outside `root` without `--path`, and `worktree remove` without `--yes` outside a
+terminal. Declining the removal question exits `0`; Ctrl-C at it exits `130`.
+
 Native Git and hooks inherit stdin, stdout, and stderr. Ordinary child failures
 return aggregate status `1` and allow independent later targets to run.
 An observed child cancellation stops the batch: later targets do not run, and a cancelled clone is
