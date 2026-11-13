@@ -1,10 +1,12 @@
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::AtomicBool;
 
 use serde::Deserialize;
 
 use crate::domain::config::ProviderConfig;
 use crate::domain::repository::{RepositoryRef, RepositorySummary};
+use crate::infrastructure::inventory::{ProbeError, command_output};
 
 const PAGE_QUERY: &str = "query($endCursor:String){viewer{repositories(first:100,after:$endCursor){nodes{name isArchived isPrivate sshUrl owner{login}} pageInfo{hasNextPage endCursor}}}}";
 
@@ -82,7 +84,16 @@ impl Github {
     }
 
     pub fn catalog(&self, include_archived: bool) -> Result<Vec<RepositorySummary>, String> {
-        let pages: Vec<Page<ViewerData>> = self.query(PAGE_QUERY)?;
+        self.catalog_cancellable(include_archived, &AtomicBool::new(false))
+    }
+
+    /// `catalog`, ended early once `cancelled` is set.
+    pub fn catalog_cancellable(
+        &self,
+        include_archived: bool,
+        cancelled: &AtomicBool,
+    ) -> Result<Vec<RepositorySummary>, String> {
+        let pages: Vec<Page<ViewerData>> = self.query(PAGE_QUERY, cancelled)?;
         let mut result = Vec::new();
         for page in pages {
             let Some(data) = page.data else { continue };
@@ -106,6 +117,16 @@ impl Github {
         reference: &RepositoryRef,
         include_archived: bool,
     ) -> Result<Vec<RepositorySummary>, String> {
+        self.expand_cancellable(reference, include_archived, &AtomicBool::new(false))
+    }
+
+    /// `expand`, ended early once `cancelled` is set.
+    pub fn expand_cancellable(
+        &self,
+        reference: &RepositoryRef,
+        include_archived: bool,
+        cancelled: &AtomicBool,
+    ) -> Result<Vec<RepositorySummary>, String> {
         let organization = reference
             .path
             .split('/')
@@ -115,7 +136,7 @@ impl Github {
         let query = format!(
             "query($endCursor:String){{organization(login:{organization:?}){{repositories(first:100,after:$endCursor){{nodes{{name isArchived isPrivate sshUrl owner{{login}}}} pageInfo{{hasNextPage endCursor}}}}}}}}"
         );
-        let pages: Vec<Page<OrganizationData>> = self.query(&query)?;
+        let pages: Vec<Page<OrganizationData>> = self.query(&query, cancelled)?;
         let mut result = Vec::new();
         for page in pages {
             let Some(data) = page.data else { continue };
@@ -137,7 +158,12 @@ impl Github {
         Ok(result)
     }
 
-    fn query<T: for<'de> Deserialize<'de>>(&self, query: &str) -> Result<Vec<T>, String> {
+    /// Runs `gh` in its own process group; `cancelled` ends it and every descendant.
+    fn query<T: for<'de> Deserialize<'de>>(
+        &self,
+        query: &str,
+        cancelled: &AtomicBool,
+    ) -> Result<Vec<T>, String> {
         let mut command = Command::new(&self.gh_executable);
         command.args(["api"]);
         if self.host != "github.com" {
@@ -145,20 +171,17 @@ impl Github {
         }
         command.args(["graphql", "--paginate", "--slurp", "-f"]);
         command.arg(format!("query={query}"));
-        let output = command.output().map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
+        command.stdin(Stdio::null());
+        let output = command_output(command, cancelled).map_err(|error| match error {
+            ProbeError::Spawn(std::io::ErrorKind::NotFound, _) => {
                 "GitHub provider requires `gh`; install GitHub CLI and run `gh auth login`"
                     .to_owned()
-            } else {
-                format!("could not start gh: {error}")
             }
+            ProbeError::Spawn(_, error) => format!("could not start gh: {error}"),
+            ProbeError::Exit { stderr, .. } => stderr,
+            other => other.to_string(),
         })?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr)
-                .trim_end()
-                .to_owned());
-        }
-        serde_json::from_slice(&output.stdout)
+        serde_json::from_str(&output)
             .map_err(|error| format!("could not parse gh response: {error}"))
     }
 }

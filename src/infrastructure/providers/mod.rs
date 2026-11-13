@@ -3,8 +3,9 @@ pub mod bitbucket_data_center;
 pub mod github;
 
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicBool;
 
-use crate::application::ports::{ProviderCatalog, ProviderFailure};
+use crate::application::ports::{ProviderAnswer, ProviderCatalog, ProviderFailure, ProviderSource};
 use crate::domain::config::Config;
 use crate::domain::repository::{RepositoryRef, RepositorySummary};
 use bitbucket_cloud::BitbucketCloud;
@@ -81,7 +82,7 @@ impl ProviderCatalog for ConfiguredProviders {
         let mut repositories = Vec::new();
         let mut failures = Vec::new();
         for (host, adapter) in &self.adapters {
-            match call_catalog(adapter, include_archived) {
+            match call_catalog(adapter, include_archived, None) {
                 Ok(items) => {
                     repositories.extend(items.into_iter().map(|item| apply_prefix(item, adapter)))
                 }
@@ -100,15 +101,67 @@ impl ProviderCatalog for ConfiguredProviders {
         include_archived: bool,
     ) -> Result<Vec<RepositorySummary>, String> {
         let adapter = self.adapter(&reference.host)?;
-        let items = match adapter {
-            Adapter::Github(provider) => provider.expand(reference, include_archived),
-            Adapter::BitbucketCloud(provider) => provider.expand(reference, include_archived),
-            Adapter::BitbucketDataCenter(provider) => provider.expand(reference, include_archived),
-        }?;
+        let items = call_expand(adapter, reference, include_archived, None)?;
         Ok(items
             .into_iter()
             .map(|item| apply_prefix(item, adapter))
             .collect())
+    }
+}
+
+impl ProviderSource for ConfiguredProviders {
+    fn hosts(&self) -> Vec<String> {
+        self.adapters.keys().cloned().collect()
+    }
+
+    fn fetch(
+        &self,
+        host: &str,
+        wildcards: &[RepositoryRef],
+        include_archived: bool,
+        cancelled: &AtomicBool,
+    ) -> ProviderAnswer {
+        let adapter = match self.adapter(host) {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                return ProviderAnswer {
+                    members: Vec::new(),
+                    error: Some(error),
+                };
+            }
+        };
+        let mut members = Vec::new();
+        let mut errors = Vec::new();
+        // A cancelled request starts no further call; its answer is dropped anyway.
+        let cancelled_now = || cancelled.load(std::sync::atomic::Ordering::Relaxed);
+        if cancelled_now() {
+            return ProviderAnswer {
+                members,
+                error: Some("cancelled".to_owned()),
+            };
+        }
+        match call_catalog(adapter, include_archived, Some(cancelled)) {
+            Ok(items) => members.extend(items),
+            Err(error) => errors.push(error),
+        }
+        // A catalog lists what the account sees by itself; a wildcard can name more.
+        for wildcard in wildcards {
+            if cancelled_now() {
+                errors.push("cancelled".to_owned());
+                break;
+            }
+            match call_expand(adapter, wildcard, include_archived, Some(cancelled)) {
+                Ok(items) => members.extend(items),
+                Err(error) => errors.push(format!("{}/*: {error}", wildcard.identity())),
+            }
+        }
+        ProviderAnswer {
+            members: members
+                .into_iter()
+                .map(|item| apply_prefix(item, adapter))
+                .collect(),
+            error: (!errors.is_empty()).then(|| errors.join("; ")),
+        }
     }
 }
 
@@ -137,14 +190,35 @@ fn apply_prefix(mut summary: RepositorySummary, adapter: &Adapter) -> Repository
     summary
 }
 
+/// Only the GitHub adapter runs a child process, the one request `cancelled` can end early.
 fn call_catalog(
     adapter: &Adapter,
     include_archived: bool,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<Vec<RepositorySummary>, String> {
-    match adapter {
-        Adapter::Github(provider) => provider.catalog(include_archived),
-        Adapter::BitbucketCloud(provider) => provider.catalog(include_archived),
-        Adapter::BitbucketDataCenter(provider) => provider.catalog(include_archived),
+    match (adapter, cancelled) {
+        (Adapter::Github(provider), Some(cancelled)) => {
+            provider.catalog_cancellable(include_archived, cancelled)
+        }
+        (Adapter::Github(provider), None) => provider.catalog(include_archived),
+        (Adapter::BitbucketCloud(provider), _) => provider.catalog(include_archived),
+        (Adapter::BitbucketDataCenter(provider), _) => provider.catalog(include_archived),
+    }
+}
+
+fn call_expand(
+    adapter: &Adapter,
+    reference: &RepositoryRef,
+    include_archived: bool,
+    cancelled: Option<&AtomicBool>,
+) -> Result<Vec<RepositorySummary>, String> {
+    match (adapter, cancelled) {
+        (Adapter::Github(provider), Some(cancelled)) => {
+            provider.expand_cancellable(reference, include_archived, cancelled)
+        }
+        (Adapter::Github(provider), None) => provider.expand(reference, include_archived),
+        (Adapter::BitbucketCloud(provider), _) => provider.expand(reference, include_archived),
+        (Adapter::BitbucketDataCenter(provider), _) => provider.expand(reference, include_archived),
     }
 }
 

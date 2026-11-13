@@ -23,8 +23,8 @@ Lager selects the configuration path in this order:
 | `remove` | `remove [REPOSITORY]... [--unregister\|--keep-registered] [--yes] [--force]` | Permanently deletes validated local checkouts. `--force` accepts local-state warnings only. |
 | `ensure` | `ensure [--include-archived]` | Creates missing effective declarations sequentially. |
 | `hook` | `hook [REPOSITORY]...` | Runs hooks for explicit declarations. Without repositories, it selects explicit declarations. |
-| `status`, `list`, `ls` | `status [--remote] [--include-archived] [--registered] [--json]` | Prints the rows `tui` shows, once its scan has finished: a table, or one JSON document with `--json`. `--remote` expands wildcards through providers; `--registered` keeps declared repositories and wildcard patterns. |
-| `tui` | `tui` | Opens the offline overview with registration actions; requires TTY stdin and stdout. |
+| `status`, `list`, `ls` | `status [--remote] [--include-archived] [--registered] [--json]` | Prints the rows `tui` shows, once its scan has finished: a table, or one JSON document with `--json`. `--remote` expands wildcards through providers; `tui` with remote discovery on shows those rows and adds the providers' unregistered and excluded repositories as candidates. `--registered` keeps declared repositories and wildcard patterns. |
+| `tui` | `tui [--remote] [--include-archived]` | Opens the inventory with its repository actions; requires TTY stdin and stdout. `--remote` starts with remote discovery on. |
 | `worktree list` | `worktree list [REPOSITORY] [--json]` | Lists the primary checkout and every linked worktree of one repository. |
 | `worktree add` | `worktree add <REPOSITORY> <NAME> [--branch EXISTING \| --new-branch NEW] [--start REF] [--path PATH]` | Creates a linked worktree through `git worktree add`. |
 | `worktree remove` | `worktree remove <PATH> [--yes] [--force]` | Removes one linked worktree through `git worktree remove` and keeps its branch. |
@@ -109,8 +109,7 @@ removed with a vanished entry. Wildcard pattern rows cannot be marked.
 The menu groups actions for this row (Repository actions…, Inspect, Copy value…,
 Open origin, Worktrees…), the selection (mark this row, mark visible concrete
 rows, clear all marks) and the session (Add, Remote discovery…, Refresh, Session
-problems…, batch cancellation, Help and Quit). Entries for actions this build
-does not provide report that they are unavailable.
+problems…, batch cancellation, Help and Quit).
 `w` or Worktrees… opens the worktrees of the current row's checkout; marks are
 not used. The popup lists the primary checkout and every linked worktree Git
 knows, wherever it sits, with its path, branch and state: `primary`, `locked`
@@ -300,17 +299,64 @@ In Menu, Inspect, Help, the batch preview, the removal confirmation and the Add 
 the current popup (the Add preview returns to its reference);
 Ctrl-Q quits the app. Normal-mode q and Esc quit.
 Configure shortcuts through [inventory key maps](config.md#inventory-key-maps).
-Register, Unregister, Clone only, Clone + register, Remove + unregister, Copy value
-and Open origin have no default key; a configured key runs the same entry as the
+Register, Unregister, Clone only, Clone + register, Remove + unregister, Copy value,
+Open origin and the three remote actions have no default key; a configured key runs the same entry as the
 menu. Hints and Help show the effective keys, and Help names the actions without
 one. A refresh with an invalid key map keeps the previous bindings and records a
 session problem.
 
 Register, Unregister, Clone only and Clone + register, from the menu or from Add,
-and Remove only and Remove + unregister are the repository mutations; remote
-discovery is unavailable. `--remote`, including with `--include-archived`, exits
-`2` before raw mode. `--include-archived` without `--remote` is also invalid.
+and Remove only and Remove + unregister are the repository mutations.
+`--include-archived` without `--remote` exits `2` before raw mode.
 Non-TTY use exits `2`; fatal startup/configuration errors exit `1`.
+
+#### Remote discovery
+
+Remote discovery adds what the configured providers list to the table. It reads
+from providers and changes nothing: no registration, no clone, no hook.
+`tui --remote` starts with it on, and "Remote discovery…" in the menu turns it
+on and off. Opening Add turns it on when a provider is configured: the providers
+load while the reference is typed, and "Browse remote candidates" closes the
+form to show them. It stays on until it is disabled; cancelling Add leaves it
+on.
+
+Each provider is asked for its whole catalog and for the members of the wildcard
+declarations on its host. The rows are merged as `status --remote` merges them:
+one row per identity, every local checkout of an identity kept, exclusions and
+explicit declarations first, archived repositories only with the archive
+preference. Once every provider answered, each row of `status --remote` is on
+the screen with the same cells. The screen adds the catalog's other repositories
+as candidates: `unregistered`, or `excluded` where a wildcard excludes them, with
+the checkout `remote only` while nothing is at their destination. A candidate
+that shares its short name with another row lengthens both names, as any two
+rows do.
+
+Providers load in the background, one request each. Local rows, navigation,
+search and marks work meanwhile, and the rows of a provider appear when it
+answered. The source line under the header names every provider with its state:
+`loading… N s`, `ready, N candidates`, `failed`, or `refreshing, N cached
+(stale)` while rows of an earlier answer are still shown. A failed provider
+leaves the other providers' rows in place. Its error is the status line's state
+and a session problem, so the session exits `1`. When only the catalog or one
+wildcard of a provider fails, the provider reads `failed` and keeps the rows the
+rest of its answer returned. A request without an answer after 30 seconds is
+ended and fails, also while Git or a hook holds the terminal; the failure shows
+once the inventory is back. Quitting waits at most 2 seconds for running
+requests to end. Neither bound applies to Git or hooks that run on the terminal.
+
+The Remote discovery menu lists the providers and these entries:
+
+| Entry | Effect |
+| --- | --- |
+| Enable remote | Fetches every configured provider. |
+| Retry failed providers | Fetches the failed providers again and no other. |
+| Refresh all enabled providers | Fetches every provider again; the cached rows stay until the answers arrive. |
+| Include archived | Switches the archive preference. While remote discovery is on, the running requests are dropped and every provider is fetched again. |
+| Disable remote | Drops the running requests, hides the rows the providers added and removes their marks, naming them in the status line. The answers of this session and the archive preference stay for the next enable. |
+
+An answer to a request that was dropped by disabling, a refresh or the archive
+preference is ignored. `R` reloads the configuration and rescans the disk; it
+merges the cached answers into the new rows and asks no provider.
 
 On Unix, Ctrl-C or SIGINT interrupts binary inventory with exit `130`; SIGTERM
 exits `143`. Inventory cancels its workers and restores the terminal before
@@ -426,7 +472,7 @@ Outside a terminal, Lager never prompts:
 - `tui` requires TTY stdin and stdout; use `status --json` for automation.
 - `worktree remove` requires `--yes`, and `--force` as well when the worktree has local losses.
 
-`--post-clone` conflicts with `--no-register`. `status --include-archived` requires `--remote`. Explicit repository arguments bypass the picker.
+`--post-clone` conflicts with `--no-register`. `status --include-archived` and `tui --include-archived` require `--remote`. Explicit repository arguments bypass the picker.
 
 ## Output and exit status
 

@@ -503,9 +503,11 @@ fn branch_output(path: &Path, cancel: &AtomicBool) -> Result<String, ProbeError>
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-enum ProbeError {
+pub(crate) enum ProbeError {
     #[error("cancelled")]
     Cancelled,
+    #[error("{1}")]
+    Spawn(std::io::ErrorKind, String),
     #[error("{0}")]
     Failed(String),
     #[error("git command failed (exit {code:?}): {stderr}")]
@@ -557,7 +559,10 @@ pub(crate) fn clean_git_environment(command: &mut Command) {
     command.env("GIT_OPTIONAL_LOCKS", "0");
 }
 
-fn command_output(mut command: Command, cancel: &AtomicBool) -> Result<String, ProbeError> {
+pub(crate) fn command_output(
+    mut command: Command,
+    cancel: &AtomicBool,
+) -> Result<String, ProbeError> {
     if cancel.load(Ordering::Relaxed) {
         return Err(ProbeError::Cancelled);
     }
@@ -566,7 +571,9 @@ fn command_output(mut command: Command, cancel: &AtomicBool) -> Result<String, P
     // the capture pipes, so killing only the immediate child would make reader joins unbounded.
     #[cfg(unix)]
     command.process_group(0);
-    let mut child = command.spawn()?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| ProbeError::Spawn(error.kind(), error.to_string()))?;
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
     let read = |mut pipe: std::process::ChildStdout| {

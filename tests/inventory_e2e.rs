@@ -1279,7 +1279,7 @@ fn inventory_discovery_failure_sets_exit_status_even_after_successful_refresh() 
 
 #[cfg(unix)]
 #[test]
-fn inventory_advertises_only_offline_capabilities_and_rejects_remote_before_raw_mode() {
+fn inventory_starts_offline_and_rejects_archives_without_remote_before_raw_mode() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
@@ -1288,7 +1288,13 @@ fn inventory_advertises_only_offline_capabilities_and_rejects_remote_before_raw_
     {
         let name = "tui";
         let help = output(support::lager(&home, &config).args([name, "--help"]));
-        assert!(String::from_utf8_lossy(&help.stdout).contains("Remote discovery is unavailable"));
+        let help = String::from_utf8_lossy(&help.stdout).into_owned();
+        for line in [
+            "Start with remote discovery on and fetch the configured providers",
+            "Include archived repositories; requires --remote",
+        ] {
+            assert!(help.contains(line), "{help}");
+        }
         support::clear_outbound_requests();
         let transcript = run_inventory_pty_with_size(
             support::lager(&home, &config).arg(name),
@@ -1308,22 +1314,22 @@ fn inventory_advertises_only_offline_capabilities_and_rejects_remote_before_raw_
             assert!(!plain.contains(unavailable), "{plain}");
         }
         assert!(support::outbound_requests().is_empty());
-        for flags in [vec!["--remote"], vec!["--remote", "--include-archived"]] {
-            let transcript = run_inventory_pty_with_exit(
-                support::lager(&home, &config).arg(name).args(flags),
-                &[],
-                24,
-                132,
-                2,
-                |_| {},
-            );
-            assert!(
-                transcript.contains("remote discovery is unavailable"),
-                "{transcript}"
-            );
-            assert!(!transcript.contains("\u{1b}[?1049h"));
-            assert!(support::outbound_requests().is_empty());
-        }
+        let transcript = run_inventory_pty_with_exit(
+            support::lager(&home, &config)
+                .arg(name)
+                .arg("--include-archived"),
+            &[],
+            24,
+            132,
+            2,
+            |_| {},
+        );
+        assert!(
+            transcript.contains("--include-archived requires --remote"),
+            "{transcript}"
+        );
+        assert!(!transcript.contains("\u{1b}[?1049h"));
+        assert!(support::outbound_requests().is_empty());
     }
 }
 
@@ -4234,7 +4240,12 @@ fn inventory_open_origin_opens_only_a_derived_https_address() {
     desktop_stubs(
         &tools,
         &["open", "xdg-open"],
-        &format!("printf '%s\\n' \"$@\" > {}", shell_word(&opened)),
+        // The file appears with its content: written beside it, then moved into place.
+        &format!(
+            "printf '%s\\n' \"$@\" > {tmp} && /bin/mv {tmp} {}",
+            shell_word(&opened),
+            tmp = shell_word(&opened.with_extension("tmp"))
+        ),
     );
 
     run_inventory_pty_with_exit(
@@ -4453,18 +4464,18 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
                 vec!["Add cancelled · nothing changed", "absent: Add /"],
                 root_entry(7),
             ),
-            (
-                vec!["Remote discovery is unavailable in this build"],
-                root_entry(8),
-            ),
+            // Without a configured provider the submenu opens and explains itself.
             (
                 vec![
-                    "NORMAL",
-                    "absent: All actions",
-                    "absent: Remote discovery is unavailable",
+                    "Remote discovery",
+                    "Enable remote",
+                    "no providers configured",
+                    "[ ] Include archived",
                 ],
-                root_entry(9),
+                b"qq".to_vec(),
             ),
+            (vec!["NORMAL", "absent: All actions"], root_entry(8)),
+            (vec!["NORMAL", "absent: All actions"], root_entry(9)),
             (vec!["All actions", "pair: problems… none"], b"j\r".to_vec()),
             (vec!["All actions", "pair: batch no"], b"j\r".to_vec()),
             (
@@ -4785,7 +4796,7 @@ fn inventory_direct_bindings_run_their_menu_actions_on_the_current_row() {
 
 #[cfg(unix)]
 #[test]
-fn inventory_direct_bindings_cover_marks_copy_open_and_unbuilt_remote_actions() {
+fn inventory_direct_bindings_cover_marks_copy_open_and_remote_actions() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let root = home.join("repos");
@@ -4804,10 +4815,13 @@ fn inventory_direct_bindings_cover_marks_copy_open_and_unbuilt_remote_actions() 
     desktop_stubs(
         &tools,
         &["open", "xdg-open"],
-        &format!("printf '%s\\n' \"$@\" > {}", shell_word(&opened)),
+        // The file appears with its content: written beside it, then moved into place.
+        &format!(
+            "printf '%s\\n' \"$@\" > {tmp} && /bin/mv {tmp} {}",
+            shell_word(&opened),
+            tmp = shell_word(&opened.with_extension("tmp"))
+        ),
     );
-    let unavailable = "Remote discovery is unavailable in this build";
-    let cleared = vec!["NORMAL", "absent: Remote discovery is", "absent: problem"];
 
     run_inventory_pty_actions_with_hook(
         support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
@@ -4823,11 +4837,29 @@ fn inventory_direct_bindings_cover_marks_copy_open_and_unbuilt_remote_actions() 
                 vec!["NORMAL", "absent: Copy value /", "absent: All actions"],
                 b"e".to_vec(),
             ),
-            (vec![unavailable, "absent: problem"], b"j".to_vec()),
-            (cleared.clone(), b"t".to_vec()),
-            (vec![unavailable, "absent: problem"], b"j".to_vec()),
-            (cleared.clone(), b"v".to_vec()),
-            (vec![unavailable, "absent: problem"], b" ".to_vec()),
+            // Remote opens its submenu alone; retry and archives run their entries.
+            (
+                vec!["Remote discovery", "Enable remote", "absent: All actions"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "absent: Enable remote", "absent: All actions"],
+                b"t".to_vec(),
+            ),
+            (
+                vec![
+                    "Retry failed providers unavailable: remote is off",
+                    "absent: problem",
+                ],
+                b"v".to_vec(),
+            ),
+            (
+                vec![
+                    "Archived repositories included · applies when remote is on",
+                    "absent: problem",
+                ],
+                b" ".to_vec(),
+            ),
             // With a mark the direct key previews, and Cancel is the default.
             (vec!["1 marked"], b"g".to_vec()),
             (
@@ -5672,7 +5704,7 @@ fn inventory_add_rejects_wildcards_and_credentials_without_showing_them() {
                     "INPUT · 1 row",
                     "Add / URL or reference",
                     "Repository reference",
-                    "Enter preview · Esc back",
+                    "Enter preview · Tab focus · Esc back",
                     "absent: marked row",
                 ],
                 b"acme/*\r".to_vec(),
@@ -8518,9 +8550,16 @@ fn inventory_keys_typed_before_the_add_preview_is_drawn_never_choose_in_it() {
     let original = "root = \"repos\"\n[providers.\"github.com\"]\npreset = \"github\"\n";
     fs::write(&config, original).unwrap();
     fs::create_dir_all(&root).unwrap();
+    // Opening Add asks the provider: a stub answers with an empty catalog.
+    let tools = temp.path().join("tools");
+    desktop_stubs(
+        &tools,
+        &["gh"],
+        r#"echo '[{"data":{"viewer":{"repositories":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]'"#,
+    );
 
     run_inventory_pty_actions(
-        support::lager(&home, &config).arg("tui"),
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             // The second Enter would choose the focused Clone + register.
             (
@@ -10381,4 +10420,1180 @@ fn inventory_worktree_popup_starts_on_the_primary_and_scrolls_every_blocker_into
         80,
     );
     assert!(first.join("vendor/lib/README").exists());
+}
+
+/// A Bitbucket Cloud stub with one workspace: `team/tool` and the archived `team/attic`. It
+/// numbers its requests and answers those at or past `open_from`; the others wait.
+#[cfg(unix)]
+struct BitbucketStub {
+    base: String,
+    open_from: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    answered: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(unix)]
+impl BitbucketStub {
+    fn start() -> Self {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        use std::sync::{Arc, Mutex};
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let stub = Self {
+            base: format!("http://{}", listener.local_addr().unwrap()),
+            open_from: Arc::new(AtomicUsize::new(0)),
+            fail: Arc::new(AtomicBool::new(false)),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            answered: Arc::new(AtomicUsize::new(0)),
+        };
+        let (open_from, fail, requests, answered) = (
+            Arc::clone(&stub.open_from),
+            Arc::clone(&stub.fail),
+            Arc::clone(&stub.requests),
+            Arc::clone(&stub.answered),
+        );
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let (open_from, fail, requests, answered) = (
+                    Arc::clone(&open_from),
+                    Arc::clone(&fail),
+                    Arc::clone(&requests),
+                    Arc::clone(&answered),
+                );
+                std::thread::spawn(move || {
+                    let mut bytes = Vec::new();
+                    let mut buffer = [0; 1024];
+                    while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match stream.read(&mut buffer) {
+                            Ok(count) if count > 0 => bytes.extend_from_slice(&buffer[..count]),
+                            _ => break,
+                        }
+                    }
+                    let path = String::from_utf8_lossy(&bytes)
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .to_owned();
+                    let sequence = {
+                        let mut requests = requests.lock().unwrap();
+                        requests.push(path.clone());
+                        requests.len() - 1
+                    };
+                    while sequence < open_from.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    let repository = |name: &str, archived: bool| {
+                        format!(
+                            r#"{{"is_archived":{archived},"links":{{"clone":[{{"name":"ssh","href":"ssh://git@bitbucket.org/team/{name}.git"}}]}}}}"#
+                        )
+                    };
+                    let (status, body) = match path.as_str() {
+                        _ if fail.load(Ordering::Relaxed) => {
+                            ("500 Internal Server Error", "{}".to_owned())
+                        }
+                        "/2.0/user/permissions/workspaces" => (
+                            "200 OK",
+                            r#"{"values":[{"workspace":{"slug":"team"}}],"next":null}"#.to_owned(),
+                        ),
+                        "/2.0/repositories/team" => (
+                            "200 OK",
+                            format!(
+                                r#"{{"values":[{},{}],"next":null}}"#,
+                                repository("tool", false),
+                                repository("attic", true)
+                            ),
+                        ),
+                        _ => ("404 Not Found", "{}".to_owned()),
+                    };
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                    answered.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+        });
+        stub
+    }
+
+    fn hold(&self) {
+        self.open_from.store(usize::MAX, Ordering::Relaxed);
+    }
+
+    fn open_from(&self, sequence: usize) {
+        self.open_from.store(sequence, Ordering::Relaxed);
+    }
+
+    fn requests(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+
+    fn wait_for_answers(&self, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.answered.load(Ordering::Relaxed) < count {
+            assert!(Instant::now() < deadline, "{:?}", self.requests.lock());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// Two providers and three local rows. A `gh` stub answers the viewer catalog with `me/zebra`
+/// and `org/local`, and the wildcard `github.com/org/*` with `active`, the archived `old`, the
+/// excluded `skip`, the explicitly declared `explicit` and the cloned `local`. With every
+/// provider ready the inventory shows seven rows, nine with archives.
+#[cfg(unix)]
+struct RemoteFixture {
+    _temp: tempfile::TempDir,
+    home: std::path::PathBuf,
+    root: std::path::PathBuf,
+    config: std::path::PathBuf,
+    tools: std::path::PathBuf,
+    state: std::path::PathBuf,
+    bitbucket: BitbucketStub,
+}
+
+#[cfg(unix)]
+const REMOTE_CONFIG: &str = r#"root = "repos"
+
+[providers."github.com"]
+preset = "github"
+
+[providers."bitbucket.org"]
+preset = "bitbucket-cloud"
+api_url = "{BASE}"
+
+[[repositories]]
+url = "github.com/org/explicit"
+
+[[repositories]]
+url = "github.com/org/*"
+exclude = ["skip"]
+"#;
+
+#[cfg(unix)]
+impl RemoteFixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let root = home.join("repos");
+        let config = temp.path().join("config.toml");
+        let tools = temp.path().join("tools");
+        let state = temp.path().join("state");
+        fs::create_dir_all(&tools).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        let bitbucket = BitbucketStub::start();
+        fs::write(&config, REMOTE_CONFIG.replace("{BASE}", &bitbucket.base)).unwrap();
+        init_repo(
+            &root.join("org/local"),
+            "git@github.com:org/local.git",
+            true,
+        );
+        let node = |owner: &str, name: &str, archived: bool| {
+            format!(
+                r#"{{"name":"{name}","isArchived":{archived},"sshUrl":"git@github.com:{owner}/{name}.git","owner":{{"login":"{owner}"}}}}"#
+            )
+        };
+        let page = |field: &str, nodes: &[String]| {
+            format!(
+                r#"[{{"data":{{"{field}":{{"repositories":{{"nodes":[{}],"pageInfo":{{"hasNextPage":false,"endCursor":null}}}}}}}}}}]"#,
+                nodes.join(",")
+            )
+        };
+        fs::write(
+            state.join("viewer.json"),
+            page(
+                "viewer",
+                &[node("me", "zebra", false), node("org", "local", false)],
+            ),
+        )
+        .unwrap();
+        fs::write(
+            state.join("organization.json"),
+            page(
+                "organization",
+                &[
+                    node("org", "active", false),
+                    node("org", "old", true),
+                    node("org", "skip", false),
+                    node("org", "explicit", false),
+                    node("org", "local", false),
+                ],
+            ),
+        )
+        .unwrap();
+        let directory = shell_word(&state);
+        let gh = tools.join("gh");
+        fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in *viewer*) kind=viewer ;; *) kind=organization ;; esac\n\
+                 echo \"$kind\" >> {directory}/gh.log\n\
+                 echo $$ >> {directory}/gh.pids\n\
+                 while [ -e {directory}/gh.hold ]; do /bin/sleep 0.02; done\n\
+                 if [ -e {directory}/gh.fail-$kind ]; then echo 'gh: rate limited' >&2; exit 1; fi\n\
+                 exec cat {directory}/$kind.json\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        Self {
+            _temp: temp,
+            home,
+            root,
+            config,
+            tools,
+            state,
+            bitbucket,
+        }
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = support::lager_with_path(&self.home, &self.config, Some(&self.tools));
+        command.args(args);
+        command
+    }
+
+    fn hold_gh(&self) {
+        fs::write(self.state.join("gh.hold"), "").unwrap();
+    }
+
+    fn release_gh(&self) {
+        fs::remove_file(self.state.join("gh.hold")).unwrap();
+    }
+
+    /// How often `gh` ran; one fetch of github.com runs it twice.
+    fn gh_requests(&self) -> usize {
+        fs::read_to_string(self.state.join("gh.log"))
+            .map(|log| log.lines().count())
+            .unwrap_or(0)
+    }
+}
+
+/// Opens "Remote discovery…" from the action menu.
+#[cfg(unix)]
+const REMOTE_MENU: &[u8] = b"mjjjjjjj\r";
+
+#[cfg(unix)]
+const REMOTE_READY: [&str; 3] = [
+    "NORMAL · 7 rows",
+    "bitbucket.org: ready, 1 candidate",
+    "github.com: ready, 3 candidates",
+];
+
+/// The regions every remote board draws, top to bottom: header bar, source line, search row,
+/// table, status line and hint footer.
+#[cfg(unix)]
+fn assert_remote_regions(screen: &str, header: &str, source: &str, status: &str, footer: &str) {
+    let lines = screen.lines().collect::<Vec<_>>();
+    assert!(
+        lines[0].starts_with("  LAGER / inventory") && lines[0].ends_with(header),
+        "{screen}"
+    );
+    assert_eq!(lines[1], format!("  {source}"), "{screen}");
+    assert!(lines[2].starts_with("  / "), "{screen}");
+    assert_eq!(lines[3], "", "{screen}");
+    assert!(lines[4].trim_start().starts_with("repository"), "{screen}");
+    let last = lines.iter().rposition(|line| !line.is_empty()).unwrap();
+    assert!(lines[last].contains(footer), "{screen}");
+    assert_eq!(lines[last - 1], format!("  {status}"), "{screen}");
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_remote_keeps_local_rows_usable_while_providers_load_and_keeps_rows_beside_a_failure() {
+    let fixture = RemoteFixture::new();
+    fixture.hold_gh();
+    fixture.bitbucket.hold();
+    let mut frames = Vec::new();
+    run_inventory_pty_with_exit_observing(
+        &mut fixture.command(&["tui", "--remote"]),
+        &[
+            (
+                vec![
+                    "NORMAL · 3 rows",
+                    "Local: ready",
+                    "bitbucket.org: loading…",
+                    "github.com: loading…",
+                    "Remote on · local rows stay usable while providers load",
+                ],
+                b"kk/explicit\r".to_vec(),
+            ),
+            // Search, navigation and marks work on the local rows while both providers hang.
+            (
+                vec!["NORMAL · 1 row", "github.com: loading…"],
+                b"\x7fjk ".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 3 rows", "1 marked · 0 hidden", "loading…"],
+                b"j".to_vec(),
+            ),
+            // The first provider's rows arrive while the second still loads.
+            (
+                vec![
+                    "NORMAL · 6 rows",
+                    "github.com: ready, 3 candidates",
+                    "bitbucket.org: loading…",
+                    "1 marked · 0 hidden",
+                    "remote only",
+                ],
+                b"j".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL · 6 rows · 1 problem",
+                    "bitbucket.org: failed",
+                    "! bitbucket.org failed: bitbucket request failed with status 500",
+                    "github.com: ready, 3 candidates",
+                    "1 marked · 0 hidden",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        1,
+        |action, _, frame| {
+            frames.push(screen_text(frame, 32, 132));
+            match action {
+                2 => fixture.release_gh(),
+                3 => {
+                    fixture.bitbucket.fail.store(true, Ordering::Relaxed);
+                    fixture.bitbucket.open_from(0);
+                }
+                _ => {}
+            }
+        },
+    );
+    // RemoteLoading: local rows under a source line with per-provider progress.
+    let loading = &frames[0];
+    let source = loading.lines().nth(1).unwrap();
+    assert!(
+        source.starts_with("  Local: ready · bitbucket.org: loading… ")
+            && source.contains(" s · github.com: loading… ")
+            && source.ends_with(" s"),
+        "{loading}"
+    );
+    assert_remote_regions(
+        loading,
+        "NORMAL · 3 rows",
+        source.trim_start(),
+        "Remote on · local rows stay usable while providers load · R refreshes local/config state only",
+        "q quit",
+    );
+    assert_eq!(inventory_rows(loading).len(), 3, "{loading}");
+    let partial = inventory_rows(&frames[3]);
+    assert_eq!(
+        partial
+            .iter()
+            .filter(|row| row[3] == "remote only")
+            .map(|row| (row[0].as_str(), row[2].as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("zebra", "unregistered"),
+            ("active", "wildcard"),
+            ("skip", "excluded")
+        ],
+        "{}",
+        frames[3]
+    );
+    assert_eq!(inventory_rows(&frames[4]), partial, "{}", frames[4]);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_remote_menu_retries_only_the_failed_provider() {
+    let fixture = RemoteFixture::new();
+    fixture.bitbucket.fail.store(true, Ordering::Relaxed);
+    let mut frames = Vec::new();
+    let mut before_retry = (0, 0);
+    run_inventory_pty_with_exit_observing(
+        &mut fixture.command(&["tui", "--remote"]),
+        &[
+            (
+                vec![
+                    "NORMAL · 6 rows · 1 problem",
+                    "github.com: ready, 3 candidates",
+                    "bitbucket.org: failed",
+                ],
+                [&b"kk"[..], REMOTE_MENU].concat(),
+            ),
+            (
+                vec![
+                    "MENU · 6 rows · 1 problem",
+                    "Remote discovery",
+                    "Retry failed providers",
+                    "bitbucket.org only",
+                    "Disable remote",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL · 7 rows · 1 problem",
+                    "bitbucket.org: ready, 1 candidate",
+                    "github.com: ready, 3 candidates",
+                    "absent: Remote discovery",
+                ],
+                REMOTE_MENU.to_vec(),
+            ),
+            // Nothing failed any more: retrying is unavailable and asks no provider.
+            // `q` closes a menu level; two ESC bytes in a row would read as one Alt chord.
+            (
+                vec!["Retry failed providers", "none failed"],
+                b"\rqqq".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        1,
+        |action, _, frame| {
+            frames.push(screen_text(frame, 32, 132));
+            if action == 1 {
+                fixture.bitbucket.fail.store(false, Ordering::Relaxed);
+                before_retry = (fixture.gh_requests(), fixture.bitbucket.requests());
+            }
+        },
+    );
+    assert_eq!(before_retry, (2, 1));
+    assert_eq!(fixture.gh_requests(), 2, "retry asked the ready provider");
+    assert_eq!(fixture.bitbucket.requests(), 3);
+
+    // RemoteControls: the menu over the table, the failure as the current state.
+    let controls = &frames[1];
+    assert_remote_regions(
+        controls,
+        "MENU · 6 rows · 1 problem",
+        "Local: ready · bitbucket.org: failed · github.com: ready, 3 candidates",
+        "! bitbucket.org failed: bitbucket request failed with status 500 Internal Server Error",
+        "back",
+    );
+    let position = |text: &str| {
+        controls
+            .lines()
+            .position(|line| line.contains(text))
+            .unwrap_or_else(|| panic!("{text}: {controls}"))
+    };
+    let order = [
+        position("Remote discovery"),
+        position("failed · bitbucket request failed"),
+        position("ready · 3 candidates · fetched "),
+        position("Retry failed providers"),
+        position("Refresh all enabled providers"),
+        position("[ ] Include archived"),
+        position("Disable remote"),
+        position("Discovery never registers, clones or runs hooks."),
+    ];
+    assert!(order.is_sorted(), "{order:?}: {controls}");
+    for pair in [
+        "providers cached rows stay, shown stale",
+        "archived refetches",
+        "remote hides 3 rows",
+    ] {
+        let (label, hint) = pair.split_once(' ').unwrap();
+        assert!(
+            controls
+                .lines()
+                .any(|line| line.contains(label) && line.contains(hint)),
+            "{pair}: {controls}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_remote_refresh_keeps_cached_rows_stale_while_every_provider_reloads() {
+    let fixture = RemoteFixture::new();
+    let mut rows = Vec::new();
+    run_inventory_pty_with_exit_observing(
+        &mut fixture.command(&["tui", "--remote"]),
+        &[
+            (REMOTE_READY.to_vec(), [&b"kk"[..], REMOTE_MENU].concat()),
+            (
+                vec!["Refresh all enabled providers", "cached rows stay"],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL · 7 rows",
+                    "bitbucket.org: refreshing, 1 cached (stale)",
+                    "github.com: refreshing, 3 cached (stale)",
+                ],
+                b"j".to_vec(),
+            ),
+            (REMOTE_READY.to_vec(), b"q".to_vec()),
+        ],
+        32,
+        132,
+        0,
+        |action, _, frame| {
+            rows.push(inventory_rows(&screen_text(frame, 32, 132)));
+            match action {
+                1 => {
+                    assert_eq!(
+                        (fixture.gh_requests(), fixture.bitbucket.requests()),
+                        (2, 2)
+                    );
+                    fixture.hold_gh();
+                    fixture.bitbucket.hold();
+                }
+                2 => {
+                    fixture.release_gh();
+                    fixture.bitbucket.open_from(0);
+                }
+                _ => {}
+            }
+        },
+    );
+    assert_eq!(rows[0].len(), 7);
+    // Staleness shows in the source line only: the cached rows stay as they were.
+    assert_eq!(rows[2], rows[0]);
+    assert_eq!(rows[3], rows[0]);
+    assert_eq!(
+        (fixture.gh_requests(), fixture.bitbucket.requests()),
+        (4, 4)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_remote_disable_hides_candidates_removes_their_marks_and_keeps_the_cache() {
+    let fixture = RemoteFixture::new();
+    let mut frames = Vec::new();
+    run_inventory_pty_with_exit_observing(
+        &mut fixture.command(&["tui", "--remote"]),
+        &[
+            (REMOTE_READY.to_vec(), b"kkmjjjjj\r".to_vec()),
+            (vec!["Mark visible concrete rows"], b"j\r".to_vec()),
+            (vec!["6 marked · 0 hidden"], REMOTE_MENU.to_vec()),
+            (
+                vec!["Disable remote", "hides 4 rows, removes 4 marks"],
+                b"jjj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL · 3 rows",
+                    "Remote off · 4 remote-only rows hidden · 4 marks removed: ",
+                    "2 marked · 0 hidden",
+                    "remote off · 4 candidates cached for this session",
+                    "absent: vanished",
+                    "absent: remote only",
+                ],
+                REMOTE_MENU.to_vec(),
+            ),
+            // Enabling again brings the rows back; the marks stay removed.
+            (vec!["Enable remote", "fetches 2 providers"], b"\r".to_vec()),
+            (
+                [&REMOTE_READY[..], &["2 marked · 0 hidden"][..]].concat(),
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        0,
+        |_, _, frame| frames.push(screen_text(frame, 32, 132)),
+    );
+    // RemoteOff: local and declaration rows, the cache named in the source line.
+    let off = &frames[4];
+    let status = off
+        .lines()
+        .find(|line| line.contains("Remote off · "))
+        .unwrap();
+    for name in ["tool", "zebra", "active", "skip"] {
+        assert!(status.contains(name), "{off}");
+    }
+    assert_remote_regions(
+        off,
+        "NORMAL · 3 rows",
+        "Local + declarations · remote off · 4 candidates cached for this session",
+        status.trim_start(),
+        "q quit",
+    );
+    let names = |frame: &str| {
+        inventory_rows(frame)
+            .into_iter()
+            .map(|row| row[0].clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(off), ["explicit", "local", "org/*"], "{off}");
+    assert_eq!(names(&frames[6]).len(), 7, "{}", frames[6]);
+    assert_eq!(
+        (fixture.gh_requests(), fixture.bitbucket.requests()),
+        (4, 4)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_opening_add_enables_remote_and_cancelling_add_leaves_it_on() {
+    let fixture = RemoteFixture::new();
+    let original = fs::read_to_string(&fixture.config).unwrap();
+    fixture.hold_gh();
+    fixture.bitbucket.hold();
+    let wait_for_requests = || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fixture.gh_requests() < 1 || fixture.bitbucket.requests() < 1 {
+            assert!(Instant::now() < deadline, "opening Add asked no provider");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let mut frames = Vec::new();
+    run_inventory_pty_with_exit_observing(
+        &mut fixture.command(&["tui"]),
+        &[
+            (
+                vec!["NORMAL · 3 rows", "Local + declarations · remote off"],
+                b"kka".to_vec(),
+            ),
+            // AddInput: the form is open, the providers load, typing works meanwhile.
+            (
+                vec![
+                    "INPUT · 3 rows",
+                    "Add / URL or reference",
+                    "bitbucket.org: loading…",
+                    "github.com: loading…",
+                    "Remote enabled by Add · providers loading · typed input works meanwhile",
+                ],
+                b"org/thing".to_vec(),
+            ),
+            (vec!["org/thing█", "github.com: loading…"], b"\x1b".to_vec()),
+            // Cancelling Add leaves remote discovery on.
+            (
+                vec![
+                    "NORMAL · 3 rows",
+                    "Add cancelled · nothing changed",
+                    "Local: ready",
+                    "bitbucket.org: loading…",
+                    "github.com: loading…",
+                    "absent: Add / URL",
+                ],
+                b"j".to_vec(),
+            ),
+            (REMOTE_READY.to_vec(), b"a".to_vec()),
+            // Opening Add again asks no provider; "Browse remote candidates" closes the form.
+            (
+                [
+                    &REMOTE_READY[1..],
+                    &[
+                        "Add / URL or reference",
+                        "Browse remote candidates",
+                        "closes this form",
+                        "absent: Remote enabled by Add",
+                    ][..],
+                ]
+                .concat(),
+                b"\t\r".to_vec(),
+            ),
+            (
+                [&REMOTE_READY[..], &["absent: Add / URL"][..]].concat(),
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        0,
+        |action, _, frame| {
+            frames.push(screen_text(frame, 32, 132));
+            match action {
+                0 => assert_eq!(
+                    (fixture.gh_requests(), fixture.bitbucket.requests()),
+                    (0, 0)
+                ),
+                2 => wait_for_requests(),
+                3 => {
+                    fixture.release_gh();
+                    fixture.bitbucket.open_from(0);
+                }
+                _ => {}
+            }
+        },
+    );
+    let lines = frames[1].lines().collect::<Vec<_>>();
+    assert!(
+        lines[1].starts_with("  Local: ready · bitbucket.org: loading… "),
+        "{}",
+        frames[1]
+    );
+    assert_eq!(
+        (fixture.gh_requests(), fixture.bitbucket.requests()),
+        (2, 2)
+    );
+    // Discovery only reads: nothing was registered or cloned.
+    assert_eq!(fs::read_to_string(&fixture.config).unwrap(), original);
+    assert!(!fixture.root.join("org/active").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_opening_add_from_the_menu_enables_remote_and_without_providers_asks_nothing() {
+    let fixture = RemoteFixture::new();
+    run_inventory_pty_actions(
+        &mut fixture.command(&["tui"]),
+        &[
+            (
+                vec!["NORMAL · 3 rows", "Local + declarations · remote off"],
+                b"kkmjjjjjj\r".to_vec(),
+            ),
+            (
+                [&REMOTE_READY[1..], &["Add / URL or reference"][..]].concat(),
+                b"\x1b".to_vec(),
+            ),
+            (
+                [&REMOTE_READY[..], &["Add cancelled · nothing changed"][..]].concat(),
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    assert_eq!(
+        (fixture.gh_requests(), fixture.bitbucket.requests()),
+        (2, 2)
+    );
+
+    // No provider configured: remote stays off, nothing is asked, nothing is a problem.
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    support::clear_outbound_requests();
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (vec!["NORMAL · 0 rows", "absent: Scanning"], b"a".to_vec()),
+            (
+                vec![
+                    "Add / URL or reference",
+                    "Ordinary keys type text · nothing is saved yet",
+                    "Local + declarations · remote off",
+                    "absent: problem",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Add cancelled · nothing changed", "absent: problem"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    assert!(support::outbound_requests().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_remote_archive_toggle_refetches_and_survives_disabling() {
+    let fixture = RemoteFixture::new();
+    let with_archives = [
+        "NORMAL · 9 rows",
+        "old [archived]",
+        "attic [archived]",
+        "bitbucket.org: ready, 2 candidates",
+        "github.com: ready, 4 candidates",
+    ];
+    run_inventory_pty_actions_with_hook(
+        &mut fixture.command(&["tui", "--remote"]),
+        &[
+            (
+                [&REMOTE_READY[..], &["absent: [archived]"][..]].concat(),
+                [&b"kk"[..], REMOTE_MENU].concat(),
+            ),
+            (vec!["[ ] Include archived", "refetches"], b"jj\r".to_vec()),
+            (with_archives.to_vec(), REMOTE_MENU.to_vec()),
+            (
+                vec!["[x] Include archived", "Disable remote"],
+                b"jjj\r".to_vec(),
+            ),
+            (vec!["NORMAL · 3 rows", "remote off"], REMOTE_MENU.to_vec()),
+            // The preference outlives disabling and applies to the next fetch.
+            (
+                vec!["[x] Include archived", "Enable remote"],
+                b"\r".to_vec(),
+            ),
+            (with_archives.to_vec(), b"q".to_vec()),
+        ],
+        32,
+        132,
+        |action| {
+            if action == 1 {
+                assert_eq!(
+                    (fixture.gh_requests(), fixture.bitbucket.requests()),
+                    (2, 2)
+                );
+            }
+        },
+    );
+    assert_eq!(
+        (fixture.gh_requests(), fixture.bitbucket.requests()),
+        (6, 6)
+    );
+
+    run_inventory_pty_with_size(
+        &mut fixture.command(&["tui", "--remote", "--include-archived"]),
+        &with_archives,
+        b"q",
+        32,
+        132,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_local_refresh_merges_the_cache_into_the_new_config_without_a_provider_request() {
+    let fixture = RemoteFixture::new();
+    let mut rows = Vec::new();
+    run_inventory_pty_with_exit_observing(
+        &mut fixture.command(&["tui", "--remote"]),
+        &[
+            (REMOTE_READY.to_vec(), b"kkj".to_vec()),
+            (REMOTE_READY.to_vec(), b"R".to_vec()),
+            (
+                vec![
+                    "NORMAL · 8 rows",
+                    "No active operation",
+                    "bitbucket.org: ready, 1 candidate",
+                    "github.com: ready, 3 candidates",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        0,
+        |action, _, frame| {
+            rows.push(inventory_rows(&screen_text(frame, 32, 132)));
+            if action == 1 {
+                let config = REMOTE_CONFIG
+                    .replace("{BASE}", &fixture.bitbucket.base)
+                    .replace("exclude = [\"skip\"]\n", "")
+                    + "\n[[repositories]]\nurl = \"github.com/org/added\"\n";
+                fs::write(&fixture.config, config).unwrap();
+            }
+        },
+    );
+    let registration = |rows: &[Vec<String>], name: &str| {
+        rows.iter()
+            .find(|row| row[0] == name)
+            .map(|row| (row[2].clone(), row[3].clone()))
+    };
+    assert_eq!(
+        registration(&rows[1], "skip"),
+        Some(("excluded".to_owned(), "remote only".to_owned()))
+    );
+    assert_eq!(
+        registration(&rows[2], "skip"),
+        Some(("wildcard".to_owned(), "remote only".to_owned()))
+    );
+    assert_eq!(
+        registration(&rows[2], "added"),
+        Some(("explicit".to_owned(), "missing".to_owned()))
+    );
+    assert_eq!(
+        (fixture.gh_requests(), fixture.bitbucket.requests()),
+        (2, 2)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_remote_ignores_answers_to_requests_that_were_invalidated() {
+    // Disabled while loading: the late answer neither shows rows nor joins the cache.
+    let fixture = RemoteFixture::new();
+    fixture.bitbucket.hold();
+    run_inventory_pty_actions_with_hook(
+        &mut fixture.command(&["tui", "--remote"]),
+        &[
+            (
+                vec![
+                    "NORMAL · 6 rows",
+                    "github.com: ready, 3 candidates",
+                    "bitbucket.org: loading…",
+                ],
+                [&b"kk"[..], REMOTE_MENU].concat(),
+            ),
+            (vec!["Disable remote", "hides 3 rows"], b"jjj\r".to_vec()),
+            (
+                vec![
+                    "NORMAL · 3 rows",
+                    "remote off · 3 candidates cached for this session",
+                ],
+                b"j".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL · 3 rows",
+                    "remote off · 3 candidates cached for this session",
+                ],
+                REMOTE_MENU.to_vec(),
+            ),
+            (
+                vec!["Enable remote", "pair: bitbucket.org not", "off · fetched"],
+                b"qqq".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        |action| {
+            if action == 2 {
+                fixture.bitbucket.open_from(0);
+                fixture.bitbucket.wait_for_answers(2);
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        },
+    );
+    assert_eq!(fixture.bitbucket.requests(), 2);
+
+    // An archive toggle supersedes the running request; the request without archives is
+    // answered last and must not replace the answer with them.
+    let fixture = RemoteFixture::new();
+    fixture.bitbucket.hold();
+    run_inventory_pty_actions_with_hook(
+        &mut fixture.command(&["tui", "--remote"]),
+        &[
+            (
+                vec!["github.com: ready, 3 candidates", "bitbucket.org: loading…"],
+                [&b"kk"[..], REMOTE_MENU].concat(),
+            ),
+            (vec!["[ ] Include archived"], b"jj\r".to_vec()),
+            (
+                vec!["github.com: ready, 4 candidates", "bitbucket.org: loading…"],
+                b"j".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL · 9 rows",
+                    "attic [archived]",
+                    "bitbucket.org: ready, 2 candidates",
+                ],
+                b"j".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL · 9 rows",
+                    "attic [archived]",
+                    "bitbucket.org: ready, 2 candidates",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        |action| match action {
+            // The second request, with archives, is answered first.
+            2 => {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while fixture.bitbucket.requests() < 2 {
+                    assert!(Instant::now() < deadline, "the toggle sent no request");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                fixture.bitbucket.open_from(1);
+            }
+            3 => {
+                fixture.bitbucket.open_from(0);
+                fixture.bitbucket.wait_for_answers(4);
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            _ => {}
+        },
+    );
+    assert_eq!(fixture.bitbucket.requests(), 4);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_remote_rows_agree_with_status_remote() {
+    let fixture = RemoteFixture::new();
+    for (flags, ready, extras) in [
+        (&["--remote"][..], "NORMAL · 7 rows", 3),
+        (
+            &["--remote", "--include-archived"][..],
+            "NORMAL · 9 rows",
+            4,
+        ),
+    ] {
+        let transcript = run_inventory_pty_with_size(
+            fixture.command(&["tui"]).args(flags),
+            &[ready, "absent: loading…", "No active operation"],
+            b"q",
+            40,
+            220,
+        );
+        let screen = inventory_rows(&screen_text(&transcript, 40, 220));
+        let status = output(fixture.command(&["status"]).args(flags));
+        assert!(status.status.success(), "{status:?}");
+        let printed = status_rows(&String::from_utf8(status.stdout).unwrap());
+        assert!(
+            printed.iter().any(|row| row[3] == "remote only"),
+            "{printed:?}"
+        );
+        // Every status row is on the screen with the same cells, in the same order.
+        assert_eq!(
+            screen
+                .iter()
+                .filter(|row| printed.contains(row))
+                .collect::<Vec<_>>(),
+            printed.iter().collect::<Vec<_>>(),
+            "{flags:?}"
+        );
+        // What the screen adds are catalog candidates: repositories no wildcard registers.
+        let candidates = screen
+            .iter()
+            .filter(|row| !printed.contains(row))
+            .collect::<Vec<_>>();
+        assert_eq!(candidates.len(), extras, "{candidates:?}");
+        for row in candidates {
+            assert!(
+                row[3] == "remote only" && ["unregistered", "excluded"].contains(&row[2].as_str()),
+                "{row:?}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_remote_without_providers_starts_and_says_so() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    support::clear_outbound_requests();
+    run_inventory_pty_with_size(
+        support::lager(&home, &config).args(["tui", "--remote"]),
+        &[
+            "Local: ready · no providers configured",
+            "No repositories found",
+        ],
+        b"q",
+        24,
+        132,
+    );
+    assert!(support::outbound_requests().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_registers_a_remote_candidate_without_asking_a_provider_again() {
+    let fixture = RemoteFixture::new();
+    run_inventory_pty_actions(
+        &mut fixture.command(&["tui", "--remote"]),
+        &[
+            (REMOTE_READY.to_vec(), b"kkkkkkkm\r".to_vec()),
+            (
+                vec!["Repository actions / tool", "Register"],
+                b"\r".to_vec(),
+            ),
+            (
+                vec![
+                    "RESULTS · 7 rows",
+                    "Register: 1 succeeded",
+                    "bitbucket.org: ready, 0 candidates",
+                    "github.com: ready, 3 candidates",
+                ],
+                b"qq".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    let config = fs::read_to_string(&fixture.config).unwrap();
+    assert!(config.contains("bitbucket.org:team/tool.git"), "{config}");
+    assert!(!fixture.root.join("team/tool").exists());
+    assert_eq!(
+        (fixture.gh_requests(), fixture.bitbucket.requests()),
+        (2, 2)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_quit_ends_a_hanging_provider_request() {
+    let fixture = RemoteFixture::new();
+    fixture.hold_gh();
+    let mut quit_sent = Instant::now();
+    run_inventory_pty_actions_with_hook(
+        &mut fixture.command(&["tui", "--remote"]),
+        &[(
+            vec![
+                "NORMAL · 4 rows",
+                "github.com: loading…",
+                "bitbucket.org: ready, 1 candidate",
+            ],
+            b"q".to_vec(),
+        )],
+        32,
+        132,
+        |_| {
+            wait_for_file(&fixture.state.join("gh.pids"));
+            quit_sent = Instant::now();
+        },
+    );
+    // The cancellation bound is 2 s; the margin covers a loaded machine reaping the process.
+    let quit_took = quit_sent.elapsed();
+    assert!(quit_took < Duration::from_secs(6), "{quit_took:?}");
+    let pids = fs::read_to_string(fixture.state.join("gh.pids")).unwrap_or_else(|error| {
+        panic!(
+            "{error}: {:?}",
+            fs::read_dir(&fixture.state)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>()
+        )
+    });
+    assert_eq!(pids.lines().count(), 1, "{pids}");
+    let pid: libc::pid_t = pids.trim().parse().unwrap();
+    let deadline = quit_sent + Duration::from_secs(6);
+    // SAFETY: signal 0 only asks whether the process exists.
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(Instant::now() < deadline, "gh {pid} survived the quit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_remote_keeps_a_provider_catalog_when_one_of_its_wildcards_fails() {
+    let fixture = RemoteFixture::new();
+    let failing = fixture.state.join("gh.fail-organization");
+    fs::write(&failing, "").unwrap();
+    run_inventory_pty_with_exit(
+        &mut fixture.command(&["tui", "--remote"]),
+        &[
+            // The viewer catalog arrived; the wildcard's members did not.
+            (
+                vec![
+                    "NORMAL · 5 rows · 1 problem",
+                    "zebra",
+                    "bitbucket.org: ready, 1 candidate",
+                    "github.com: failed, 1 cached (stale)",
+                    "! github.com failed: github.com/org/*: gh: rate limited",
+                ],
+                [&b"kk"[..], REMOTE_MENU].concat(),
+            ),
+            (
+                vec!["Retry failed providers", "github.com only"],
+                b"\r".to_vec(),
+            ),
+            (REMOTE_READY.to_vec(), b"q".to_vec()),
+        ],
+        32,
+        132,
+        1,
+        |action| {
+            if action == 1 {
+                fs::remove_file(&failing).unwrap();
+            }
+        },
+    );
+    assert_eq!(
+        (fixture.gh_requests(), fixture.bitbucket.requests()),
+        (4, 2)
+    );
 }

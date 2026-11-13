@@ -276,7 +276,10 @@ pub struct StatusArgs {
 
 #[derive(Debug, Clone, ClapArgs)]
 pub struct InventoryArgs {
-    #[arg(long, help = "Remote discovery is unavailable in this build")]
+    #[arg(
+        long,
+        help = "Start with remote discovery on and fetch the configured providers"
+    )]
     pub remote: bool,
     #[arg(long, help = "Include archived repositories; requires --remote")]
     pub include_archived: bool,

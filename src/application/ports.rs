@@ -218,6 +218,31 @@ pub trait ProviderCatalog {
     }
 }
 
+/// What one provider returned: the repositories it listed, and what it could not list.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProviderAnswer {
+    pub members: Vec<crate::domain::repository::RepositorySummary>,
+    /// Set when the catalog or a wildcard failed; `members` holds what the rest returned.
+    pub error: Option<String>,
+}
+
+/// The providers remote discovery reads, one blocking request per provider.
+pub trait ProviderSource: Send + Sync + 'static {
+    /// The configured providers, by host.
+    fn hosts(&self) -> Vec<String>;
+
+    /// The provider's whole catalog and the members of `wildcards`, which all name `host`.
+    /// Blocks until the provider answered; `cancelled` ends the request early where the
+    /// provider can be interrupted.
+    fn fetch(
+        &self,
+        host: &str,
+        wildcards: &[crate::domain::repository::RepositoryRef],
+        include_archived: bool,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> ProviderAnswer;
+}
+
 pub fn config_path(override_path: Option<&Path>) -> PathBuf {
     if let Some(path) = override_path {
         return path.to_path_buf();

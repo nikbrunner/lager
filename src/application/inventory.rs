@@ -5,7 +5,7 @@ use std::time::SystemTime;
 
 use crate::application::ports::{ProviderCatalog, ProviderFailure};
 use crate::domain::config::{Config, RepositoryDeclaration};
-use crate::domain::repository::RepositoryRef;
+use crate::domain::repository::{RepositoryRef, RepositorySummary};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InventoryReport {
@@ -516,7 +516,7 @@ pub(crate) fn add_remote_members<P: ProviderCatalog>(
         .map_err(|error| error.to_string())?;
     let mut failures = Vec::new();
     for wildcard in &wildcards {
-        let mut members = match providers.expand(&wildcard.reference, include_archived) {
+        let members = match providers.expand(&wildcard.reference, include_archived) {
             Ok(members) => members,
             Err(error) => {
                 failures.push(ProviderFailure {
@@ -530,56 +530,114 @@ pub(crate) fn add_remote_members<P: ProviderCatalog>(
             crate::domain::repository::validate_reference_safety(&member.reference.clone_url)
                 .map_err(|error| error.to_string())?;
         }
-        members.sort_by_key(|member| member.reference.identity());
-        for member in members {
-            let identity = member.reference.identity();
-            let mut known = false;
-            for row in &mut report.rows {
-                if row_identity(row) == Some(identity.as_str()) {
-                    row.archived = Some(member.archived);
-                    known = true;
-                }
-            }
-            if known || member.archived && !include_archived {
-                continue;
-            }
-            let (registration, relationships) = registration_for(&identity, &wildcards, &explicit);
-            if !matches!(registration, RegistrationState::Wildcard { .. }) {
-                continue;
-            }
-            let destination = configured_destination(config, &member.reference, &root);
-            let occupied = report.rows.iter().any(|row| {
-                row.observed_path.as_ref() == Some(&destination)
-                    && row.checkout == CheckoutState::Cloned
-            });
-            let checkout = match filesystem.destination_state(&destination) {
-                CheckoutState::Missing => CheckoutState::RemoteOnly,
-                _ if occupied => CheckoutState::Conflict,
-                state => state,
-            };
-            let key = declaration_key(&identity, &destination);
-            report.rows.push(InventoryRow {
-                key,
-                repository: identity,
-                path: destination.to_string_lossy().into_owned(),
-                registration,
-                checkout,
-                origin: member.reference.clone_url.clone(),
-                remote: Some(member.reference.clone_url),
-                origin_fact: None,
-                branch: ObservationField::NotApplicable,
-                changes: ObservationField::NotApplicable,
-                configured_destination: Some(destination),
-                observed_path: None,
-                declaration: None,
-                warnings: relationships,
-                markable: true,
-                archived: Some(member.archived),
-            });
-        }
+        merge_members(
+            report,
+            filesystem,
+            config,
+            &root,
+            &wildcards,
+            &explicit,
+            members,
+            include_archived,
+            false,
+        );
     }
     report.rows.sort_by(|left, right| left.key.cmp(&right.key));
     Ok(failures)
+}
+
+/// Merges provider catalogs into the rows as `add_remote_members` merges wildcard members. A
+/// repository no declaration registers gains a row too, a candidate: unregistered or excluded,
+/// `remote only` while nothing is at its destination. Returns the keys of the added rows.
+pub(crate) fn add_remote_catalog(
+    report: &mut InventoryReport,
+    filesystem: &impl InventoryFilesystem,
+    config: &Config,
+    home: &Path,
+    members: Vec<RepositorySummary>,
+    include_archived: bool,
+) -> Result<Vec<RowKey>, String> {
+    let (_, wildcards, explicit) = declarations(config, home)?;
+    let root = config
+        .resolve_root(home)
+        .map_err(|error| error.to_string())?;
+    let added = merge_members(
+        report,
+        filesystem,
+        config,
+        &root,
+        &wildcards,
+        &explicit,
+        members,
+        include_archived,
+        true,
+    );
+    report.rows.sort_by(|left, right| left.key.cmp(&right.key));
+    Ok(added)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_members(
+    report: &mut InventoryReport,
+    filesystem: &impl InventoryFilesystem,
+    config: &Config,
+    root: &Path,
+    wildcards: &[WildcardDeclaration<'_>],
+    explicit: &HashSet<String>,
+    mut members: Vec<RepositorySummary>,
+    include_archived: bool,
+    candidates: bool,
+) -> Vec<RowKey> {
+    let mut added = Vec::new();
+    members.sort_by_key(|member| member.reference.identity());
+    for member in members {
+        let identity = member.reference.identity();
+        let mut known = false;
+        for row in &mut report.rows {
+            if row_identity(row) == Some(identity.as_str()) {
+                row.archived = Some(member.archived);
+                known = true;
+            }
+        }
+        if known || member.archived && !include_archived {
+            continue;
+        }
+        let (registration, relationships) = registration_for(&identity, wildcards, explicit);
+        if !candidates && !matches!(registration, RegistrationState::Wildcard { .. }) {
+            continue;
+        }
+        let destination = configured_destination(config, &member.reference, root);
+        let occupied = report.rows.iter().any(|row| {
+            row.observed_path.as_ref() == Some(&destination)
+                && row.checkout == CheckoutState::Cloned
+        });
+        let checkout = match filesystem.destination_state(&destination) {
+            CheckoutState::Missing => CheckoutState::RemoteOnly,
+            _ if occupied => CheckoutState::Conflict,
+            state => state,
+        };
+        let key = declaration_key(&identity, &destination);
+        added.push(key.clone());
+        report.rows.push(InventoryRow {
+            key,
+            repository: identity,
+            path: destination.to_string_lossy().into_owned(),
+            registration,
+            checkout,
+            origin: member.reference.clone_url.clone(),
+            remote: Some(member.reference.clone_url),
+            origin_fact: None,
+            branch: ObservationField::NotApplicable,
+            changes: ObservationField::NotApplicable,
+            configured_destination: Some(destination),
+            observed_path: None,
+            declaration: None,
+            warnings: relationships,
+            markable: true,
+            archived: Some(member.archived),
+        });
+    }
+    added
 }
 
 fn row_identity(row: &InventoryRow) -> Option<&str> {

@@ -153,8 +153,8 @@ Normal actions are `up`, `down`, `refresh`, `search`, `clear_search`, `inspect`,
 and `archives` have no default key. Bound to a key, each runs its menu entry on
 the marked rows or the current row, with the same previews, eligibility and
 outcomes; a disabled entry reports its reason instead. `copy` opens the Copy
-value menu. `remote`, `retry` and `archives` report that remote discovery is
-unavailable in this build. Menu uses navigation, paging, accept, cancel, help,
+value menu, `remote` the Remote discovery menu; `retry` fetches the failed
+providers again and `archives` switches the archive preference. Menu uses navigation, paging, accept, cancel, help,
 quit, Search, Inspect, Refresh and Clear search. It inherits those last four
 normal shortcuts unless a menu override or a menu-local binding takes precedence.
 Inspection uses navigation, paging, `copy` (default `c`), accept, cancel, help

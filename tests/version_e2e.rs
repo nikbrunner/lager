@@ -39,6 +39,7 @@ fn overlay_current_sources(source: &Path, destination: &Path) {
         "src/application/inventory.rs",
         "src/application/mod.rs",
         "src/application/ports.rs",
+        "src/application/remote.rs",
         "src/application/warehouse.rs",
         "src/application/worktrees.rs",
         "src/cli/args.rs",
@@ -58,6 +59,8 @@ fn overlay_current_sources(source: &Path, destination: &Path) {
         "src/infrastructure/git.rs",
         "src/infrastructure/inventory.rs",
         "src/infrastructure/mod.rs",
+        "src/infrastructure/providers/github.rs",
+        "src/infrastructure/providers/mod.rs",
     ] {
         let target = destination.join(relative);
         if let Some(parent) = target.parent() {

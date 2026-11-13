@@ -102,7 +102,7 @@ See the [configuration reference](docs/reference/config.md) for every field, def
 | `hook` | Runs a declared repository's post-clone hook again. | — |
 | `status`, `list`, `ls` | Prints the rows `tui` shows: declarations, checkouts and their state. | `--remote`, `--include-archived`, `--registered`, `--json` |
 | `worktree list`, `add`, `remove` | Lists, creates and removes linked worktrees of one repository through native Git. | `--json`, `--branch`, `--new-branch`, `--start`, `--path`, `--yes`, `--force` |
-| `tui` | Opens an offline overview in a terminal that registers, unregisters, clones and removes repositories. | `r` removes a checkout after confirmation; `m` opens the actions; `R` refreshes; `q` or Esc quits. |
+| `tui` | Opens the inventory in a terminal: it registers, unregisters, clones and removes repositories and browses what the providers list. | `--remote`, `--include-archived`; `r` removes a checkout after confirmation; `m` opens the actions; `R` refreshes local state; `q` or Esc quits. |
 
 `list` and `ls` are identical aliases of `status`, which is offline by default and needs no terminal. Use `status --json` for stable machine-readable output. The [CLI reference](docs/reference/cli.md) documents every option, default, and interactive behavior.
 

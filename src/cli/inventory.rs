@@ -25,6 +25,9 @@ use crate::application::inventory::{
     SessionProblems,
 };
 use crate::application::ports::{Desktop, EnsureEvent, EnsureReporter, HookRunner};
+use crate::application::remote::{
+    self, ProviderPhase, ProviderState, RemoteBounds, RemoteDiscovery,
+};
 use crate::domain::repository::validate_reference_safety;
 use crate::infrastructure::config::{CommandConfigStore, load_inventory};
 use crate::infrastructure::desktop::NativeDesktop;
@@ -33,6 +36,7 @@ use crate::infrastructure::git::NativeGit;
 use crate::infrastructure::inventory::{
     LocalInventoryFilesystem, ScanContext, ScanEvent, ScanHandle, start_local_scan_with_context,
 };
+use crate::infrastructure::providers::ConfiguredProviders;
 use crate::infrastructure::shell::{Shell, ShellError};
 use crate::presentation::escape;
 
@@ -50,10 +54,6 @@ pub fn run(config_path: &Path, args: InventoryArgs, interrupted: impl Fn() -> Op
     }
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         eprintln!("lager: tui requires a TTY on stdin and stdout");
-        return 2;
-    }
-    if args.remote {
-        eprintln!("lager: inventory remote discovery is unavailable in this build");
         return 2;
     }
     let home = std::env::var_os("HOME")
@@ -87,6 +87,10 @@ pub fn run(config_path: &Path, args: InventoryArgs, interrupted: impl Fn() -> Op
             let mut session = InventorySession::new(config, config_path.to_path_buf(), home, root);
             session.bindings = bindings;
             session.notice = warning_notice(warnings);
+            session.remote.set_include_archived(args.include_archived);
+            if args.remote {
+                session.remote.enable();
+            }
             session
         },
     ) {
@@ -103,7 +107,10 @@ pub fn run(config_path: &Path, args: InventoryArgs, interrupted: impl Fn() -> Op
             return 1;
         }
     };
-    terminal.run(&mut session, &interrupted)
+    let code = terminal.run(&mut session, &interrupted);
+    // The terminal is restored before the session waits for provider requests to end.
+    drop(terminal);
+    code
 }
 
 struct InventorySession {
@@ -124,6 +131,16 @@ struct InventorySession {
     cached_report: Option<InventoryReport>,
     /// The running or last finished batch; a new batch replaces it.
     batch: Option<Batch>,
+    remote: RemoteDiscovery<ConfiguredProviders>,
+    /// The rows the provider catalogs added to the last report.
+    remote_rows: Vec<model::RowKey>,
+    /// How many rows the catalogs added when remote discovery was last on.
+    remote_cached: usize,
+}
+
+/// The providers of a configuration that passed validation.
+fn configured_providers(config: &crate::domain::config::Config) -> ConfiguredProviders {
+    ConfiguredProviders::from_config(config).unwrap_or_default()
 }
 
 impl InventorySession {
@@ -138,7 +155,15 @@ impl InventorySession {
             config_revision: LocalInventoryFilesystem.config_revision(&config_path),
             root: root.clone(),
         });
+        let remote = RemoteDiscovery::new(
+            configured_providers(&config),
+            remote::wildcards(&config),
+            RemoteBounds::default(),
+        );
         Self {
+            remote,
+            remote_rows: Vec::new(),
+            remote_cached: 0,
             config,
             config_path,
             home,
@@ -161,13 +186,26 @@ impl InventorySession {
     /// for every terminal frame. Refreshing and receiving an event invalidate this cache.
     fn report(&mut self) -> Result<InventoryReport, String> {
         if self.cached_report.is_none() {
-            let report = model::build_inventory(
+            let mut report = model::build_inventory(
                 &LocalInventoryFilesystem,
                 &self.config,
                 &self.config_path,
                 &self.home,
                 self.scan.clone(),
             )?;
+            // The cached catalogs are merged into every rebuild, so a local refresh never
+            // needs a provider.
+            self.remote_rows = model::add_remote_catalog(
+                &mut report,
+                &LocalInventoryFilesystem,
+                &self.config,
+                &self.home,
+                self.remote.members(),
+                self.remote.include_archived(),
+            )?;
+            if self.remote.enabled() {
+                self.remote_cached = self.remote_rows.len();
+            }
             self.cached_report = Some(report);
         }
         Ok(self
@@ -185,7 +223,13 @@ impl InventorySession {
     }
 
     fn receive_events(&mut self) {
-        let mut received = false;
+        let (mut received, failures) = self.remote.poll();
+        for failure in failures {
+            self.problems.record(
+                format!("provider · {}", escape(&failure.provider)),
+                escape(model::problem_reason(&failure.error)),
+            );
+        }
         while let Ok(event) = self.worker.receiver.try_recv() {
             received = true;
             match &event {
@@ -287,6 +331,8 @@ impl InventorySession {
         self.worker.cancel_and_join();
         self.receive_events();
         self.generation += 1;
+        self.remote
+            .reconfigure(configured_providers(&config), remote::wildcards(&config));
         self.config = config;
         self.bindings = bindings;
         self.notice = warning_notice(warnings);
@@ -668,14 +714,18 @@ impl TerminalSession {
     fn draw_loading(&mut self) -> Result<(), String> {
         self.terminal
             .draw(|frame| {
-                let [header, body] =
-                    Layout::vertical([Constraint::Length(1), Constraint::Min(0)])
-                        .areas(frame.area());
+                let [header, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)])
+                    .areas(frame.area());
                 frame.render_widget(bar("LAGER / inventory", "", header.width), header);
                 frame.render_widget(
-                    Paragraph::new("Scanning repository roots…\nGit status appears as observations complete. Remote discovery is unavailable.")
-                        .wrap(Wrap { trim: false }),
-                    body.inner(Margin { horizontal: 2, vertical: 1 }),
+                    Paragraph::new(
+                        "Scanning repository roots…\nGit status appears as observations complete.",
+                    )
+                    .wrap(Wrap { trim: false }),
+                    body.inner(Margin {
+                        horizontal: 2,
+                        vertical: 1,
+                    }),
                 );
             })
             .map(|_| ())
@@ -872,7 +922,7 @@ impl TerminalSession {
                                 worktrees::open(session, &mut selection, row, name);
                             }
                             Some(Action::Add) if view == View::Normal => {
-                                selection.add = Some(AddForm::default());
+                                open_add(session, &mut selection);
                             }
                             Some(action @ (Action::Remove | Action::RemoveUnregister))
                                 if view == View::Normal =>
@@ -911,6 +961,14 @@ impl TerminalSession {
                                 ) {
                                     return code;
                                 }
+                            }
+                            // Opening Add turned remote discovery on; browsing only closes
+                            // the form.
+                            Some(Action::Accept)
+                                if view == View::AddInput
+                                    && selection.add.as_ref().is_some_and(|form| form.browse) =>
+                            {
+                                selection.add = None;
                             }
                             Some(Action::Accept) if view == View::AddInput => {
                                 let form = selection.add.as_mut().expect("Add is open");
@@ -963,6 +1021,14 @@ impl TerminalSession {
                             }
                             Some(Action::Accept) if view == View::AddPreview => {
                                 choose_add(session, &mut selection);
+                            }
+                            // Tab is the form's own focus key unless the input map binds it.
+                            None if view == View::AddInput
+                                && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) =>
+                            {
+                                if let Some(form) = selection.add.as_mut() {
+                                    form.browse = !form.browse;
+                                }
                             }
                             None if view == View::AddInput => {
                                 if let Some(form) = selection.add.as_mut() {
@@ -1400,11 +1466,13 @@ impl TerminalSession {
                         .unwrap_or_default()
                 )
             });
+        let remote_state = remote_state(&session.remote);
         let status = status_lines(
             report,
             complete,
             session.notice.as_deref(),
             session.message.as_deref().or(progress.as_deref()),
+            remote_state.as_ref(),
             view,
             compact,
             bindings,
@@ -1464,7 +1532,7 @@ impl TerminalSession {
                     header,
                 );
                 frame.render_widget(
-                    Paragraph::new("Local + declarations · remote off").style(dim()),
+                    Paragraph::new(source_line(session)).style(dim()),
                     padded(source),
                 );
                 let query = escape(&shown.query);
@@ -1770,8 +1838,13 @@ impl TerminalSession {
                                     popup_body_width(area, POPUP),
                                 ),
                                 format!(
-                                    "{} · {}",
-                                    first_key_hint(bindings, Mode::Input, Action::Accept, "preview"),
+                                    "{} · Tab focus · {}",
+                                    first_key_hint(
+                                        bindings,
+                                        Mode::Input,
+                                        Action::Accept,
+                                        if form.browse { "browse" } else { "preview" }
+                                    ),
                                     first_key_hint(bindings, Mode::Input, Action::Cancel, "back")
                                 ),
                             )
@@ -1923,7 +1996,6 @@ impl View {
     }
 }
 
-const REMOTE_UNAVAILABLE: &str = "Remote discovery is unavailable in this build";
 const POPUP: u16 = 66;
 const WIDE_POPUP: u16 = 100;
 /// Terminal width at which the table shows all seven columns of the wide grid.
@@ -2171,11 +2243,132 @@ fn footer_widget(
     Paragraph::new(Line::from(spans))
 }
 
+/// What remote discovery is doing, for the status line.
+enum RemoteState {
+    Loading,
+    /// Every failed provider with its error, already escaped.
+    Failed(String),
+}
+
+fn remote_state(remote: &RemoteDiscovery<ConfiguredProviders>) -> Option<RemoteState> {
+    if !remote.enabled() {
+        return None;
+    }
+    if remote.loading() {
+        return Some(RemoteState::Loading);
+    }
+    let failures = remote
+        .providers()
+        .iter()
+        .filter_map(|(host, provider)| match &provider.phase {
+            ProviderPhase::Failed(error) => Some(format!(
+                "{} failed: {}",
+                escape(host),
+                escape(model::problem_reason(error))
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (!failures.is_empty()).then(|| RemoteState::Failed(failures.join(" · ")))
+}
+
+fn counted(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
+}
+
+/// How many of the rows the catalogs added come from this provider.
+fn candidates(session: &InventorySession, host: &str) -> usize {
+    session
+        .remote_rows
+        .iter()
+        .filter(|key| {
+            matches!(key, model::RowKey::Declaration { identity, .. }
+                if identity.split('/').next().is_some_and(|owner| owner.eq_ignore_ascii_case(host)))
+        })
+        .count()
+}
+
+/// A provider's state as the source line and the Remote discovery menu word it.
+fn provider_text(
+    provider: &ProviderState,
+    enabled: bool,
+    candidates: usize,
+    separator: &str,
+    detailed: bool,
+) -> String {
+    let fetched = provider
+        .cached
+        .as_ref()
+        .map(|cache| format!("fetched {}", clock(cache.fetched)));
+    let stale = if provider.stale() {
+        format!("{separator}{candidates} cached (stale)")
+    } else {
+        String::new()
+    };
+    match (&provider.phase, fetched) {
+        (_, Some(fetched)) if !enabled => format!("off{separator}{fetched}"),
+        (_, None) if !enabled => "not fetched".to_owned(),
+        (ProviderPhase::Idle, _) => format!("not fetched{stale}"),
+        (ProviderPhase::Loading { .. }, Some(_)) => format!("refreshing{stale}"),
+        (ProviderPhase::Loading { since }, None) => {
+            format!("loading… {} s", since.elapsed().as_secs())
+        }
+        (ProviderPhase::Ready, fetched) => {
+            let ready = format!(
+                "ready{separator}{}",
+                counted(candidates, "candidate", "candidates")
+            );
+            match fetched.filter(|_| detailed) {
+                Some(fetched) => format!("{ready}{separator}{fetched}"),
+                None => ready,
+            }
+        }
+        (ProviderPhase::Failed(error), _) if detailed => {
+            format!("failed{separator}{}", escape(model::problem_reason(error)))
+        }
+        (ProviderPhase::Failed(_), _) => format!("failed{stale}"),
+    }
+}
+
+fn source_line(session: &InventorySession) -> String {
+    let remote = &session.remote;
+    if !remote.enabled() {
+        return match session.remote_cached {
+            0 => "Local + declarations · remote off".to_owned(),
+            cached => format!(
+                "Local + declarations · remote off · {} cached for this session",
+                counted(cached, "candidate", "candidates")
+            ),
+        };
+    }
+    let mut parts = vec![format!(
+        "Local: {}",
+        if session.complete {
+            "ready"
+        } else {
+            "scanning"
+        }
+    )];
+    if remote.providers().is_empty() {
+        parts.push("no providers configured".to_owned());
+    }
+    for (host, provider) in remote.providers() {
+        parts.push(format!(
+            "{}: {}",
+            escape(host),
+            provider_text(provider, true, candidates(session, host), ", ", false)
+        ));
+    }
+    parts.join(" · ")
+}
+
+#[allow(clippy::too_many_arguments)]
 fn status_lines(
     report: &InventoryReport,
     complete: bool,
     notice: Option<&str>,
     message: Option<&str>,
+    remote: Option<&RemoteState>,
     view: View,
     compact: bool,
     bindings: &Bindings,
@@ -2226,11 +2419,30 @@ fn status_lines(
             dim(),
         ));
     }
-    let state = if complete {
-        "No active operation"
-    } else {
-        "Scanning local repositories…"
+    let state = match remote {
+        _ if !complete => "Scanning local repositories…",
+        Some(RemoteState::Loading) => "Remote on · local rows stay usable while providers load",
+        _ => "No active operation",
     };
+    // A failed provider is the current state once nothing else is going on.
+    if let Some(RemoteState::Failed(failures)) = remote
+        && complete
+        && message.is_none()
+        && !matches!(
+            view,
+            View::Search
+                | View::Preview
+                | View::WorktreeConfirm
+                | View::AddInput
+                | View::WorktreeInput
+                | View::AddPreview
+                | View::WorktreePlan
+                | View::Worktrees
+        )
+    {
+        lines.push(Line::styled(format!("! {failures}"), warn()));
+        return lines;
+    }
     let refresh = first_key_hint(
         bindings,
         Mode::Normal,
@@ -2257,10 +2469,14 @@ fn status_lines(
         | View::Batch
         | View::QuitBatch
         | View::WorktreeBlocked => state.to_owned(),
-        View::Normal | View::Inspect if compact && complete && !inspect.is_empty() => format!(
-            "Path and origin: {} inspects, menu copies the full value",
-            inspect[0]
-        ),
+        View::Normal | View::Inspect
+            if compact && complete && remote.is_none() && !inspect.is_empty() =>
+        {
+            format!(
+                "Path and origin: {} inspects, menu copies the full value",
+                inspect[0]
+            )
+        }
         View::Normal | View::Inspect if refresh.is_empty() => state.to_owned(),
         View::Normal | View::Inspect => format!("{state} · {refresh}"),
     };
@@ -2624,9 +2840,7 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
         .unbound(Mode::Normal)
         .into_iter()
         .filter(|action| {
-            DIRECT_ACTIONS.contains(action)
-                && !matches!(action, Retry | Archives)
-                && bindings.configured(Mode::Normal, *action).is_none()
+            DIRECT_ACTIONS.contains(action) && bindings.configured(Mode::Normal, *action).is_none()
         })
         .map(direct_label)
         .collect::<Vec<_>>();
@@ -3021,6 +3235,7 @@ enum Menu {
     Repository,
     Copy,
     Selection,
+    Remote,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3042,6 +3257,11 @@ enum Entry {
     ClearMarks,
     Run(BatchAction),
     CancelBatch,
+    RemoteEnable,
+    RemoteDisable,
+    RemoteRetry,
+    RemoteRefresh,
+    RemoteArchives,
 }
 
 /// One popup line: a group heading or spacer without an entry, or an entry with its hint.
@@ -3058,6 +3278,7 @@ fn menu_title(menu: Menu, name: &str, marked: usize) -> String {
         Menu::Repository => format!("Repository actions / {name}"),
         Menu::Copy => format!("Copy value / {name}"),
         Menu::Selection => format!("Selection / {marked} marked"),
+        Menu::Remote => "Remote discovery".to_owned(),
     }
 }
 
@@ -3143,9 +3364,16 @@ fn menu_lines(
                 heading("Session".to_owned()),
                 item(Entry::Add, "Add repository", key(Action::Add), true),
                 item(
-                    Entry::Unavailable(REMOTE_UNAVAILABLE),
+                    Entry::Open(Menu::Remote),
                     "Remote discovery…",
-                    "off".to_owned(),
+                    match remote_state(&session.remote) {
+                        _ if !session.remote.enabled() => "off".to_owned(),
+                        Some(RemoteState::Loading) => "on · loading".to_owned(),
+                        Some(RemoteState::Failed(_)) => {
+                            format!("on · {} failed", session.remote.failed().len())
+                        }
+                        None => "on".to_owned(),
+                    },
                     true,
                 ),
                 item(
@@ -3270,6 +3498,119 @@ fn menu_lines(
                 }
             })
             .collect(),
+        Menu::Remote => {
+            let remote = &session.remote;
+            let enabled = remote.enabled();
+            let providers = remote.providers().len();
+            let mut lines = remote
+                .providers()
+                .iter()
+                .map(|(host, provider)| MenuLine {
+                    entry: None,
+                    label: escape(host),
+                    hint: provider_text(provider, enabled, candidates(session, host), " · ", true),
+                    enabled: false,
+                })
+                .collect::<Vec<_>>();
+            if !lines.is_empty() {
+                lines.push(heading(String::new()));
+            }
+            let failed = remote.failed();
+            let off = |entry, label: &str| item(entry, label, "remote is off".to_owned(), false);
+            let retry = match (enabled, failed.is_empty()) {
+                (false, _) => off(Entry::RemoteRetry, "Retry failed providers"),
+                (true, true) => item(
+                    Entry::RemoteRetry,
+                    "Retry failed providers",
+                    "none failed".to_owned(),
+                    false,
+                ),
+                (true, false) => item(
+                    Entry::RemoteRetry,
+                    "Retry failed providers",
+                    format!("{} only", escape(failed.join(", "))),
+                    true,
+                ),
+            };
+            let refresh = if enabled {
+                item(
+                    Entry::RemoteRefresh,
+                    "Refresh all enabled providers",
+                    "cached rows stay, shown stale".to_owned(),
+                    providers > 0,
+                )
+            } else {
+                off(Entry::RemoteRefresh, "Refresh all enabled providers")
+            };
+            let archives = item(
+                Entry::RemoteArchives,
+                if remote.include_archived() {
+                    "[x] Include archived"
+                } else {
+                    "[ ] Include archived"
+                },
+                if enabled {
+                    "refetches".to_owned()
+                } else {
+                    "applies when remote is on".to_owned()
+                },
+                true,
+            );
+            if enabled {
+                let marks = session
+                    .remote_rows
+                    .iter()
+                    .filter(|key| session.marks.contains(key))
+                    .count();
+                lines.extend([
+                    retry,
+                    refresh,
+                    archives,
+                    item(
+                        Entry::RemoteDisable,
+                        "Disable remote",
+                        format!(
+                            "hides {}, removes {}",
+                            counted(session.remote_rows.len(), "row", "rows"),
+                            counted(marks, "mark", "marks")
+                        ),
+                        true,
+                    ),
+                ]);
+            } else {
+                lines.extend([
+                    if providers == 0 {
+                        item(
+                            Entry::RemoteEnable,
+                            "Enable remote",
+                            "no providers configured".to_owned(),
+                            false,
+                        )
+                    } else {
+                        item(
+                            Entry::RemoteEnable,
+                            "Enable remote",
+                            format!("fetches {}", counted(providers, "provider", "providers")),
+                            true,
+                        )
+                    },
+                    archives,
+                    retry,
+                    refresh,
+                ]);
+            }
+            let local = menu_key(&session.bindings, Action::Refresh);
+            lines.extend([
+                heading(String::new()),
+                heading(if local.is_empty() {
+                    "A local refresh never asks a provider.".to_owned()
+                } else {
+                    format!("{local} refreshes local/config only.")
+                }),
+                heading("Discovery never registers, clones or runs hooks.".to_owned()),
+            ]);
+            lines
+        }
         Menu::Selection => {
             let marked = session.marks.len();
             let markable = row.is_some_and(|row| row.markable);
@@ -3319,8 +3660,14 @@ fn menu_widget(lines: &[MenuLine], selected: usize, width: u16) -> Paragraph<'st
             .iter()
             .enumerate()
             .map(|(index, line)| {
-                if line.entry.is_none() {
+                if line.entry.is_none() && line.hint.is_empty() {
                     return Line::styled(line.label.clone(), dim());
+                }
+                if line.entry.is_none() {
+                    // A fact with its state, as the providers of the Remote discovery menu.
+                    let mut fact = choice_line(&line.label, &line.hint, true, false, width);
+                    fact.spans[1].style = Style::default();
+                    return fact;
                 }
                 choice_line(
                     &line.label,
@@ -3407,8 +3754,8 @@ fn activate_menu_entry(
             None
         }
         (Entry::Add, _) => {
-            selection.add = Some(AddForm::default());
-            None
+            open_add(session, selection);
+            return None;
         }
         (Entry::Worktrees, row) => {
             worktrees::open(session, selection, row, name);
@@ -3420,6 +3767,39 @@ fn activate_menu_entry(
             None
         }
         (Entry::Unavailable(message), _) => Some(message.to_owned()),
+        (Entry::RemoteEnable, _) => {
+            enable_remote(session);
+            None
+        }
+        (Entry::RemoteDisable, _) => Some(disable_remote(session, report)),
+        (Entry::RemoteRetry, _) => {
+            let failed = escape(session.remote.failed().join(", "));
+            session.remote.retry();
+            session.cached_report = None;
+            Some(format!("Retrying {failed}"))
+        }
+        (Entry::RemoteRefresh, _) => {
+            session.remote.refresh();
+            session.cached_report = None;
+            Some(format!(
+                "Refreshing {} · cached rows stay, shown stale",
+                counted(session.remote.providers().len(), "provider", "providers")
+            ))
+        }
+        (Entry::RemoteArchives, _) => {
+            let include = !session.remote.include_archived();
+            session.remote.set_include_archived(include);
+            session.cached_report = None;
+            Some(format!(
+                "Archived repositories {} · {}",
+                if include { "included" } else { "hidden" },
+                if session.remote.enabled() {
+                    "refetching"
+                } else {
+                    "applies when remote is on"
+                }
+            ))
+        }
         (Entry::OpenOrigin, Some(row)) => Some(
             match model::web_url(row, &session.config)
                 .map_err(str::to_owned)
@@ -3534,8 +3914,9 @@ fn run_direct(
         Action::CloneRegister => (Menu::Repository, Entry::Run(BatchAction::CloneRegister)),
         Action::Copy => (Menu::Root, Entry::Open(Menu::Copy)),
         Action::Open => (Menu::Root, Entry::OpenOrigin),
-        // Retry and archives belong to remote discovery, which this build does not have.
-        _ => (Menu::Root, Entry::Unavailable(REMOTE_UNAVAILABLE)),
+        Action::Remote => (Menu::Root, Entry::Open(Menu::Remote)),
+        Action::Retry => (Menu::Remote, Entry::RemoteRetry),
+        _ => (Menu::Remote, Entry::RemoteArchives),
     };
     selection.open_menu(menu, visible_rows);
     let row = selection.menu_target_row(&report.rows);
@@ -3563,6 +3944,52 @@ fn run_direct(
     }
     selection.menu = vec![(menu, index)];
     activate_menu_entry(session, selection, report, visible_rows)
+}
+
+/// Opens the Add form. Opening it turns remote discovery on when a provider is configured, and
+/// it stays on when the form closes.
+fn open_add(session: &mut InventorySession, selection: &mut Selection) {
+    selection.add = Some(AddForm::default());
+    // Without a configured provider there is nothing to turn on.
+    if session.remote.enabled() || session.remote.providers().is_empty() {
+        return;
+    }
+    enable_remote(session);
+    session.message =
+        Some("Remote enabled by Add · providers loading · typed input works meanwhile".to_owned());
+}
+
+fn enable_remote(session: &mut InventorySession) {
+    session.remote.enable();
+    session.cached_report = None;
+}
+
+/// Turns remote discovery off and drops the marks of the rows that disappear with it. Returns
+/// what was hidden and removed, for the status line.
+fn disable_remote(session: &mut InventorySession, report: &InventoryReport) -> String {
+    let names = short_names(&report.rows);
+    let hidden = session.remote_rows.len();
+    let mut removed = Vec::new();
+    for row in &report.rows {
+        if session.remote_rows.contains(&row.key) && session.marks.contains(&row.key) {
+            session.marks.toggle(row);
+            removed.push(names[&row.key].clone());
+        }
+    }
+    session.remote.disable();
+    session.cached_report = None;
+    let mut message = format!(
+        "Remote off · {} hidden",
+        counted(hidden, "remote-only row", "remote-only rows")
+    );
+    if !removed.is_empty() {
+        message.push_str(&format!(
+            " · {} removed: {}",
+            counted(removed.len(), "mark", "marks"),
+            removed.join(", ")
+        ));
+    }
+    message
 }
 
 /// A marked entry the inventory no longer lists: it stays in the batch, blocked.
@@ -3679,6 +4106,8 @@ struct AddForm {
     rejected: Option<String>,
     preview: Option<AddPreview>,
     choice: usize,
+    /// The reference form focuses "Browse remote candidates" instead of the preview.
+    browse: bool,
 }
 
 /// A spacer and the four preview choices, kept in view before the note and the fields.
@@ -3718,7 +4147,14 @@ fn add_input_widget(
             "Preview destination",
             &bindings.keys(Mode::Input, Action::Accept).join("/"),
             true,
+            !form.browse,
+            width,
+        ),
+        choice_line(
+            "Browse remote candidates",
+            "closes this form",
             true,
+            form.browse,
             width,
         ),
         choice_line(
@@ -5029,6 +5465,13 @@ mod tests {
             message: None,
             cached_report: None,
             batch: None,
+            remote: super::RemoteDiscovery::new(
+                super::ConfiguredProviders::default(),
+                Vec::new(),
+                super::RemoteBounds::default(),
+            ),
+            remote_rows: Vec::new(),
+            remote_cached: 0,
         };
 
         session.receive_events();
