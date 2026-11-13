@@ -25,7 +25,7 @@ post_clone = "make setup"
 | `inventory` | No | Default bindings | Mode-aware inventory key maps. |
 | `worktree_root` | No | None | Base directory for new worktrees: `~`, `~/relative`, or a relative path under `HOME`. Absolute paths and `..` are rejected. |
 
-`root` resolves from `HOME`, never from the working directory. `init` converts an absolute root under `HOME` to a portable `~` path before writing it.
+`root` resolves from `HOME`, never from the working directory. A root that does not exist yet is an empty inventory: `status` and `tui` say so in a note and exit `0`. `init` converts an absolute root under `HOME` to a portable `~` path before writing it.
 
 Without `worktree_root`, `lager worktree add` places a worktree beside its primary checkout at `<primary>.worktrees/<NAME>`. With it, the worktree goes to `<worktree_root>/<primary relative to root>.worktrees/<NAME>`:
 

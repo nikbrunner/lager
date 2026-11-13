@@ -11,3 +11,5 @@
 **Removal is skipped.** Review the warning. Use `--force` only when the state warning is understood; it does not bypass root, symlink, repository-shape, or origin checks.
 
 **A script gets unexpected stdout.** Use `status --json` for machine output. Human summaries and native Git/hook streams are intentionally separate from the JSON contract.
+
+**The inventory is empty and says the root does not exist yet.** The configured `root` names a directory that is not there. Check it for a typo, or create it; `status` and `tui` report it as a note and exit `0` until then.

@@ -134,12 +134,23 @@ pub struct LocalCheckout {
     pub changes: ObservationField,
 }
 
+/// The message of the informational diagnostic a scan reports for a root that does not exist:
+/// the scan is complete and empty, and the note keeps a mistyped root visible.
+pub const ROOT_MISSING: &str = "root does not exist yet";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanDiagnostic {
     pub path: PathBuf,
     pub message: String,
     /// Exclusions are useful to show but do not mean traversal could not finish.
     pub incomplete: bool,
+}
+
+impl ScanDiagnostic {
+    /// The note a scan reports for a root that does not exist yet.
+    pub fn is_root_missing(&self) -> bool {
+        !self.incomplete && self.message == ROOT_MISSING
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

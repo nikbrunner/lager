@@ -6,13 +6,14 @@ For the read-only TUI, use the [inventory acceptance walkthrough](docs/how-to/ve
 
 - Build: repository-hardening implementation. Record `lager --version` with
   the acceptance results.
-- Surface: CLI and its terminal prompts/picker; no browser or TUI.
+- Surface: CLI, its terminal prompts and picker, and the inventory TUI for worktrees and remote discovery; no browser.
 - Persona: ordinary local user, not root. Use only disposable repositories.
 - Agent platform: macOS ARM64. Linux evidence is outstanding.
 - Change: atomic registration, URL retention, guarded removal, child-result cancellation,
-  terminal-safe human fields, and config/provider acceptance evidence.
+  terminal-safe human fields, config/provider acceptance evidence, worktree
+  commands and the Worktrees popup, and remote discovery in the inventory.
 - Local evidence: formatting, warning-denying Clippy, the locked all-target suite
-  (159 tests), and the release build passed on macOS ARM64.
+  (462 tests), and the release build passed on macOS ARM64.
 - Boundary: native OS/shell signal and job-control behavior is unchanged.
   Custom signal forwarding and universal signal-driven terminal restoration are
   deferred; this checklist does not claim those guarantees.
@@ -57,7 +58,7 @@ printf 'Sandbox: %s\nBinary: %s\n' "$SANDBOX" "$BIN"
   - Agent check: PASS — `registration_e2e` atomic/duplicate cases and compiled-binary batch rejection smoke.
 
 - [ ] Run `lager status --json > "$SANDBOX/status.json"`, `lager list --json > "$SANDBOX/list.json"` and `lager ls --json > "$SANDBOX/ls.json"`; compare with `cmp`. Expect identical JSON, two missing declarations, no decorative output. Run `lager status` again in the same shell; declarations persist.
-  - Agent check: NOT RUN for this step. `status_e2e::status_list_and_ls_print_identical_bytes_and_exit_codes` compares the three names byte for byte in table and JSON.
+  - Agent check: PASS — `status_e2e::status_list_and_ls_print_identical_bytes_and_exit_codes` ran on 2026-11-13 (macOS ARM64) and compares the three names byte for byte in table and JSON.
 
 Create a local clone fixture and remove the placeholder declarations:
 
@@ -78,6 +79,64 @@ export REF
 
 - [ ] Run `lager remove "$REF" --keep-registered` in a real terminal and answer no to removal; expect checkout and declaration to survive. Then use `lager remove "$REF" --keep-registered --yes --force </dev/null`; only the sandbox checkout disappears. `lager ensure` recreates it from the local remote.
   - Agent check: PASS — existing removal tests preserve skipped disk/config state; focused removal suite proves bounded force and exact selection.
+
+## Worktrees
+
+These steps use the `remote` checkout from the journeys above; recreate it with `lager ensure` if a removal step left it missing. Never point `lager worktree` at a repository outside the sandbox.
+
+```sh
+PRIMARY="$SANDBOX/home/repos/remote"
+export PRIMARY
+```
+
+- [ ] Run `lager worktree list "$PRIMARY"`; expect one line with the primary path, branch and `primary`. Run `lager worktree add "$REF" review </dev/null`; expect Git's own output and `Created worktree $PRIMARY.worktrees/review on new branch review`. List again, then with `--json`; expect two records, the new one with `"branch": "refs/heads/review"` and `"is_primary": false`.
+  - Agent check: PASS — run in a sandbox on macOS ARM64 with the debug binary (the primary's branch was Git's default `master`); `worktree_e2e` (80 tests) covers branch modes, placement, collisions and JSON failures.
+
+- [ ] Run `lager worktree add "$REF" review </dev/null` a second time; expect exit 1 with `branch already exists: review; --branch checks it out`, and nothing new on disk. Run `lager worktree add "$REF" spike --path "$(cd "$SANDBOX" && pwd -P)/spike" --start HEAD </dev/null`; expect the worktree at the explicit path and the configuration file unchanged. The physical path matters on macOS, where `/var` is a symlink and a destination below a symlink is refused.
+  - Agent check: PASS — run in the same sandbox.
+
+- [ ] Add a file with `printf 'draft\n' > "$PRIMARY.worktrees/review/notes.txt"` and run `lager worktree remove "$PRIMARY.worktrees/review" </dev/null`; expect exit 2 because a non-interactive removal needs `--yes`. Run it with `--yes`; expect exit 1 with `losses    1 untracked file`. Run it with `--yes --force`; expect the directory gone and `git -C "$PRIMARY" branch --list review` still showing the branch.
+  - Agent check: PASS — run in the same sandbox.
+
+- [ ] In a real terminal, open `lager tui`, select the `remote` row and press `w`. Expect a popup listing the primary checkout and `spike` with path, branch and state. Press `a`, type `popup`, press Enter; expect the planned path `$PRIMARY.worktrees/popup` and a new branch, and nothing on disk before "Create worktree" is chosen. Create it, then select it, press `r` and choose Cancel; it stays. Press `r` again and remove it. On a missing or wildcard row, `w` reports that worktrees are unavailable.
+  - Agent check: PASS — `inventory_worktree_popup_*` PTY tests (14) cover listing, copy, add through plan, removal with losses, blockers, unavailable rows, keys typed before a confirmation, and Ctrl-C during Git. Real-terminal acceptance remains for the tester.
+
+## Remote discovery
+
+A stub `gh` stands in for GitHub; no network or account is used.
+
+```sh
+mkdir -p "$SANDBOX/tools"
+cat > "$SANDBOX/tools/gh" <<'SH'
+#!/bin/sh
+sleep 2
+case "$*" in
+  *viewer*) owner=me; field=viewer ;;
+  *) owner=org; field=organization ;;
+esac
+printf '[{"data":{"%s":{"repositories":{"nodes":[{"name":"catalog","isArchived":false,"sshUrl":"git@github.com:%s/catalog.git","owner":{"login":"%s"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]' "$field" "$owner" "$owner"
+SH
+chmod +x "$SANDBOX/tools/gh"
+cat > "$SANDBOX/remote.toml" <<'TOML'
+root = "repos"
+
+[providers."github.com"]
+preset = "github"
+
+[[repositories]]
+url = "github.com/org/*"
+TOML
+remote_lager() { PATH="$SANDBOX/tools:$PATH" lager --config "$SANDBOX/remote.toml" "$@"; }
+```
+
+- [ ] Run `remote_lager tui --remote`. Expect the local rows at once and a source line with `github.com: loading…` while navigation and `/` search keep working; after a few seconds (the stub answers each of its two requests after two seconds) it reads `github.com: ready, 2 candidates` and the catalog's repositories appear as candidates with checkout `remote only`. Run `remote_lager status --remote` in another shell; every row it prints is on the screen with the same cells.
+  - Agent check: PASS — `inventory_remote_keeps_local_rows_usable_while_providers_load_and_keeps_rows_beside_a_failure` and `inventory_remote_rows_agree_with_status_remote` against stubbed providers.
+
+- [ ] Open `m` → Remote discovery…; expect the provider with its state and the entries Retry failed providers, Refresh all enabled providers, Include archived and Disable remote. Choose Disable remote; the candidates disappear and the source line reads `remote off` with the cached count. Quit.
+  - Agent check: PASS — `inventory_remote_menu_retries_only_the_failed_provider`, `inventory_remote_refresh_keeps_cached_rows_stale_while_every_provider_reloads` and `inventory_remote_disable_hides_candidates_removes_their_marks_and_keeps_the_cache`.
+
+- [ ] Run `remote_lager tui` without `--remote` and press `a`. Expect the Add form and the source line switching to `github.com: loading…`. Press Esc; remote discovery stays on and the candidates appear once the stub answers.
+  - Agent check: PASS — `inventory_opening_add_enables_remote_and_cancelling_add_leaves_it_on` and `inventory_opening_add_from_the_menu_enables_remote_and_without_providers_asks_nothing`.
 
 ## Important edge cases
 
@@ -120,8 +179,8 @@ url = "org/repo"
 TOML
 ```
 
-- [ ] Run `lager --config "$SANDBOX/display.toml" status`; expect a header, one repository row, no raw tab, one warning line, and one problem line for the root, which does not exist. The field text shows `\n`, `\r`, `\t`, `\x1b`, `\x7f`, `\x85`; no cursor movement, terminal title change, or injected row. Run with `--json`; a JSON parser must recover the original control characters in the destination, not the human escape notation.
-  - Agent check: NOT RUN for this step. `terminal_output_e2e::human_rows_and_unknown_keys_escape_controls_while_json_preserves_values` covers every C0/C1/DEL value, all three unknown-key warning levels, exact line counts, and raw JSON field values.
+- [ ] Run `lager --config "$SANDBOX/display.toml" status`; expect exit 0, a header, one repository row, no raw tab, one warning line, and one note line for the root, which does not exist yet. The field text shows `\n`, `\r`, `\t`, `\x1b`, `\x7f`, `\x85`; no cursor movement, terminal title change, or injected row. Run with `--json`; a JSON parser must recover the original control characters in the destination, not the human escape notation.
+  - Agent check: PASS — `terminal_output_e2e::human_rows_and_unknown_keys_escape_controls_while_json_preserves_values` ran on 2026-11-13 (macOS ARM64) and covers every C0/C1/DEL value, all three unknown-key warning levels, exact line counts, and raw JSON field values.
 
 - [ ] In a real terminal, run `lager --config "$SANDBOX/prompt.toml" init`; press Enter for the default root and answer no to root creation and GitHub setup. Expect readable prompts, normal keyboard control, and the stored root `repos`. Cancel a new registration prompt with Ctrl-C; check the terminal still accepts normal input.
   - Agent check: PASS — safe input/default and confirmation PTY tests, registration prompt cancellation, and the full local suite pass; real-terminal acceptance remains for the tester.

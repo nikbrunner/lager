@@ -14,7 +14,7 @@ use std::sync::{
 
 use crate::application::inventory::{
     CheckoutState, InventoryFilesystem, LocalCheckout, LocalScan, ObservationField, OriginFact,
-    ScanDiagnostic,
+    ROOT_MISSING, ScanDiagnostic,
 };
 use crate::domain::repository::normalize_remote;
 
@@ -345,6 +345,18 @@ fn discover_checkout_paths(
     mut emit_path: impl FnMut(PathBuf) -> bool,
     mut emit_diagnostic: impl FnMut(ScanDiagnostic) -> bool,
 ) {
+    // Follows a root symlink: a dangling link is a missing root, a link to a file is no directory.
+    match std::fs::metadata(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            emit_diagnostic(exclusion(root.to_path_buf(), ROOT_MISSING));
+            return;
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            emit_diagnostic(diagnostic(root.to_path_buf(), "root is not a directory"));
+            return;
+        }
+        _ => {}
+    }
     let mut stack = vec![root.to_path_buf()];
     while let Some(path) = stack.pop() {
         if cancel.load(Ordering::Relaxed) {

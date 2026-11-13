@@ -12,7 +12,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, Cell, Clear, HighlightSpacing, Paragraph, Row, Table, TableState, Wrap,
 };
@@ -1467,8 +1467,13 @@ impl TerminalSession {
                 )
             });
         let remote_state = remote_state(&session.remote);
+        let root_missing = report
+            .diagnostics
+            .iter()
+            .any(model::ScanDiagnostic::is_root_missing);
         let status = status_lines(
             report,
+            &session.home,
             complete,
             session.notice.as_deref(),
             session.message.as_deref().or(progress.as_deref()),
@@ -1503,8 +1508,13 @@ impl TerminalSession {
             .draw(|frame| {
                 let area = frame.area();
                 drawn = area;
-                let footer =
-                    footer_widget(bindings, view, area.width.saturating_sub(4), acknowledges);
+                let footer = footer_widget(
+                    bindings,
+                    view,
+                    area.width.saturating_sub(4),
+                    acknowledges,
+                    !report.rows.is_empty(),
+                );
                 let footer_height = footer.line_count(area.width.saturating_sub(4)) as u16;
                 let [header, source, search, _, table, status_area, footer_area] =
                     Layout::vertical([
@@ -1532,7 +1542,7 @@ impl TerminalSession {
                     header,
                 );
                 frame.render_widget(
-                    Paragraph::new(source_line(session)).style(dim()),
+                    Paragraph::new(source_line(session, report)).style(dim()),
                     padded(source),
                 );
                 let query = escape(&shown.query);
@@ -1565,16 +1575,23 @@ impl TerminalSession {
                 }
                 if visible_rows.is_empty() {
                     frame.render_widget(
-                        Paragraph::new(if !report.rows.is_empty() && !shown.query.is_empty() {
-                            "No matching repositories."
-                        } else if !complete {
-                            "Discovering local repositories…"
-                        } else if report.incomplete {
-                            "No repositories found so far; local scan is incomplete."
-                        } else {
-                            "No repositories found."
-                        }),
-                        padded(table),
+                        repository_table(&[], &names, &session.marks, home, table.width, None),
+                        table,
+                    );
+                    let message = if !report.rows.is_empty() && !shown.query.is_empty() {
+                        Text::raw("No matching repositories.")
+                    } else if !complete {
+                        Text::raw("Discovering local repositories…")
+                    } else if report.incomplete {
+                        Text::raw("No repositories found so far; local scan is incomplete.")
+                    } else {
+                        empty_inventory(session, root_missing)
+                    };
+                    let [_, body] =
+                        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(table);
+                    frame.render_widget(
+                        Paragraph::new(message).wrap(Wrap { trim: false }),
+                        padded(body),
                     );
                 } else {
                     frame.render_stateful_widget(
@@ -2046,6 +2063,45 @@ fn footer_style() -> Style {
     }
 }
 
+/// The body of a finished, complete scan that found nothing and has nothing declared.
+fn empty_inventory(session: &InventorySession, root_missing: bool) -> Text<'static> {
+    let root = home_relative(&session.root, &session.home);
+    let mut lines = vec![
+        Line::raw("No repositories yet."),
+        Line::raw(""),
+        Line::styled(
+            if root_missing {
+                format!("{root} does not exist yet and the configuration declares none.")
+            } else {
+                format!("{root} holds no Git repositories and the configuration declares none.")
+            },
+            dim(),
+        ),
+    ];
+    let mut next = Vec::new();
+    if let Some(key) = session.bindings.keys(Mode::Normal, Action::Add).first() {
+        next.push(Span::styled((*key).to_owned(), focus()));
+        next.push(Span::styled(
+            " adds one by reference or from your providers.",
+            dim(),
+        ));
+    }
+    if !session.remote.enabled() && session.remote_cached == 0 {
+        next.push(Span::styled(
+            if next.is_empty() {
+                "Nothing has been contacted."
+            } else {
+                " Nothing has been contacted."
+            },
+            dim(),
+        ));
+    }
+    if !next.is_empty() {
+        lines.push(Line::from(next));
+    }
+    Text::from(lines)
+}
+
 fn padded(area: Rect) -> Rect {
     area.inner(Margin {
         horizontal: 2,
@@ -2102,6 +2158,7 @@ fn footer_widget(
     view: View,
     width: u16,
     acknowledges: bool,
+    has_rows: bool,
 ) -> Paragraph<'static> {
     let first = |mode: Mode, action: Action| {
         bindings
@@ -2180,6 +2237,16 @@ fn footer_widget(
             (rows_hint(bindings, Mode::Inspection, false), "scroll"),
             (first(Mode::Inspection, Action::Cancel), "close"),
         ],
+        // With no rows only the actions that need none are offered.
+        View::Normal if !has_rows => [
+            (Action::Add, "add"),
+            (Action::Refresh, "refresh"),
+            (Action::Menu, "menu"),
+            (Action::Help, "help"),
+            (Action::Quit, "quit"),
+        ]
+        .map(|(action, label)| (first(Mode::Normal, action), label))
+        .to_vec(),
         View::Normal | View::Inspect => {
             let mut items = vec![(rows_hint(bindings, Mode::Normal, false), "rows")];
             items.extend(
@@ -2330,25 +2397,37 @@ fn provider_text(
     }
 }
 
-fn source_line(session: &InventorySession) -> String {
+fn source_line(session: &InventorySession, report: &InventoryReport) -> String {
     let remote = &session.remote;
-    if !remote.enabled() {
-        return match session.remote_cached {
-            0 => "Local + declarations · remote off".to_owned(),
-            cached => format!(
-                "Local + declarations · remote off · {} cached for this session",
-                counted(cached, "candidate", "candidates")
-            ),
-        };
+    let pending = report
+        .rows
+        .iter()
+        .filter(|row| {
+            row.branch == model::ObservationField::Pending
+                || row.changes == model::ObservationField::Pending
+        })
+        .count();
+    let local = match (session.complete, report.incomplete) {
+        (false, false) => "Local: scanning",
+        (false, true) => "Local: incomplete, still scanning",
+        (true, true) => "Local: incomplete",
+        (true, false) if pending > 0 || remote.enabled() => "Local: ready",
+        (true, false) => "Local + declarations",
+    };
+    let mut parts = vec![local.to_owned()];
+    if pending > 0 {
+        parts.push(format!("status: {pending} pending"));
     }
-    let mut parts = vec![format!(
-        "Local: {}",
-        if session.complete {
-            "ready"
-        } else {
-            "scanning"
+    if !remote.enabled() {
+        parts.push("remote off".to_owned());
+        if session.remote_cached > 0 {
+            parts.push(format!(
+                "{} cached for this session",
+                counted(session.remote_cached, "candidate", "candidates")
+            ));
         }
-    )];
+        return parts.join(" · ");
+    }
     if remote.providers().is_empty() {
         parts.push("no providers configured".to_owned());
     }
@@ -2365,6 +2444,7 @@ fn source_line(session: &InventorySession) -> String {
 #[allow(clippy::too_many_arguments)]
 fn status_lines(
     report: &InventoryReport,
+    home: &Path,
     complete: bool,
     notice: Option<&str>,
     message: Option<&str>,
@@ -2377,19 +2457,43 @@ fn status_lines(
     if let Some(notice) = notice {
         lines.push(Line::styled(format!("! {notice}"), warn()));
     }
+    let (notes, diagnostics): (Vec<_>, Vec<_>) = report
+        .diagnostics
+        .iter()
+        .partition(|diagnostic| diagnostic.is_root_missing());
+    // With no rows the empty table says that the root is missing.
+    if !report.rows.is_empty() {
+        for note in notes {
+            lines.push(Line::styled(
+                format!("{} does not exist yet", home_relative(&note.path, home)),
+                dim(),
+            ));
+        }
+    }
     if report.incomplete {
+        let reasons = diagnostics
+            .iter()
+            .map(|diagnostic| {
+                let path = home_relative(&diagnostic.path, home);
+                match diagnostic.message.strip_suffix(" ignored") {
+                    Some(kind) if !diagnostic.incomplete => {
+                        format!("{path} ignored: {}", escape(kind))
+                    }
+                    _ => format!(
+                        "{path} {}",
+                        escape(model::problem_reason(&diagnostic.message))
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
         lines.push(Line::styled(
-            format!(
-                "! partial scan: {} diagnostics; one or more paths could not be read",
-                report.diagnostics.len()
-            ),
+            format!("! Scan incomplete: {}", reasons.join(" · ")),
             warn(),
         ));
     }
-    let excluded = report
-        .diagnostics
+    let excluded = diagnostics
         .iter()
-        .filter(|diagnostic| !diagnostic.incomplete)
+        .filter(|diagnostic| !diagnostic.incomplete && !report.incomplete)
         .map(|diagnostic| {
             format!(
                 "{}: {}",
@@ -2409,18 +2513,12 @@ fn status_lines(
             format!("ignored repositories: {}", excluded.join(", ")),
             dim(),
         ));
-    } else if let Some(diagnostic) = report.diagnostics.first() {
-        lines.push(Line::styled(
-            format!(
-                "diagnostic: {}: {}",
-                escape(diagnostic.path.to_string_lossy()),
-                escape(&diagnostic.message)
-            ),
-            dim(),
-        ));
     }
     let state = match remote {
         _ if !complete => "Scanning local repositories…",
+        None if report.rows.is_empty() && !report.incomplete => {
+            "Scan complete · 0 repositories · 0 declarations"
+        }
         Some(RemoteState::Loading) => "Remote on · local rows stay usable while providers load",
         _ => "No active operation",
     };
@@ -2469,6 +2567,11 @@ fn status_lines(
         | View::Batch
         | View::QuitBatch
         | View::WorktreeBlocked => state.to_owned(),
+        View::Normal | View::Inspect
+            if complete && remote.is_none() && report.rows.is_empty() && !report.incomplete =>
+        {
+            state.to_owned()
+        }
         View::Normal | View::Inspect
             if compact && complete && remote.is_none() && !inspect.is_empty() =>
         {

@@ -616,7 +616,7 @@ fn include_archived_requires_remote_before_reading_the_config() {
 }
 
 #[test]
-fn a_missing_root_is_an_unreadable_path_and_exits_one() {
+fn a_missing_root_lists_as_empty_with_a_note_and_exits_zero() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
@@ -625,22 +625,118 @@ fn a_missing_root_is_an_unreadable_path_and_exits_one() {
         "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/repo\"\n",
     )
     .unwrap();
+    let note = "lager: ~/repos: root does not exist yet\n";
+    for command in ["status", "list", "ls"] {
+        let output = support::lager(&home, &config)
+            .arg(command)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stderr), note);
+        assert_eq!(
+            stdout(&output),
+            "repository  path              registration  checkout  origin               branch  changes\n\
+             repo        ~/repos/org/repo  explicit      missing   github.com/org/repo  —       —\n"
+        );
+    }
     let output = support::lager(&home, &config)
         .args(["status", "--json"])
         .stdin(Stdio::null())
         .output()
         .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), note);
+    let document = json(&output);
+    assert_eq!(document["complete"], true);
+    assert_eq!(document["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(document["rows"][0]["checkout"], "missing");
+    assert_eq!(document["problems"], json!([]));
+    assert_eq!(
+        document["notes"],
+        json!([{
+            "source": "scan",
+            "subject": home.join("repos").to_str().unwrap(),
+            "message": "root does not exist yet",
+        }])
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_root_symlink_lists_as_missing_and_a_link_to_a_file_is_a_problem() {
+    let fixture = empty_fixture("root = \"repos\"\n");
+    let root = fixture.root();
+    fs::remove_dir(&root).unwrap();
+    std::os::unix::fs::symlink(fixture.home.join("nowhere"), &root).unwrap();
+    let output = fixture.run(&["status", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "lager: ~/repos: root does not exist yet\n"
+    );
+    assert_eq!(
+        json(&output)["notes"][0]["message"],
+        "root does not exist yet"
+    );
+
+    fs::write(fixture.home.join("nowhere"), "a file\n").unwrap();
+    let output = fixture.run(&["status"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
-    let root = home.join("repos");
-    let message = "unreadable path: No such file or directory (os error 2)";
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "lager: ~/repos: root is not a directory\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_root_is_a_problem_and_exits_one() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture =
+        empty_fixture("root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/repo\"\n");
+    let root = fixture.root();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+    let output = fixture.run(&["status", "--json"]);
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+    if output.status.code() == Some(0) {
+        // Privileged users read through mode 000; the scan really is complete.
+        return;
+    }
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let message = "unreadable path: Permission denied (os error 13)";
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         format!("lager: ~/repos: {message}\n")
     );
     let document = json(&output);
     assert_eq!(document["complete"], false);
-    assert_eq!(document["rows"].as_array().unwrap().len(), 1);
-    assert_eq!(document["rows"][0]["checkout"], "missing");
+    assert_eq!(document["rows"][0]["checkout"], "unreadable");
+    assert_eq!(
+        document["problems"],
+        json!([{"source": "scan", "subject": root.to_str().unwrap(), "message": message}])
+    );
+    assert!(document.get("notes").is_none(), "{document}");
+}
+
+#[test]
+fn a_root_that_is_a_file_is_a_problem_and_exits_one() {
+    let fixture = empty_fixture("root = \"repos\"\n");
+    let root = fixture.root();
+    fs::remove_dir(&root).unwrap();
+    fs::write(&root, "not a directory\n").unwrap();
+    let message = "root is not a directory";
+    for command in ["status", "ls"] {
+        let output = fixture.run(&[command]);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!("lager: ~/repos: {message}\n")
+        );
+    }
+    let document = json(&fixture.run(&["status", "--json"]));
+    assert_eq!(document["complete"], false);
     assert_eq!(
         document["problems"],
         json!([{"source": "scan", "subject": root.to_str().unwrap(), "message": message}])

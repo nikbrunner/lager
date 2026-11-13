@@ -31,7 +31,7 @@ Lager selects the configuration path in this order:
 
 `list` and `ls` are visible aliases of `status`. All three names accept the same arguments, options, and configuration selection, and produce identical output and exit statuses.
 
-`status` needs no terminal. It scans the root the way `tui` does, through Git with optional locks off, and writes nothing to the configuration or to any repository. The table has the columns of the wide inventory grid (repository, path, registration, checkout, origin, branch, changes) with the same cell text, aligned with two spaces, never truncated. A repository the provider reports as archived reads `NAME [archived]` in the repository column. An empty inventory prints the header only. Each problem (an unreadable path, a failed Git observation, a failed provider) is one line on stderr, and the rows are still printed. See [status JSON](status-json.md) for the document.
+`status` needs no terminal. It scans the root the way `tui` does, through Git with optional locks off, and writes nothing to the configuration or to any repository. The table has the columns of the wide inventory grid (repository, path, registration, checkout, origin, branch, changes) with the same cell text, aligned with two spaces, never truncated. A repository the provider reports as archived reads `NAME [archived]` in the repository column. An empty inventory prints the header only. A root that does not exist yet, or a symlink to nothing, is an empty, complete scan: the declared rows read `missing`, stderr gets one note such as `lager: ~/repos: root does not exist yet`, and the exit status is `0`. A root that is a plain file, or a symlink to one, is a problem. Each problem (an unreadable path, a root that is not a directory, a failed Git observation, a failed provider) is one line on stderr, and the rows are still printed. See [status JSON](status-json.md) for the document.
 
 Repository arguments accept canonical IDs such as `github.com/org/project`, GitHub shorthand such as `org/project`, and full SCP, SSH, HTTP(S), or file clone URLs. GitHub shorthand becomes an SSH clone URL.
 
@@ -90,6 +90,22 @@ Discovery recurses through directories, prunes found Git roots, and excludes
 directory symlinks, linked worktrees, submodules and bare repositories. Unreadable
 paths produce partial-scan diagnostics. Pending, failed and stale observations
 remain distinct from clean status.
+
+The source line under the header says how far the local sources are:
+`Local + declarations · remote off` once the scan has read everything and every
+Git status is in, otherwise `Local: scanning`, `Local: incomplete, still
+scanning`, `Local: incomplete`, or `Local: ready` for a finished scan while Git
+status is pending or remote discovery is on, followed by `status: N pending` while Git
+observations are outstanding. A scan that could not read a path shows one
+warning line above the state, `! Scan incomplete:` with each unreadable path and
+its reason and each ignored repository (`PATH ignored: bare repository`); the
+failures are also listed in Session problems. An inventory with no rows and
+nothing declared says so in the table, names the root, and offers `a` to add a
+repository; its status line reads `Scan complete · 0 repositories · 0
+declarations` and its footer shows only the keys that act without a row. A root
+that does not exist yet is shown the same way, with `~/repos does not exist
+yet` in the table, or as a status line when declarations give the table rows;
+it is not a session problem.
 
 Press `R` to reload configuration and refresh local observations. Earlier
 observations remain marked stale until refreshed. Press `q` or Esc to cancel

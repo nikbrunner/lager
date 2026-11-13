@@ -17,6 +17,7 @@
 | `complete`       | boolean | `false` when a source did not finish: the scan could not read part of the root, or a provider failed with `--remote`. The rows then show only what was read. A failed Git observation leaves it `true`, so `problems` can be non-empty while `complete` is `true`. |
 | `rows`           | array   | One object per inventory row. `--registered` keeps the rows with a registration.                          |
 | `problems`       | array   | Every failure that makes the command exit `1`. Empty on success.                                          |
+| `notes`          | array   | Facts worth seeing that are not failures, in the shape of `problems`. Present only when there is one.     |
 
 Keys appear in the order listed here. Enumerations are lowercase snake_case strings. A value Lager does not know is `null`; every key is present on every row.
 
@@ -83,7 +84,11 @@ The table's origin column shows the normalized identity where the row has one; `
 | `subject` | string | The absolute path for `scan` and `probe`, the provider host for `provider`.                               |
 | `message` | string | The error as Lager received it.                                                                           |
 
-A `scan` or `provider` problem sets `complete` to `false`; a `probe` problem does not. A provider failure leaves the rows from every other provider in place.
+A `scan` or `provider` problem sets `complete` to `false`; a `probe` problem does not. A provider failure leaves the rows from every other provider in place. A root that exists but is not a directory is a `scan` problem with the message `root is not a directory`.
+
+## Notes
+
+The one note is a root that does not exist yet: `{"source": "scan", "subject": "/home/dev/repos", "message": "root does not exist yet"}`. The scan is then complete and empty, `complete` stays `true`, the exit status stays `0`, and stderr repeats the note as `lager: ~/repos: root does not exist yet`. Consumers of schema 2 that do not know `notes` can ignore it.
 
 ## Remote members
 

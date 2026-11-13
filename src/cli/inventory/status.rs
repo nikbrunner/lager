@@ -56,6 +56,12 @@ pub(crate) fn run(config_path: &Path, args: StatusArgs) -> i32 {
                 .map(|failure| Problem::path("probe", &failure.path, &failure.message)),
         )
         .collect::<Vec<_>>();
+    let notes = scan
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.is_root_missing())
+        .map(|diagnostic| Problem::path("scan", &diagnostic.path, &diagnostic.message))
+        .collect::<Vec<_>>();
     let mut report = match model::build_inventory(
         &LocalInventoryFilesystem,
         &config,
@@ -100,6 +106,7 @@ pub(crate) fn run(config_path: &Path, args: StatusArgs) -> i32 {
             complete,
             rows: rows.iter().map(|row| JsonRow::new(row, &config)).collect(),
             problems: &problems,
+            notes: &notes,
         };
         match serde_json::to_string(&document) {
             Ok(document) => document + "\n",
@@ -112,7 +119,7 @@ pub(crate) fn run(config_path: &Path, args: StatusArgs) -> i32 {
         )
     };
     let written = std::io::stdout().lock().write_all(stdout.as_bytes());
-    for problem in &problems {
+    for problem in notes.iter().chain(&problems) {
         let subject = match &problem.path {
             Some(path) => home_relative(path, &home),
             None => escape(&problem.subject),
@@ -154,6 +161,9 @@ struct Document<'a> {
     complete: bool,
     rows: Vec<JsonRow<'a>>,
     problems: &'a [Problem],
+    /// Facts worth seeing that are not failures; present only when there is one.
+    #[serde(skip_serializing_if = "<[Problem]>::is_empty")]
+    notes: &'a [Problem],
 }
 
 #[derive(Serialize)]

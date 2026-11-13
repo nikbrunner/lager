@@ -1003,7 +1003,7 @@ fn inventory_refresh_reconciles_deleted_checkouts_without_turning_incomplete_int
                     vec![
                         if incomplete { "unreadable" } else { "missing" },
                         if incomplete {
-                            "partial scan:"
+                            "Scan incomplete:"
                         } else {
                             "No active operation"
                         },
@@ -1056,9 +1056,8 @@ fn inventory_bare_probe_failure_is_partial_even_when_stderr_says_cancelled() {
         support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[(
             vec![
-                "partial scan:",
-                "could not inspect bare repository",
-                "cancelled",
+                "NORMAL · 0 rows · 1 problem",
+                "! Scan incomplete: ~/repos/bare.git cancelled",
             ],
             b"q".to_vec(),
         )],
@@ -1246,18 +1245,27 @@ fn inventory_discovery_failure_sets_exit_status_even_after_successful_refresh() 
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         let config = temp.path().join("config.toml");
-        fs::create_dir_all(&home).unwrap();
+        let root = home.join("repos");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+        let _restore = RestoreMode(root.clone());
         fs::write(&config, "root = \"repos\"\n").unwrap();
         let actions = if refresh {
             vec![
-                (vec!["partial scan:", "scan is incomplete"], b"R".to_vec()),
                 (
-                    vec!["absent: partial scan:", "No active operation"],
+                    vec!["Scan incomplete:", "scan is incomplete"],
+                    b"R".to_vec(),
+                ),
+                (
+                    vec!["absent: Scan incomplete:", "Scan complete · 0 repositories"],
                     b"q".to_vec(),
                 ),
             ]
         } else {
-            vec![(vec!["partial scan:", "scan is incomplete"], b"q".to_vec())]
+            vec![(
+                vec!["Scan incomplete:", "scan is incomplete"],
+                b"q".to_vec(),
+            )]
         };
         let transcript = run_inventory_pty_with_exit(
             support::lager(&home, &config).arg("tui"),
@@ -1267,14 +1275,244 @@ fn inventory_discovery_failure_sets_exit_status_even_after_successful_refresh() 
             1,
             |action| {
                 if refresh && action == 0 {
-                    fs::create_dir_all(home.join("repos")).unwrap();
+                    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
                 }
             },
         );
         if refresh {
-            assert!(!screen_text(&transcript, 24, 180).contains("partial scan:"));
+            assert!(!screen_text(&transcript, 24, 180).contains("Scan incomplete:"));
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_missing_root_is_empty_with_a_note_until_it_exists_and_exits_zero() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    let transcript = run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (
+                vec![
+                    "NORMAL · 0 rows",
+                    "~/repos does not exist yet",
+                    "absent: problem",
+                    "absent: Scan incomplete",
+                ],
+                b"R".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 0 rows", "absent: does not exist yet"],
+                b"q".to_vec(),
+            ),
+        ],
+        24,
+        80,
+        0,
+        |action| {
+            if action == 0 {
+                fs::create_dir_all(home.join("repos")).unwrap();
+            }
+        },
+    );
+    assert!(!screen_text(&transcript, 24, 80).contains("does not exist yet"));
+
+    fs::remove_dir(home.join("repos")).unwrap();
+    fs::write(
+        &config,
+        "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n",
+    )
+    .unwrap();
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("tui"),
+        &[(
+            vec![
+                "NORMAL · 1 row",
+                "  ~/repos does not exist yet",
+                "missing",
+                "absent: problem",
+            ],
+            b"q".to_vec(),
+        )],
+        24,
+        80,
+        0,
+        |_| {},
+    );
+}
+
+/// The Empty and Partial boards: an inventory with nothing in it, and one whose scan is still
+/// running behind an unreadable directory while Git status is pending.
+#[cfg(unix)]
+#[test]
+fn inventory_empty_and_partial_states_follow_the_canvas_at_both_sizes() {
+    for (rows, cols) in [(32u16, 132u16), (24, 80)] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let config = temp.path().join("config.toml");
+        fs::create_dir_all(home.join("repos")).unwrap();
+        fs::write(&config, "root = \"repos\"\n").unwrap();
+        let mut frame = String::new();
+        run_inventory_pty_with_exit_observing(
+            support::lager(&home, &config).arg("tui"),
+            &[(vec!["NORMAL · 0 rows", "Scan complete"], b"q".to_vec())],
+            rows,
+            cols,
+            0,
+            |_, _, screen| frame = screen.to_owned(),
+        );
+        let screen = screen_text(&frame, rows.into(), cols.into());
+        let lines = screen.lines().collect::<Vec<_>>();
+        let (rows, cols) = (usize::from(rows), usize::from(cols));
+        assert!(
+            lines[0].starts_with("  LAGER / inventory") && lines[0].ends_with("NORMAL · 0 rows"),
+            "{screen}"
+        );
+        assert_eq!(lines[1], "  Local + declarations · remote off", "{screen}");
+        assert_eq!(
+            lines[2], "  / Search repositories, paths, origins…",
+            "{screen}"
+        );
+        assert!(lines[4].trim_start().starts_with("repository"), "{screen}");
+        assert_eq!(lines[6], "  No repositories yet.", "{screen}");
+        assert_eq!(
+            lines[8], "  ~/repos holds no Git repositories and the configuration declares none.",
+            "{screen}"
+        );
+        assert_eq!(
+            lines[9],
+            "  a adds one by reference or from your providers. Nothing has been contacted.",
+            "{screen}"
+        );
+        assert_eq!(
+            lines[rows - 2],
+            "  Scan complete · 0 repositories · 0 declarations",
+            "{screen}"
+        );
+        assert_eq!(
+            lines[rows - 1],
+            "  a add  R refresh  m menu  ? help  q quit",
+            "{screen}"
+        );
+
+        let root = home.join("repos");
+        init_repo(
+            &root.join("org/alpha"),
+            "git@github.com:org/alpha.git",
+            true,
+        );
+        run_git(
+            temp.path(),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                root.join("mirror.git").to_str().unwrap(),
+            ],
+        );
+        let private = root.join("private");
+        fs::create_dir(&private).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o000)).unwrap();
+        let _restore = RestoreMode(private);
+        fs::write(
+            &config,
+            "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n",
+        )
+        .unwrap();
+        let tools = temp.path().join("tools");
+        fs::create_dir_all(&tools).unwrap();
+        fs::write(
+            tools.join("git"),
+            format!(
+                "#!/bin/sh\n/bin/sleep 1\nexec {} \"$@\"\n",
+                shell_word(support::real_tool("git").as_path())
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+        let mut frames = Vec::new();
+        run_inventory_pty_with_exit_observing(
+            support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
+            &[
+                (
+                    vec![
+                        "· 1 problem",
+                        "Local: incomplete, still scanning · status: ",
+                        "! Scan incomplete: ~/repos/private permission denied",
+                    ],
+                    Vec::new(),
+                ),
+                (
+                    // At 80 columns the status line is cut; Session problems lists the failure.
+                    if cols < 132 {
+                        vec!["Local: incomplete · remote off"]
+                    } else {
+                        vec![
+                            "Local: incomplete · remote off",
+                            "~/repos/mirror.git ignored: bare repository",
+                        ]
+                    },
+                    b"q".to_vec(),
+                ),
+            ],
+            rows as u16,
+            cols as u16,
+            1,
+            |_, _, screen| frames.push(screen.to_owned()),
+        );
+        for (frame, source) in frames.iter().zip([
+            "  Local: incomplete, still scanning · status: ",
+            "  Local: incomplete · remote off",
+        ]) {
+            let screen = screen_text(frame, rows, cols);
+            let lines = screen.lines().collect::<Vec<_>>();
+            assert!(lines[0].ends_with("· 1 problem"), "{screen}");
+            assert!(lines[1].starts_with(source), "{screen}");
+            assert!(lines[2].starts_with("  / Search"), "{screen}");
+            assert!(lines[4].trim_start().starts_with("repository"), "{screen}");
+            assert!(
+                lines[rows - 3].starts_with("  ! Scan incomplete: "),
+                "{screen}"
+            );
+            assert!(lines[rows - 1].contains("q quit"), "{screen}");
+        }
+        let pending = screen_text(&frames[0], rows, cols);
+        assert!(
+            pending
+                .lines()
+                .nth(1)
+                .unwrap()
+                .ends_with("pending · remote off"),
+            "{pending}"
+        );
+        assert!(pending.contains("pending"), "{pending}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_root_that_is_a_file_is_a_session_problem() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join("repos"), "not a directory\n").unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("tui"),
+        &[(
+            vec!["NORMAL · 0 rows · 1 problem", "root is not a directory"],
+            b"q".to_vec(),
+        )],
+        24,
+        80,
+        1,
+        |_| {},
+    );
 }
 
 #[cfg(unix)]
@@ -1298,7 +1536,10 @@ fn inventory_starts_offline_and_rejects_archives_without_remote_before_raw_mode(
         support::clear_outbound_requests();
         let transcript = run_inventory_pty_with_size(
             support::lager(&home, &config).arg(name),
-            &["No active operation", "No repositories found"],
+            &[
+                "Scan complete · 0 repositories · 0 declarations",
+                "No repositories yet.",
+            ],
             b"q",
             24,
             132,
@@ -1309,7 +1550,7 @@ fn inventory_starts_offline_and_rejects_archives_without_remote_before_raw_mode(
             screen_has_pair(&plain, "q quit") && screen_has_pair(&plain, "R refresh"),
             "{plain}"
         );
-        assert!(screen_has_pair(&plain, "/ search"), "{plain}");
+        assert!(screen_has_pair(&plain, "a add"), "{plain}");
         for unavailable in ["all actions", "Add to", "Navigation is ready"] {
             assert!(!plain.contains(unavailable), "{plain}");
         }
@@ -1953,7 +2194,7 @@ fn inventory_keeps_partial_summary_visible_when_rows_overflow_the_viewport() {
     fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
     let transcript = run_inventory_pty_with_exit(
         support::lager(&home, &config).arg("tui"),
-        &[(vec!["partial scan:"], b"q".to_vec())],
+        &[(vec!["Scan incomplete:"], b"q".to_vec())],
         12,
         220,
         1,
@@ -1962,7 +2203,7 @@ fn inventory_keeps_partial_summary_visible_when_rows_overflow_the_viewport() {
     fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o755)).unwrap();
     let plain = screen_text(&transcript, 12, 220);
     assert!(
-        plain.contains("partial scan:"),
+        plain.contains("Scan incomplete:"),
         "summary was clipped:\n{plain}"
     );
     assert!(
@@ -2009,7 +2250,7 @@ fn inventory_informational_git_file_exclusions_do_not_make_scan_partial() {
     let plain = screen_text(&transcript, 24, 132);
     assert!(plain.contains("ignored repositories:"));
     assert!(
-        !plain.contains("partial scan:"),
+        !plain.contains("Scan incomplete:"),
         "exclusions became partial:\n{plain}"
     );
 }
@@ -2118,10 +2359,10 @@ fn inventory_excludes_git_file_entries_reports_unreadable_paths_escapes_controls
         support::lager(&home, &config).arg("tui"),
         &[(
             vec![
-                "ignored repositories:",
+                "ignored: linked worktree or submodule",
                 "reachable-submodule",
                 "linked-worktree",
-                "partial scan:",
+                "Scan incomplete:",
                 "\\n",
                 "\\t",
                 "\\x1b",
@@ -2137,7 +2378,8 @@ fn inventory_excludes_git_file_entries_reports_unreadable_paths_escapes_controls
 
     let plain = screen_text(&transcript, 80, 220);
     assert!(
-        plain.contains("ignored repositories:") && plain.contains("reachable-submodule"),
+        plain.contains("ignored: linked worktree or submodule")
+            && plain.contains("reachable-submodule"),
         "reachable submodule was not independently excluded:\n{plain}"
     );
     assert!(
@@ -2145,7 +2387,7 @@ fn inventory_excludes_git_file_entries_reports_unreadable_paths_escapes_controls
         "linked worktree was not independently excluded:\n{plain}"
     );
     assert!(
-        plain.contains("partial scan:"),
+        plain.contains("Scan incomplete:"),
         "unreadable scan diagnostic was not counted in the persistent summary:\n{plain}"
     );
     assert!(
@@ -2699,7 +2941,7 @@ fn inventory_shows_unknown_config_warnings_without_corrupting_the_terminal() {
             (
                 vec![
                     "warning: unknown config key `future_key`",
-                    "Path and origin:",
+                    "Scan complete · 0 repositories",
                 ],
                 b"R".to_vec(),
             ),
@@ -2865,7 +3107,10 @@ fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
     let transcript = run_inventory_pty_with_exit_observing(
         support::lager(&home, &config).arg("tui"),
         &[
-            (vec!["Path and origin:", "pair: ? help"], b"?".to_vec()),
+            (
+                vec!["Scan complete · 0 repositories", "pair: ? help"],
+                b"?".to_vec(),
+            ),
             (
                 vec!["Keyboard / effective bindings", "j/k ↑/↓", "absent: q/Esc"],
                 b"x".to_vec(),
@@ -3076,7 +3321,7 @@ fn inventory_bindings_survive_symlinked_registration_and_show_direct_actions() {
         support::lager(&home, &config).arg("tui"),
         &[
             (
-                vec!["No repositories found", "pair: x refresh"],
+                vec!["No repositories yet.", "pair: x refresh"],
                 b"g".to_vec(),
             ),
             (vec!["Register unavailable: no row"], b"?".to_vec()),
@@ -3584,7 +3829,7 @@ fn inventory_menu_scrolls_with_visible_title_and_hints_after_resize() {
     run_inventory_pty_with_exit_observing(
         support::lager(&home, &config).arg("tui"),
         &[
-            (vec!["Path and origin:"], b"m".to_vec()),
+            (vec!["Scan complete · 0 repositories"], b"m".to_vec()),
             (
                 vec!["All actions", "Inspect repository"],
                 b"\x1b[6~\x1b[6~?".to_vec(),
@@ -3774,7 +4019,7 @@ fn inventory_inspect_keeps_originless_conflict_and_unreadable_facts_distinct() {
             _ => fs::set_permissions(&repository, fs::Permissions::from_mode(0o000)).unwrap(),
         }
         let ready = if case == "unreadable" {
-            "partial scan:"
+            "Scan incomplete:"
         } else {
             "Path and origin:"
         };
@@ -3855,7 +4100,7 @@ down = ["Ctrl+a", "Ctrl+b", "Ctrl+d", "Ctrl+e", "Ctrl+f", "Ctrl+g", "Ctrl+h", "C
     run_inventory_pty_actions(
         support::lager(&home, &config).arg("tui"),
         &[
-            (vec!["Path and origin:"], b"?".to_vec()),
+            (vec!["Scan complete · 0 repositories"], b"?".to_vec()),
             (vec!["Keyboard / effective bindings", "Ctrl+y"], vec![17]),
         ],
         24,
@@ -4495,7 +4740,10 @@ fn inventory_session_problems_list_every_failure_behind_exit_one() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
-    fs::create_dir_all(&home).unwrap();
+    let root = home.join("repos");
+    fs::create_dir_all(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+    let _restore = RestoreMode(root);
     fs::write(
         &config,
         "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n",
@@ -4508,7 +4756,7 @@ fn inventory_session_problems_list_every_failure_behind_exit_one() {
         &[
             (
                 vec![
-                    "partial scan:",
+                    "Scan incomplete:",
                     "NORMAL · 1 row · 1 problem",
                     "absent: Scanning",
                 ],
@@ -4523,7 +4771,7 @@ fn inventory_session_problems_list_every_failure_behind_exit_one() {
                     "PROBLEMS · 1 row · 1 problem",
                     "Session problems / 1",
                     "pair: scan ~/repos:",
-                    "~/repos: no such file or directory ·",
+                    "~/repos: permission denied ·",
                     "Quit returns 1 because problems occurred in this session.",
                     "Declined confirmations, cancellations and missing optional tools are not",
                     "j/k ↑/↓ scroll · Esc close",
@@ -5242,14 +5490,14 @@ fn inventory_help_scrolls_to_every_mode_and_the_keyless_actions_at_80_columns() 
         support::lager(&home, &config).arg("tui"),
         &[
             (
-                vec!["No repositories found.", "Path and origin:"],
+                vec!["No repositories yet.", "Scan complete · 0 repositories"],
                 b"?".to_vec(),
             ),
             (
                 vec![
                     "Normal mode",
                     "absent: No default key:",
-                    "No active operation",
+                    "Scan complete · 0 repositories",
                 ],
                 b"\x1b[6~".to_vec(),
             ),
@@ -5259,7 +5507,7 @@ fn inventory_help_scrolls_to_every_mode_and_the_keyless_actions_at_80_columns() 
                     "pair: confirm j/k",
                     "No default key: Register, Unregister",
                     "absent: No key in",
-                    "No active operation",
+                    "Scan complete · 0 repositories",
                 ],
                 b"\x1b".to_vec(),
             ),
@@ -8642,6 +8890,17 @@ fn output(command: &mut Command) -> std::process::Output {
 #[cfg(unix)]
 static TRANSCRIPT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Gives a directory made unreadable by a test its mode back, so the tempdir can drop it.
+#[cfg(unix)]
+struct RestoreMode(std::path::PathBuf);
+
+#[cfg(unix)]
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+    }
+}
+
 #[cfg(unix)]
 fn run_inventory_pty_with_size(
     command: &mut Command,
@@ -11469,7 +11728,7 @@ fn inventory_remote_without_providers_starts_and_says_so() {
         support::lager(&home, &config).args(["tui", "--remote"]),
         &[
             "Local: ready · no providers configured",
-            "No repositories found",
+            "No repositories yet.",
         ],
         b"q",
         24,
