@@ -237,7 +237,7 @@ impl Document {
     }
 }
 
-fn branch_label(branch: Option<&str>, head: Option<&str>) -> String {
+pub(super) fn branch_label(branch: Option<&str>, head: Option<&str>) -> String {
     match (branch, head) {
         (Some(branch), _) => branch
             .strip_prefix("refs/heads/")
@@ -368,7 +368,7 @@ fn print_blockers(blockers: &[Blocker]) {
     }
 }
 
-fn losses_label(losses: &WorktreeLosses) -> String {
+pub(super) fn losses_label(losses: &WorktreeLosses) -> String {
     let count = |count: usize, noun: &str| {
         (count > 0).then(|| format!("{count} {noun} file{}", if count == 1 { "" } else { "s" }))
     };
@@ -388,7 +388,7 @@ fn losses_label(losses: &WorktreeLosses) -> String {
 }
 
 /// What stays after the removal: the branch, or the ref that holds a detached commit.
-fn kept_label(inspection: &RemovalInspection) -> String {
+pub(super) fn kept_label(inspection: &RemovalInspection) -> String {
     let label = branch_label(inspection.branch.as_deref(), inspection.head.as_deref());
     match (&inspection.branch, &inspection.protected_by) {
         (Some(_), _) => match inspection.unpushed {

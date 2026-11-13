@@ -135,6 +135,15 @@ pub fn list<G: WorktreeGit, F: WorktreeFilesystem>(
     WorktreeListing { worktrees, errors }
 }
 
+/// The local state a removal of a listed working tree would delete; `None` for a prunable
+/// entry, whose directory is absent.
+pub fn local_changes<G: WorktreeGit>(
+    git: &G,
+    record: &WorktreeRecord,
+) -> Option<Result<WorktreeLosses, String>> {
+    (!record.prunable).then(|| git.local_state(&record.path).map(|state| state.losses))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchChoice<'a> {
     /// A new branch named after the worktree.
@@ -204,6 +213,30 @@ pub fn check_request<G: WorktreeGit>(git: &G, request: &AddRequest<'_>) -> Resul
         return Err(format!("invalid branch name: {branch}"));
     }
     Ok(())
+}
+
+/// The request a bare name stands for: the local branch of that name when it exists, else a
+/// new branch of that name.
+pub fn request_named<'a, G: WorktreeGit>(
+    git: &G,
+    repository: &Repository,
+    name: &'a str,
+) -> Result<AddRequest<'a>, String> {
+    let named = AddRequest {
+        name,
+        branch: BranchChoice::Named,
+        start: None,
+        path: None,
+    };
+    check_request(git, &named)?;
+    Ok(if git.branch_exists(&repository.primary, name)? {
+        AddRequest {
+            branch: BranchChoice::Existing(name),
+            ..named
+        }
+    } else {
+        named
+    })
 }
 
 /// Validates a creation without creating anything.
@@ -677,6 +710,27 @@ fn absent<G: WorktreeGit, F: WorktreeFilesystem>(
             Some("if Git still lists it, run inside its repository: git worktree prune".to_owned()),
         ),
     }
+}
+
+/// What a removal that Git did not finish left behind, read after it returned.
+pub fn removal_remains<G: WorktreeGit, F: WorktreeFilesystem>(
+    git: &G,
+    filesystem: &F,
+    confirmed: &RemovalInspection,
+) -> Vec<String> {
+    let path = &confirmed.path;
+    let mut remaining = Vec::new();
+    if filesystem.kind(path) != Ok(PathKind::Missing) {
+        remaining.push(format!("directory {}", path.display()));
+    }
+    let listed = confirmed
+        .primary
+        .as_deref()
+        .map(|primary| git.entries(primary));
+    if !matches!(&listed, Some(Ok(entries)) if entries.iter().all(|entry| entry.path != *path)) {
+        remaining.push(format!("worktree metadata for {}", path.display()));
+    }
+    remaining
 }
 
 /// Why a confirmed removal did not run.

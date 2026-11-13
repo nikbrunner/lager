@@ -131,7 +131,7 @@ A canonical ID for a custom host requires a matching provider entry. Full clone 
 ## Inventory key maps
 
 Shortcuts live under `[inventory.keys.<mode>]`. The modes are `normal`, `menu`,
-`search`, `input`, `confirmation` and `inspection`. Omitted actions inherit their
+`search`, `input`, `confirmation`, `inspection` and `worktrees`. Omitted actions inherit their
 defaults; an explicit list replaces every default key for that action.
 
 ```toml
@@ -148,7 +148,7 @@ page_down = ["x", "PageDown"]
 ```
 
 Normal actions are `up`, `down`, `refresh`, `search`, `clear_search`, `inspect`,
-`menu`, `mark`, `add`, `remove`, `help` and `quit`. `register`, `unregister`,
+`menu`, `mark`, `add`, `remove`, `worktrees` (default `w`), `help` and `quit`. `register`, `unregister`,
 `clone`, `clone_register`, `remove_unregister`, `copy`, `open`, `remote`, `retry`
 and `archives` have no default key. Bound to a key, each runs its menu entry on
 the marked rows or the current row, with the same previews, eligibility and
@@ -164,6 +164,13 @@ Menu, Inspect, Help and the batch preview default to Esc/q for cancel and Ctrl-Q
 for quit. Normal
 mode uses q/Esc for quit. To bind popup quit to q explicitly, also set
 `cancel = ["Esc"]` in that mode so the actions do not collide.
+
+Worktrees drives the list of the Worktrees popup: navigation, paging, `add`
+(default `a`), `remove` (default `r`), `copy` (default `c`), accept and cancel,
+which both close it, help and quit, with the popup defaults for those. Its name
+form uses the input settings, its plan and its removal summary use the
+confirmation settings, and its blocker view scrolls with the inspection
+navigation keys and closes with the inspection accept and cancel keys.
 
 Search uses accept, cancel, help and quit, with Enter, Esc, F1 and Ctrl-Q as
 defaults. Its letters remain text. Confirmation settings drive the batch preview:
@@ -188,10 +195,11 @@ actions:
 [inventory.keys.normal] binds x to remove and to clone
 ```
 
-Four defaults give way to an explicit key of the same mode instead of colliding:
-`copy` (`c`) in inspection, and `acknowledge` (Space), cancel's `q` and quit's
-Ctrl-Q in confirmation. `copy` and `acknowledge` then have no key in that mode,
-and Help says so. When Ctrl-Q goes to another confirmation action and quit has no
+Eight defaults give way to an explicit key of the same mode instead of colliding:
+`worktrees` (`w`) in normal, `add` (`a`), `remove` (`r`) and `copy` (`c`) in
+worktrees, `copy` (`c`) in inspection, and `acknowledge` (Space), cancel's `q`
+and quit's Ctrl-Q in confirmation. The yielding action then has no key in that
+mode, and Help says so; Worktrees… in the menu still opens the popup. When Ctrl-Q goes to another confirmation action and quit has no
 explicit list, quit moves to `q` and cancel keeps Esc; if `q` is taken as well,
 the map is rejected because quit is unreachable.
 

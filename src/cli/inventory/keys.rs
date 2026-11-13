@@ -13,6 +13,7 @@ pub(super) enum Mode {
     Input,
     Confirmation,
     Inspection,
+    Worktrees,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -44,6 +45,7 @@ pub(super) enum Action {
     Retry,
     Archives,
     Acknowledge,
+    Worktrees,
 }
 
 impl Action {
@@ -76,6 +78,7 @@ impl Action {
             Self::Retry => "retry",
             Self::Archives => "archives",
             Self::Acknowledge => "acknowledge",
+            Self::Worktrees => "worktrees",
         }
     }
 
@@ -105,6 +108,7 @@ impl Action {
                     | Self::Remote
                     | Self::Retry
                     | Self::Archives
+                    | Self::Worktrees
             ),
             Mode::Menu => matches!(
                 self,
@@ -148,12 +152,30 @@ impl Action {
                     | Self::Help
                     | Self::Quit
             ),
+            Mode::Worktrees => matches!(
+                self,
+                Self::Up
+                    | Self::Down
+                    | Self::PageUp
+                    | Self::PageDown
+                    | Self::Add
+                    | Self::Remove
+                    | Self::Copy
+                    | Self::Accept
+                    | Self::Cancel
+                    | Self::Help
+                    | Self::Quit
+            ),
         }
     }
 }
 
 /// Defaults that yield to an explicit key of the same mode, as (mode, action, key).
-const LATE_DEFAULTS: [(Mode, Action, &str); 4] = [
+const LATE_DEFAULTS: [(Mode, Action, &str); 8] = [
+    (Mode::Normal, Action::Worktrees, "w"),
+    (Mode::Worktrees, Action::Add, "a"),
+    (Mode::Worktrees, Action::Remove, "r"),
+    (Mode::Worktrees, Action::Copy, "c"),
     (Mode::Inspection, Action::Copy, "c"),
     (Mode::Confirmation, Action::Acknowledge, "Space"),
     (Mode::Confirmation, Action::Cancel, "q"),
@@ -176,6 +198,7 @@ impl Bindings {
             ("input", Mode::Input),
             ("confirmation", Mode::Confirmation),
             ("inspection", Mode::Inspection),
+            ("worktrees", Mode::Worktrees),
         ];
         for mode in overrides.keys() {
             if !modes.iter().any(|(name, _)| name == mode) {
@@ -186,7 +209,10 @@ impl Bindings {
         let mut config = BTreeMap::new();
         for (name, mode) in modes {
             let typing = matches!(mode, Mode::Search | Mode::Input);
-            let popup = matches!(mode, Mode::Menu | Mode::Inspection | Mode::Confirmation);
+            let popup = matches!(
+                mode,
+                Mode::Menu | Mode::Inspection | Mode::Confirmation | Mode::Worktrees
+            );
             let mut defaults: Vec<(Action, Vec<&str>)> = vec![
                 (Help, vec![if typing { "F1" } else { "?" }]),
                 (Quit, vec![if typing || popup { "Ctrl+q" } else { "q" }]),
@@ -214,6 +240,7 @@ impl Bindings {
                     (Remote, vec![]),
                     (Retry, vec![]),
                     (Archives, vec![]),
+                    (Worktrees, vec!["w"]),
                 ]);
             } else {
                 defaults.extend([
@@ -233,6 +260,9 @@ impl Bindings {
                 }
                 if mode == Mode::Confirmation {
                     defaults.push((Acknowledge, vec!["Space"]));
+                }
+                if mode == Mode::Worktrees {
+                    defaults.extend([(Add, vec!["a"]), (Remove, vec!["r"]), (Copy, vec!["c"])]);
                 }
                 if mode == Mode::Menu {
                     // These inherit normal-mode shortcuts unless the menu map explicitly

@@ -302,7 +302,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
             &["  j/k rows  / search  a add  Enter inspect  R refresh  m menu  ? help  q quit"]
         } else {
             &[
-                "  j/k rows  / search  Space mark  a add  r remove  Enter inspect  R refresh  m menu  ? help  q quit",
+                "  j/k rows  / search  Space mark  a add  r remove  w worktrees  Enter inspect  R refresh  m menu  ? help  q quit",
             ]
         };
         let status = rows - 1 - footer.len();
@@ -4425,10 +4425,8 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
                 vec!["Open origin unavailable: no URL opener found"],
                 root_entry(4),
             ),
-            (
-                vec!["Worktrees are unavailable in this build"],
-                root_entry(5),
-            ),
+            (vec!["Worktrees / alpha", "WORKTREES"], b"\x1b".to_vec()),
+            (vec!["NORMAL", "absent: Worktrees /"], root_entry(5)),
             (
                 vec![
                     "Selection / 0 marked",
@@ -9223,4 +9221,1164 @@ fn styled_screen(input: &str, rows: usize, cols: usize) -> Vec<Vec<(char, bool)>
         }
     }
     screen
+}
+
+/// `home/repos/org/core` with an origin and no linked worktree; returns home, config, core.
+#[cfg(unix)]
+fn worktree_fixture(
+    temp: &std::path::Path,
+    settings: &str,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let home = temp.join("home");
+    let config = temp.join("config.toml");
+    fs::create_dir_all(temp).unwrap();
+    fs::write(&config, format!("root = \"repos\"\n{settings}")).unwrap();
+    let core = home.join("repos/org/core");
+    tracked_repo(&core, "git@github.com:org/core.git");
+    (home, config, core)
+}
+
+/// Adds `core.worktrees/<name>` beside the primary through Git itself.
+#[cfg(unix)]
+fn linked_worktree(core: &std::path::Path, name: &str, args: &[&str]) -> std::path::PathBuf {
+    let path = core.parent().unwrap().join("core.worktrees").join(name);
+    let mut command = vec!["worktree", "add", "-q"];
+    command.extend(args);
+    command.push(path.to_str().unwrap());
+    run_git(core, &command);
+    path
+}
+
+#[cfg(unix)]
+fn git_stdout(directory: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .current_dir(directory)
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+#[cfg(unix)]
+const POPUP_READY: [&str; 3] = ["NORMAL · 1 row", "absent: Scanning", "selected: core"];
+#[cfg(unix)]
+const POPUP_FOOTER: &str = "j/k ↑/↓ select · a add worktree… · r remove · c copy path · Esc close";
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_lists_every_working_tree_and_copies_the_selected_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    let hotfix = linked_worktree(&core, "hotfix", &["-b", "hotfix"]);
+    // Created outside Lager with a control character in its directory name.
+    let odd = linked_worktree(&core, "odd\tname", &["-b", "odd"]);
+    let pinned = linked_worktree(&core, "pinned", &["--detach"]);
+    run_git(
+        &core,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "reviewing on\tlaptop",
+            pinned.to_str().unwrap(),
+        ],
+    );
+    let review = linked_worktree(&core, "review-41", &["-b", "feature/login"]);
+    fs::write(review.join("README"), "modified\n").unwrap();
+    fs::write(review.join("notes"), "untracked\n").unwrap();
+    let spike = home.join("scratch/core-spike");
+    run_git(
+        &core,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "dev/spike",
+            spike.to_str().unwrap(),
+        ],
+    );
+    fs::remove_dir_all(&spike).unwrap();
+    let detached = format!(
+        "detached {}",
+        git_stdout(&core, &["rev-parse", "--short=7", "HEAD"])
+    );
+    let tools = temp.path().join("tools");
+    let copied = temp.path().join("copied");
+    desktop_stubs(
+        &tools,
+        &["pbcopy", "wl-copy", "xclip", "xsel", "clip"],
+        &format!("exec cat > {}", shell_word(&copied)),
+    );
+
+    let mut values = Vec::new();
+    run_inventory_pty_actions_with_hook(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"w".to_vec()),
+            (
+                vec![
+                    "WORKTREES · 1 row",
+                    "Worktrees / core",
+                    "github.com/org/core · 5 linked worktrees · listed by Git, including ones placed elsewhere",
+                    "pair: ~/repos/org/core main",
+                    "primary · clean",
+                    "pair: ~/repos/org/core.worktrees/hotfix hotfix",
+                    "pair: hotfix clean",
+                    "pair: ~/repos/org/core.worktrees/odd\\tname odd",
+                    "pair: ~/repos/org/core.worktrees/pinned detached",
+                    &detached,
+                    "locked: reviewing on\\tlaptop",
+                    "pair: ~/repos/org/core.worktrees/review-41 feature/login",
+                    "1 modified, 1 untracked",
+                    "pair: ~/scratch/core-spike dev/spike",
+                    "prunable: gitdir file points",
+                    "core · primary checkout",
+                    "The primary checkout is removed from the table, not here, and stays blocked while linked",
+                    POPUP_FOOTER,
+                    "Worktrees target the current row · marks are not used",
+                ],
+                b"r".to_vec(),
+            ),
+            (
+                vec![
+                    "Remove unavailable: the primary checkout is removed from the table, not here",
+                    "Worktrees / core",
+                    "absent: Remove worktree",
+                ],
+                b"jc".to_vec(),
+            ),
+            (
+                vec![
+                    "Copied path of hotfix",
+                    "hotfix · r removes it after listing its losses · branch hotfix is kept",
+                ],
+                b"jc".to_vec(),
+            ),
+            (
+                vec![
+                    "Copied path of odd\\tname",
+                    "odd\\tname · r removes it after listing its losses · branch odd is kept",
+                ],
+                b"j".to_vec(),
+            ),
+            (
+                vec!["pinned · locked: reviewing on\\tlaptop · r reports the blocker"],
+                b"jj".to_vec(),
+            ),
+            (
+                vec![
+                    "core-spike · prunable: gitdir file points to non-existent location · r reports the blocker",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Worktrees /", "selected: core"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        |action| {
+            if matches!(action, 3 | 4) {
+                values.push(fs::read(&copied).unwrap());
+            }
+        },
+    );
+    // The clipboard gets the original bytes, the tab included.
+    assert_eq!(
+        values,
+        [&hotfix, &odd].map(|path| fs::canonicalize(path)
+            .unwrap()
+            .as_os_str()
+            .as_encoded_bytes()
+            .to_vec())
+    );
+
+    // 80×24: every working tree, the hints and the status line stay on screen.
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"w".to_vec()),
+            (
+                vec![
+                    "Worktrees / core",
+                    "5 linked worktrees",
+                    "primary · clean",
+                    "odd\\tname",
+                    "pair: hotfix clean",
+                    &detached,
+                    "feature/login",
+                    "1 modified, 1 untracked",
+                    "core-spike",
+                    "prunable",
+                    "The primary checkout is removed from the table, not here",
+                    POPUP_FOOTER,
+                    "Worktrees target the current row · marks are not used",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Worktrees /", "selected: core"],
+                b"q".to_vec(),
+            ),
+        ],
+        24,
+        80,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_adds_a_worktree_through_input_and_plan() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    let created = core.parent().unwrap().join("core.worktrees/fix");
+
+    let transcript = run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"w".to_vec()),
+            (
+                vec!["Worktrees / core", "0 linked worktrees"],
+                b"a".to_vec(),
+            ),
+            (
+                vec![
+                    "INPUT · 1 row",
+                    "Add worktree / core",
+                    "Worktree name",
+                    "Nothing is created yet",
+                    "pair: plan Enter",
+                    "pair: Cancel Esc",
+                ],
+                b"a/b\r".to_vec(),
+            ),
+            (
+                vec!["Rejected: NAME is one path component", "absent: / plan"],
+                b"\x7f\x7f\x7fa..b\r".to_vec(),
+            ),
+            // Git's own answer to a name it refuses never reaches the screen.
+            (
+                vec!["Rejected: invalid branch name: a..b", "absent: / plan"],
+                b"\x7f\x7f\x7f\x7ffix\r".to_vec(),
+            ),
+            (
+                vec![
+                    "CONFIRM · 1 row",
+                    "Add worktree / plan",
+                    "pair: path ~/repos/org/core.worktrees/fix",
+                    "pair: branch fix",
+                    "fix · new, at ",
+                    "pair: worktree default",
+                    "Back to name",
+                    "Nothing changes until you choose",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Created worktree ~/repos/org/core.worktrees/fix on new branch fix",
+                    "WORKTREES · 1 row",
+                    "1 linked worktree ·",
+                    "pair: ~/repos/org/core.worktrees/fix fix",
+                    "absent: Add worktree",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Worktrees /", "selected: core"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    assert!(
+        transcript.contains("Preparing worktree (new branch 'fix')"),
+        "{transcript}"
+    );
+    assert!(!transcript.contains("fatal:"), "{transcript}");
+    assert_screen_left(&transcript);
+    assert_eq!(
+        git_stdout(&created, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "fix"
+    );
+
+    // An existing local branch of that name is checked out, and `worktree_root` places it.
+    let (home, config, core) =
+        worktree_fixture(&temp.path().join("placed"), "worktree_root = \"wt\"\n");
+    run_git(&core, &["branch", "topic"]);
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"wa".to_vec()),
+            (vec!["Add worktree / core"], b"topic\r".to_vec()),
+            (
+                vec![
+                    "Add worktree / plan",
+                    "pair: path ~/wt/org/core.worktrees/topic",
+                    "pair: branch topic",
+                    "existing",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Created worktree ~/wt/org/core.worktrees/topic on branch topic",
+                    "pair: ~/wt/org/core.worktrees/topic topic",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Worktrees /", "selected: core"],
+                b"q".to_vec(),
+            ),
+        ],
+        24,
+        80,
+    );
+    assert_eq!(
+        git_stdout(
+            &home.join("wt/org/core.worktrees/topic"),
+            &["rev-parse", "--abbrev-ref", "HEAD"]
+        ),
+        "topic"
+    );
+}
+
+/// `core.worktrees/draft` on branch `draft` with one modified and one untracked file.
+#[cfg(unix)]
+fn dirty_worktree(core: &std::path::Path) -> std::path::PathBuf {
+    let draft = linked_worktree(core, "draft", &["-b", "draft"]);
+    fs::write(draft.join("README"), "modified\n").unwrap();
+    fs::write(draft.join("notes"), "untracked\n").unwrap();
+    draft
+}
+
+#[cfg(unix)]
+const LOSS_CONFIRMATION: [&str; 9] = [
+    "CONFIRM · 1 row",
+    "Remove worktree / draft",
+    "pair: path ~/repos/org/core.worktrees/draft",
+    "draft · kept",
+    "1 modified file, 1 untracked file",
+    "pair: Cancel default",
+    "Accept these losses and remove this worktree",
+    "Nothing changes until you confirm",
+    "absent: Worktrees / core",
+];
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_removes_a_worktree_with_losses_only_after_yes() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    let draft = dirty_worktree(&core);
+
+    run_inventory_pty_actions_with_hook(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"wj".to_vec()),
+            (
+                vec!["draft · r removes it after listing its losses · branch draft is kept"],
+                b"r".to_vec(),
+            ),
+            // Enter on the default keeps the worktree.
+            (LOSS_CONFIRMATION.to_vec(), b"\r".to_vec()),
+            (
+                vec![
+                    "Remove cancelled · nothing changed",
+                    "Worktrees / core",
+                    "absent: Remove worktree /",
+                ],
+                b"r".to_vec(),
+            ),
+            (LOSS_CONFIRMATION.to_vec(), b"j\r".to_vec()),
+            (
+                vec![
+                    "Removed worktree ~/repos/org/core.worktrees/draft · branch draft kept",
+                    "WORKTREES · 1 row",
+                    "0 linked worktrees",
+                    "absent: Remove worktree /",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Worktrees /", "selected: core"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        |action| {
+            if action == 3 || action == 4 {
+                assert_eq!(
+                    fs::read_to_string(draft.join("notes")).unwrap(),
+                    "untracked\n"
+                );
+            }
+        },
+    );
+    assert!(!draft.exists());
+    assert_eq!(git_stdout(&core, &["branch", "--list", "draft"]), "draft");
+    assert_eq!(
+        fs::read_to_string(core.join("README")).unwrap(),
+        "initial\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_shows_blockers_without_offering_a_confirmation() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    let locked = linked_worktree(&core, "locked", &["-b", "locked"]);
+    run_git(
+        &core,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "on loan",
+            locked.to_str().unwrap(),
+        ],
+    );
+    let nested = linked_worktree(&core, "nested", &["-b", "nested"]);
+    init_repo_without_origin(&nested.join("vendor/lib"));
+    fs::write(nested.join("notes"), "untracked\n").unwrap();
+    let tree = checkout_tree(&home);
+    let no_confirmation = [
+        "absent: Cancel",
+        "absent: remove this worktree",
+        "absent: CONFIRM",
+        "Nothing was removed",
+    ];
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"wj".to_vec()),
+            (
+                vec!["locked · locked: on loan · r reports the blocker"],
+                b"r".to_vec(),
+            ),
+            (
+                [
+                    &[
+                        "Remove worktree / blocked",
+                        "blocked: worktree is locked: on loan",
+                        "hint: git -C",
+                        "worktree unlock",
+                    ][..],
+                    &no_confirmation,
+                ]
+                .concat(),
+                b"\r".to_vec(),
+            ),
+            (
+                vec!["Worktrees / core", "absent: Remove worktree /"],
+                b"j".to_vec(),
+            ),
+            (vec!["nested · r removes it"], b"r".to_vec()),
+            // Neither an answer nor a move to one does anything here.
+            (
+                [
+                    &[
+                        "Remove worktree / blocked",
+                        "blocked: nested repository vendor/lib",
+                    ][..],
+                    &no_confirmation,
+                ]
+                .concat(),
+                b"jy\r".to_vec(),
+            ),
+            (
+                vec!["Worktrees / core", "absent: Remove worktree /"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Worktrees /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+    );
+    assert_eq!(checkout_tree(&home), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_is_unavailable_on_rows_without_a_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, config, _) = worktree_fixture(
+        temp.path(),
+        "\n[providers.\"github.com\"]\npreset = \"github\"\n\n[[repositories]]\nurl = \"github.com/org/ghost\"\n\n[[repositories]]\nurl = \"github.com/org/sealed\"\n\n[[repositories]]\nurl = \"github.com/team/*\"\n",
+    );
+    let sealed = home.join("repos/org/sealed");
+    fs::create_dir_all(&sealed).unwrap();
+    fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000)).unwrap();
+
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (
+                vec!["NORMAL · 4 rows", "absent: Scanning", "selected: ghost"],
+                b"w".to_vec(),
+            ),
+            (
+                vec![
+                    "Worktrees unavailable: no checkout at the destination",
+                    "absent: Worktrees /",
+                ],
+                b"jw".to_vec(),
+            ),
+            (
+                vec![
+                    "selected: sealed",
+                    "Worktrees unavailable: the checkout is unreadable",
+                    "absent: Worktrees /",
+                ],
+                b"jjw".to_vec(),
+            ),
+            (
+                vec![
+                    "selected: team/*",
+                    "Worktrees unavailable: a pattern has no checkout",
+                    "absent: Worktrees /",
+                ],
+                b"kkk".to_vec(),
+            ),
+            // The menu entry is disabled with the same reason.
+            (vec!["selected: ghost"], b"mjjjj\r".to_vec()),
+            (
+                vec![
+                    "All actions",
+                    "pair: Worktrees… no",
+                    "checkout at the destination",
+                    "absent: Worktrees /",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 4 rows", "absent: All actions"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        1,
+        |_| {},
+    );
+    fs::set_permissions(&sealed, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_keys_typed_before_the_confirmation_is_drawn_never_answer_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    let draft = dirty_worktree(&core);
+
+    run_inventory_pty_actions_with_hook(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"wj".to_vec()),
+            // Open, move to the removing choice, choose: all in one burst.
+            (vec!["draft · r removes it"], b"rj\r".to_vec()),
+            // The cursor still sits on Cancel, and Enter there keeps the worktree.
+            (LOSS_CONFIRMATION.to_vec(), b"\r".to_vec()),
+            (
+                vec!["Remove cancelled · nothing changed", "Worktrees / core"],
+                b"a".to_vec(),
+            ),
+            // The same holds for the plan of a new worktree.
+            (vec!["Add worktree / core"], b"fix\r\r".to_vec()),
+            (
+                vec!["Add worktree / plan", "pair: worktree default"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Add worktree / core", "absent: / plan"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec![
+                    "Add worktree cancelled · nothing changed",
+                    "Worktrees / core",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL · 1 row",
+                    "absent: Worktrees /",
+                    "absent: Add worktree",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        |action| {
+            if action >= 2 {
+                assert!(draft.join("notes").exists(), "removed at action {action}");
+            }
+        },
+    );
+    assert!(draft.join("notes").exists());
+    assert!(!core.parent().unwrap().join("core.worktrees/fix").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_aborts_when_the_worktree_changed_after_the_confirmation() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    let hotfix = linked_worktree(&core, "hotfix", &["-b", "hotfix"]);
+
+    run_inventory_pty_actions_with_hook(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"wjr".to_vec()),
+            (
+                vec![
+                    "Remove worktree / hotfix",
+                    "pair: losses none",
+                    "pair: Cancel default",
+                    "pair: worktree cannot",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "the worktree changed after it was inspected; nothing removed",
+                    "Worktrees / core",
+                    "1 untracked",
+                    "absent: Remove worktree /",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Worktrees /", "selected: core"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        |action| {
+            if action == 1 {
+                fs::write(hotfix.join("late"), "written after the summary\n").unwrap();
+            }
+        },
+    );
+    assert_eq!(
+        fs::read_to_string(hotfix.join("late")).unwrap(),
+        "written after the summary\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_reports_a_failed_creation_and_returns_after_enter() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    let destination = core.parent().unwrap().join("core.worktrees/fix");
+
+    let transcript = run_inventory_pty_actions_with_hook(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"wa".to_vec()),
+            (vec!["Add worktree / core"], b"fix\r".to_vec()),
+            (vec!["Add worktree / plan"], b"\r".to_vec()),
+            (
+                vec!["lager: Enter returns to the inventory. Ctrl-C exits 130."],
+                b"\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Worktree was not created",
+                    "Worktrees / core",
+                    "0 linked worktrees",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Worktrees /", "selected: core"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        |action| {
+            if action == 2 {
+                fs::create_dir_all(&destination).unwrap();
+            }
+        },
+    );
+    assert!(
+        transcript.contains("lager: failed · worktree was not created: destination exists: "),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("lager: remaining: nothing"),
+        "{transcript}"
+    );
+    assert_screen_left(&transcript);
+    assert_eq!(git_stdout(&core, &["branch", "--list", "fix"]), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_ctrl_c_during_git_exits_130_with_the_terminal_restored() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    let hook = core.join(".git/hooks/post-checkout");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    fs::write(
+        &hook,
+        "#!/bin/sh\nprintf 'hook-started\\033[0m\\n'\nexec /bin/sleep 30\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let transcript = run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"wa".to_vec()),
+            (vec!["Add worktree / core"], b"fix\r".to_vec()),
+            (vec!["Add worktree / plan"], b"\r".to_vec()),
+            (vec!["hook-started"], b"\x03".to_vec()),
+        ],
+        32,
+        132,
+        130,
+        |_| {},
+    );
+    assert!(
+        transcript.contains(
+            "lager: Git owns this terminal until it returns. Ctrl-C interrupts it and exits 130."
+        ),
+        "{transcript}"
+    );
+    assert_eq!(transcript.matches("\x1b[?1049h").count(), 1);
+    assert_screen_left(&transcript);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_keys_follow_the_configured_maps() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, config, _) = worktree_fixture(
+        temp.path(),
+        "\n[inventory.keys.normal]\nworktrees = [\"W\"]\n\n[inventory.keys.worktrees]\nadd = [\"n\"]\nremove = [\"x\"]\n",
+    );
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            // The default key is dead: Help opens from normal mode, not from the popup.
+            (POPUP_READY.to_vec(), b"w?".to_vec()),
+            (
+                vec![
+                    "Keyboard / effective bindings",
+                    "Normal mode",
+                    "pair: W Worktrees",
+                    "Worktrees of the current repository (config: worktrees = [\"W\"])",
+                    "pair: worktrees j/k",
+                    "j/k select · n add · x remove · c copy path · Esc close",
+                    "absent: Worktrees /",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Keyboard /"], b"W".to_vec()),
+            (
+                vec![
+                    "Worktrees / core",
+                    "j/k ↑/↓ select · n add worktree… · x remove · c copy path · Esc close",
+                ],
+                b"ar".to_vec(),
+            ),
+            (
+                vec!["Worktrees / core", "absent: Add worktree", "absent: Remove"],
+                b"?".to_vec(),
+            ),
+            (
+                vec![
+                    "Worktrees mode",
+                    "add a worktree… (config: add = [\"n\"])",
+                    "remove the selected worktree (config: remove = [\"x\"])",
+                    "pair: c copy",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Worktrees / core", "absent: Keyboard /"],
+                b"n".to_vec(),
+            ),
+            (vec!["Add worktree / core"], b"\x1b".to_vec()),
+            (
+                vec!["Add worktree cancelled · nothing changed"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL · 1 row",
+                    "absent: Worktrees /",
+                    "absent: Add worktree",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        40,
+        132,
+    );
+
+    // A key the configuration gives to another action wins over the later default; the menu
+    // still reaches the popup, and Help names the action left without a key.
+    fs::write(
+        &config,
+        "root = \"repos\"\n\n[inventory.keys.normal]\nmark = [\"w\"]\n\n[inventory.keys.worktrees]\ndown = [\"a\"]\n",
+    )
+    .unwrap();
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"w".to_vec()),
+            (
+                vec!["1 marked · 0 hidden", "absent: Worktrees /"],
+                b"w?".to_vec(),
+            ),
+            (
+                vec![
+                    "Normal mode",
+                    "No key in normal mode: worktrees.",
+                    "No key in worktrees mode: add.",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Keyboard /"],
+                b"mjjjj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Worktrees / core",
+                    "a/k select · r remove · c copy path · Esc close",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Worktrees /"], b"q".to_vec()),
+        ],
+        40,
+        132,
+    );
+
+    for (settings, expected) in [
+        (
+            "[inventory.keys.worktrees]\ncancel = []",
+            "inventory worktrees.cancel must remain reachable",
+        ),
+        (
+            "[inventory.keys.worktrees]\nadd = [\"x\"]\nremove = [\"x\"]",
+            "[inventory.keys.worktrees] binds x to add and to remove",
+        ),
+        (
+            "[inventory.keys.worktrees]\nmark = [\"x\"]",
+            "unknown inventory action `worktrees.mark`",
+        ),
+    ] {
+        fs::write(&config, format!("root = \"repos\"\n{settings}\n")).unwrap();
+        let transcript = run_inventory_pty_with_exit(
+            support::lager(&home, &config).arg("tui"),
+            &[],
+            24,
+            80,
+            1,
+            |_| {},
+        );
+        assert!(transcript.contains(expected), "{settings}: {transcript}");
+        assert!(!transcript.contains("\x1b[?1049h"), "{settings}");
+    }
+}
+
+#[cfg(unix)]
+const TOO_SMALL: &str = "Too small to choose here · enlarge the terminal";
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_never_removes_while_losses_and_choices_are_off_screen() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    let draft = dirty_worktree(&core);
+
+    run_inventory_pty_with_exit_observing(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"wjr".to_vec()),
+            // 80×10: moving to the removing choice and choosing it does nothing.
+            (
+                vec!["CONFIRM · 1 row", "Remove worktree / draft", TOO_SMALL],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Remove unavailable: enlarge the terminal to show the whole summary",
+                    "Remove worktree / draft",
+                ],
+                b"k".to_vec(),
+            ),
+            // At 80×24 the same confirmation shows everything, the losses first.
+            (
+                vec![
+                    "pair: losses 1",
+                    "1 modified file, 1 untracked file",
+                    "pair: path ~/repos/org/core.worktrees/draft",
+                    "pair: Cancel default",
+                    "pair: worktree cannot",
+                    "cannot be undone",
+                    "absent: Too small",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                vec!["Remove cancelled · nothing changed", "Worktrees / core"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Worktrees /"], b"q".to_vec()),
+        ],
+        10,
+        80,
+        0,
+        |action, terminal, _| {
+            assert!(draft.join("notes").exists(), "removed at action {action}");
+            if action == 2 {
+                resize_pty(terminal, 24, 80);
+            }
+        },
+    );
+    assert_eq!(
+        fs::read_to_string(draft.join("notes")).unwrap(),
+        "untracked\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_acts_at_80x12_only_once_the_choices_and_fields_fit() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    let hotfix = linked_worktree(&core, "hotfix", &["-b", "hotfix"]);
+    let planned = core.parent().unwrap().join("core.worktrees/fix");
+
+    run_inventory_pty_with_exit_observing(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"wjr".to_vec()),
+            // 80×12: the choices are pinned, the losses line is not in view.
+            (
+                vec![
+                    "Remove worktree / hotfix",
+                    "pair: Cancel default",
+                    "Remove this worktree",
+                    TOO_SMALL,
+                    "absent: losses",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec!["Remove unavailable: enlarge the terminal to show the whole summary"],
+                b"j".to_vec(),
+            ),
+            // 80×14: losses and path are in view, the kept branch is not; still inert.
+            (
+                vec![
+                    "pair: losses none",
+                    "pair: path ~/repos/org/core.worktrees/hotfix",
+                    "absent: hotfix · kept",
+                    TOO_SMALL,
+                    "absent: Remove unavailable",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                vec!["Remove unavailable: enlarge the terminal to show the whole summary"],
+                b"j".to_vec(),
+            ),
+            // 80×15: path, branch, losses and both choices fit, and the focused choice removes.
+            (
+                vec![
+                    "pair: losses none",
+                    "pair: path ~/repos/org/core.worktrees/hotfix",
+                    "hotfix · kept",
+                    "pair: Cancel default",
+                    "absent: Too small",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Removed worktree ~/repos/org/core.worktrees/hotfix · branch hotfix kept",
+                    "0 linked worktrees",
+                ],
+                b"a".to_vec(),
+            ),
+            (vec!["Add worktree / core"], b"fix\r".to_vec()),
+            (
+                vec![
+                    "Add worktree / plan",
+                    "pair: worktree default",
+                    "absent: Too small",
+                ],
+                b"k".to_vec(),
+            ),
+            // Shrunk again, the plan is cut and its default does not create.
+            (
+                vec!["Add worktree / plan", "pair: worktree default", TOO_SMALL],
+                b"\r".to_vec(),
+            ),
+            (
+                vec!["Add unavailable: enlarge the terminal to show the whole plan"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Add worktree / core", "absent: / plan"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Add worktree cancelled · nothing changed"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Worktrees /"], b"q".to_vec()),
+        ],
+        12,
+        80,
+        0,
+        |action, terminal, _| match action {
+            2 => resize_pty(terminal, 14, 80),
+            4 => {
+                assert!(hotfix.join("README").exists());
+                resize_pty(terminal, 15, 80);
+            }
+            8 => resize_pty(terminal, 12, 80),
+            _ => {}
+        },
+    );
+    assert!(!hotfix.exists());
+    assert_eq!(git_stdout(&core, &["branch", "--list", "hotfix"]), "hotfix");
+    assert!(!planned.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_reports_what_a_failed_removal_left() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    let draft = dirty_worktree(&core);
+    // Git can empty the worktree but not delete its directory.
+    let container = draft.parent().unwrap().to_path_buf();
+    fs::set_permissions(&container, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let transcript = run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"wjr".to_vec()),
+            (LOSS_CONFIRMATION.to_vec(), b"j\r".to_vec()),
+            (
+                vec!["lager: Enter returns to the inventory. Ctrl-C exits 130."],
+                b"\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Worktree removal failed: git worktree remove failed:",
+                    "Worktrees / core",
+                    "0 linked worktrees",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Worktrees /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+    );
+    fs::set_permissions(&container, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        transcript.contains("lager: failed · worktree removal failed: git worktree remove failed:"),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("lager: remaining: directory "),
+        "{transcript}"
+    );
+    assert!(
+        !transcript.contains("remaining: worktree metadata"),
+        "{transcript}"
+    );
+    assert!(!transcript.contains("was not removed"), "{transcript}");
+    assert!(!draft.join("notes").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_starts_on_the_primary_and_scrolls_every_blocker_into_view() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    // Sorts before the primary and carries three blockers.
+    let first = home.join("aaa/first");
+    run_git(
+        &core,
+        &["worktree", "add", "-q", "--detach", first.to_str().unwrap()],
+    );
+    run_git(
+        &first,
+        &["commit", "-q", "--allow-empty", "-m", "unreachable"],
+    );
+    run_git(
+        &core,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "on loan",
+            first.to_str().unwrap(),
+        ],
+    );
+    init_repo_without_origin(&first.join("vendor/lib"));
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"w".to_vec()),
+            (
+                vec!["Worktrees / core", "core · primary checkout"],
+                b"kr".to_vec(),
+            ),
+            (
+                vec![
+                    "Remove worktree / blocked",
+                    "blocked: worktree is locked: on loan",
+                    "scroll",
+                    "absent: Nothing was removed",
+                ],
+                vec![b'j'; 30],
+            ),
+            (
+                vec![
+                    "Remove worktree / blocked",
+                    "blocked: nested repository vendor/lib",
+                    "Nothing was removed",
+                    "absent: path ",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Worktrees / core", "absent: Remove worktree /"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Worktrees /"], b"q".to_vec()),
+        ],
+        24,
+        80,
+    );
+    assert!(first.join("vendor/lib/README").exists());
 }

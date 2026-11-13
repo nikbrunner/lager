@@ -40,6 +40,7 @@ use super::args::InventoryArgs;
 
 mod keys;
 pub(super) mod status;
+mod worktrees;
 use keys::{Action, Bindings, Mode};
 
 pub fn run(config_path: &Path, args: InventoryArgs, interrupted: impl Fn() -> Option<i32>) -> i32 {
@@ -589,6 +590,8 @@ struct TerminalSession {
     restore: TerminalRestore,
     /// Rows below Help in the last frame: the status lines and the footer.
     below_help: u16,
+    /// The area of the last frame; a key is judged against what was on screen when it was typed.
+    drawn: Rect,
 }
 
 struct TerminalRestore {
@@ -641,6 +644,7 @@ impl TerminalSession {
             terminal,
             restore,
             below_help: 2,
+            drawn: Rect::default(),
         })
     }
 
@@ -758,8 +762,10 @@ impl TerminalSession {
             let visible_rows = matching_rows(&report, &selection.query);
             selection.reconcile(&visible_rows, session.complete);
             // A confirmation is answered only by keys typed once it is on screen.
-            if matches!(selection.view(), View::Preview | View::AddPreview)
-                && std::mem::take(&mut selection.preview_fresh)
+            if matches!(
+                selection.view(),
+                View::Preview | View::AddPreview | View::WorktreePlan | View::WorktreeConfirm
+            ) && std::mem::take(&mut selection.preview_fresh)
             {
                 discard_input();
                 held = None;
@@ -838,6 +844,32 @@ impl TerminalSession {
                             }
                             Some(Action::Cancel) if view == View::QuitBatch => {
                                 selection.quit = false;
+                            }
+                            action
+                                if selection.worktrees.is_some()
+                                    && view != View::Help
+                                    && action != Some(Action::Help) =>
+                            {
+                                let area = above_status(self.drawn, self.below_help);
+                                if let Some(native) =
+                                    worktrees::key(session, &mut selection, action, key, area)
+                                    && let Some(code) = worktrees::run(
+                                        self,
+                                        session,
+                                        &mut selection,
+                                        native,
+                                        interrupted,
+                                    )
+                                {
+                                    return code;
+                                }
+                            }
+                            Some(Action::Worktrees) if view == View::Normal => {
+                                let row = selection.selected_row(&visible_rows);
+                                let name = row
+                                    .map(|row| short_names(&report.rows)[&row.key].clone())
+                                    .unwrap_or_default();
+                                worktrees::open(session, &mut selection, row, name);
                             }
                             Some(Action::Add) if view == View::Normal => {
                                 selection.add = Some(AddForm::default());
@@ -1397,10 +1429,12 @@ impl TerminalSession {
             )
         });
         let mut below_help = self.below_help;
+        let mut drawn = self.drawn;
         let result = self
             .terminal
             .draw(|frame| {
                 let area = frame.area();
+                drawn = area;
                 let footer =
                     footer_widget(bindings, view, area.width.saturating_sub(4), acknowledges);
                 let footer_height = footer.line_count(area.width.saturating_sub(4)) as u16;
@@ -1806,12 +1840,27 @@ impl TerminalSession {
                             );
                         }
                     }
+                    View::Worktrees
+                    | View::WorktreeInput
+                    | View::WorktreePlan
+                    | View::WorktreeBlocked
+                    | View::WorktreeConfirm => {
+                        if let Some(popup) = &shown.worktrees {
+                            worktrees::draw(
+                                frame,
+                                popup,
+                                bindings,
+                                above_status(frame.area(), below_help),
+                            );
+                        }
+                    }
                     View::Normal | View::Search => {}
                 }
             })
             .map(|_| ())
             .map_err(|error| error.to_string());
         self.below_help = below_help;
+        self.drawn = drawn;
         selection.table = table_state;
         result
     }
@@ -1830,6 +1879,11 @@ enum View {
     Help,
     AddInput,
     AddPreview,
+    Worktrees,
+    WorktreeInput,
+    WorktreePlan,
+    WorktreeBlocked,
+    WorktreeConfirm,
 }
 
 impl View {
@@ -1840,10 +1894,13 @@ impl View {
             Self::Inspect => "INSPECT",
             Self::Menu => "MENU",
             Self::Problems => "PROBLEMS",
-            Self::Preview | Self::QuitBatch => "CONFIRM",
+            Self::Preview | Self::QuitBatch | Self::WorktreePlan | Self::WorktreeConfirm => {
+                "CONFIRM"
+            }
+            Self::Worktrees | Self::WorktreeBlocked => "WORKTREES",
             Self::Batch => "RESULTS",
             Self::Help => "HELP",
-            Self::AddInput | Self::AddPreview => "INPUT",
+            Self::AddInput | Self::AddPreview | Self::WorktreeInput => "INPUT",
         }
     }
 
@@ -1852,9 +1909,16 @@ impl View {
             Self::Normal => Mode::Normal,
             Self::Search => Mode::Search,
             Self::Menu => Mode::Menu,
-            Self::Inspect | Self::Problems | Self::Batch | Self::Help => Mode::Inspection,
-            Self::Preview | Self::AddPreview | Self::QuitBatch => Mode::Confirmation,
-            Self::AddInput => Mode::Input,
+            Self::Inspect | Self::Problems | Self::Batch | Self::Help | Self::WorktreeBlocked => {
+                Mode::Inspection
+            }
+            Self::Preview
+            | Self::AddPreview
+            | Self::QuitBatch
+            | Self::WorktreePlan
+            | Self::WorktreeConfirm => Mode::Confirmation,
+            Self::AddInput | Self::WorktreeInput => Mode::Input,
+            Self::Worktrees => Mode::Worktrees,
         }
     }
 }
@@ -1985,7 +2049,7 @@ fn footer_widget(
             (first(Mode::Menu, Action::Accept), "choose"),
             (first(Mode::Menu, Action::Cancel), "back"),
         ],
-        View::AddInput => vec![
+        View::AddInput | View::WorktreeInput => vec![
             (first(Mode::Input, Action::Accept), "preview"),
             (first(Mode::Input, Action::Cancel), "back"),
         ],
@@ -1996,6 +2060,24 @@ fn footer_widget(
                 first(Mode::Confirmation, Action::Cancel),
                 "back to reference",
             ),
+        ],
+        View::WorktreePlan => vec![
+            (rows_hint(bindings, Mode::Confirmation, false), "select"),
+            (first(Mode::Confirmation, Action::Accept), "choose"),
+            (first(Mode::Confirmation, Action::Cancel), "back to name"),
+        ],
+        View::WorktreeConfirm => vec![
+            (rows_hint(bindings, Mode::Confirmation, false), "focus"),
+            (first(Mode::Confirmation, Action::Accept), "choose"),
+            (first(Mode::Confirmation, Action::Cancel), "cancel"),
+        ],
+        View::WorktreeBlocked => vec![(first(Mode::Inspection, Action::Cancel), "back")],
+        View::Worktrees => vec![
+            (rows_hint(bindings, Mode::Worktrees, false), "select"),
+            (first(Mode::Worktrees, Action::Add), "add"),
+            (first(Mode::Worktrees, Action::Remove), "remove"),
+            (first(Mode::Worktrees, Action::Copy), "copy path"),
+            (first(Mode::Worktrees, Action::Cancel), "close"),
         ],
         View::QuitBatch => vec![
             (rows_hint(bindings, Mode::Confirmation, false), "focus"),
@@ -2034,6 +2116,7 @@ fn footer_widget(
                     (Action::Mark, "mark"),
                     (Action::Add, "add"),
                     (Action::Remove, "remove"),
+                    (Action::Worktrees, "worktrees"),
                     (Action::Inspect, "inspect"),
                     (Action::Refresh, "refresh"),
                     (Action::Menu, "menu"),
@@ -2058,7 +2141,16 @@ fn footer_widget(
     };
     // Least needed first; exit, help and menu routes always stay visible.
     for dropped in [
-        "scroll", "mark", "remove", "add", "rows", "refresh", "search", "inspect", "delete",
+        "scroll",
+        "worktrees",
+        "mark",
+        "remove",
+        "add",
+        "rows",
+        "refresh",
+        "search",
+        "inspect",
+        "delete",
     ] {
         if width_of(&items) <= usize::from(width) {
             break;
@@ -2154,12 +2246,17 @@ fn status_lines(
         ),
         _ if message.is_some() && complete => message.unwrap_or_default().to_owned(),
         _ if message.is_some() => format!("{state} · {}", message.unwrap_or_default()),
-        View::Preview => "Nothing changes until you confirm".to_owned(),
+        View::Preview | View::WorktreeConfirm => "Nothing changes until you confirm".to_owned(),
         View::AddInput => "Ordinary keys type text · nothing is saved yet".to_owned(),
-        View::AddPreview => "Nothing changes until you choose".to_owned(),
-        View::Menu | View::Help | View::Problems | View::Batch | View::QuitBatch => {
-            state.to_owned()
-        }
+        View::WorktreeInput => "Ordinary keys type text · nothing is created yet".to_owned(),
+        View::AddPreview | View::WorktreePlan => "Nothing changes until you choose".to_owned(),
+        View::Worktrees => "Worktrees target the current row · marks are not used".to_owned(),
+        View::Menu
+        | View::Help
+        | View::Problems
+        | View::Batch
+        | View::QuitBatch
+        | View::WorktreeBlocked => state.to_owned(),
         View::Normal | View::Inspect if compact && complete && !inspect.is_empty() => format!(
             "Path and origin: {} inspects, menu copies the full value",
             inspect[0]
@@ -2310,6 +2407,11 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
                     "Remove checkout, keep registration",
                     &[Remove],
                 ),
+                entry(
+                    single(Worktrees),
+                    "Worktrees of the current repository",
+                    &[Worktrees],
+                ),
             ];
             entries.extend(
                 DIRECT_ACTIONS.map(|action| entry(single(action), direct_label(action), &[action])),
@@ -2378,6 +2480,20 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
             entry(single(Cancel), "back", &[Cancel]),
             entry(help_quit(), "help / quit", &[Help, Quit]),
         ],
+        Mode::Worktrees => vec![
+            entry(pair(Down, Up), "previous / next worktree", &[Down, Up]),
+            entry(
+                pair(PageUp, PageDown),
+                "page up / down",
+                &[PageUp, PageDown],
+            ),
+            entry(single(Add), "add a worktree…", &[Add]),
+            entry(single(Remove), "remove the selected worktree", &[Remove]),
+            entry(single(Copy), "copy path", &[Copy]),
+            entry(single(Accept), "close", &[Accept]),
+            entry(single(Cancel), "close", &[Cancel]),
+            entry(help_quit(), "help / quit", &[Help, Quit]),
+        ],
     };
     let entries = entries
         .into_iter()
@@ -2397,6 +2513,7 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
         Mode::Input => "Input mode",
         Mode::Confirmation => "Confirmation mode",
         Mode::Inspection => "Inspect mode",
+        Mode::Worktrees => "Worktrees mode",
     };
     let mut lines = vec![Line::styled(title, dim())];
     lines.extend(entries.into_iter().map(|(keys, description)| {
@@ -2417,6 +2534,7 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
         Mode::Input,
         Mode::Confirmation,
         Mode::Inspection,
+        Mode::Worktrees,
     ] {
         if other == mode {
             continue;
@@ -2485,6 +2603,16 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
                     item(first(Cancel), "close"),
                 ],
             ),
+            Mode::Worktrees => (
+                "worktrees",
+                vec![
+                    item(rows, "select"),
+                    item(first(Add), "add"),
+                    item(first(Remove), "remove"),
+                    item(first(Copy), "copy path"),
+                    item(first(Cancel), "close"),
+                ],
+            ),
         };
         let items = items.into_iter().flatten().collect::<Vec<_>>();
         lines.push(Line::from(vec![
@@ -2517,6 +2645,7 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
         (Mode::Input, "input"),
         (Mode::Confirmation, "confirmation"),
         (Mode::Inspection, "inspection"),
+        (Mode::Worktrees, "worktrees"),
     ] {
         // The menu borrows these normal keys only where its own keys leave them free.
         let missing = bindings
@@ -2902,6 +3031,7 @@ enum Entry {
     Refresh,
     Problems,
     Add,
+    Worktrees,
     Help,
     Quit,
     /// Reports the message instead of acting.
@@ -2991,11 +3121,12 @@ fn menu_lines(
                 on_row(Entry::Inspect, "Inspect repository", key(Action::Inspect)),
                 on_row(Entry::Open(Menu::Copy), "Copy value…", String::new()),
                 on_row(Entry::OpenOrigin, "Open origin in browser", String::new()),
-                on_row(
-                    Entry::Unavailable("Worktrees are unavailable in this build"),
-                    "Worktrees…",
-                    String::new(),
-                ),
+                match row.map(model::worktree_checkout) {
+                    Some(Err(reason)) => {
+                        item(Entry::Worktrees, "Worktrees…", reason.to_owned(), false)
+                    }
+                    _ => on_row(Entry::Worktrees, "Worktrees…", key(Action::Worktrees)),
+                },
                 heading(String::new()),
                 heading(format!("Selection · {} marked", session.marks.len())),
                 item(
@@ -3278,6 +3409,10 @@ fn activate_menu_entry(
         (Entry::Add, _) => {
             selection.add = Some(AddForm::default());
             None
+        }
+        (Entry::Worktrees, row) => {
+            worktrees::open(session, selection, row, name);
+            return None;
         }
         (Entry::Problems, _) => {
             selection.problems = true;
@@ -4320,6 +4455,8 @@ struct Selection {
     preview_focus: usize,
     preview_scroll: u16,
     add: Option<AddForm>,
+    /// The open Worktrees popup; it keeps the repository it was opened on.
+    worktrees: Option<worktrees::Popup>,
     help: bool,
     help_mode: Mode,
     help_scroll: u16,
@@ -4413,6 +4550,8 @@ impl Selection {
             View::Help
         } else if self.quit {
             View::QuitBatch
+        } else if let Some(popup) = &self.worktrees {
+            popup.view()
         } else if !self.menu.is_empty() {
             View::Menu
         } else if let Some(add) = &self.add {

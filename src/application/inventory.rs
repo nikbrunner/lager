@@ -870,6 +870,19 @@ impl CopyField {
     }
 }
 
+/// The checkout whose worktrees a row can show, or why the row has none.
+pub fn worktree_checkout(row: &InventoryRow) -> Result<&Path, &'static str> {
+    match row.checkout {
+        CheckoutState::Pattern => Err("a pattern has no checkout"),
+        CheckoutState::Missing => Err("no checkout at the destination"),
+        CheckoutState::RemoteOnly => Err("remote only, no local checkout"),
+        CheckoutState::Unreadable => Err("the checkout is unreadable"),
+        CheckoutState::Cloned | CheckoutState::Unknown | CheckoutState::Conflict => {
+            row.observed_path.as_deref().ok_or("no checkout observed")
+        }
+    }
+}
+
 /// The original full value a Copy choice puts on the clipboard, or why the row has none.
 pub fn copy_value(row: &InventoryRow, field: CopyField) -> Result<OsString, &'static str> {
     match field {

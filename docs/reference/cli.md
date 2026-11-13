@@ -99,7 +99,7 @@ refresh; otherwise it returns `0`. Informational exclusions and deliberate
 cancellation do not count as failures.
 
 Use `j`/`k` or arrow keys to select a row, `/` for live fuzzy search, Space to
-mark the row, `a` to add a repository by reference, `r` to remove the checkout and keep its registration, Enter to inspect the selected repository, `m` for the action menu,
+mark the row, `a` to add a repository by reference, `r` to remove the checkout and keep its registration, `w` for the worktrees of the selected repository, Enter to inspect the selected repository, `m` for the action menu,
 and `?` for effective bindings. Search matches full attributes, paths and origins; Enter/Esc
 retain the filter and normal-mode Backspace clears it. Ordinary search letters
 remain text; F1 opens search help. Help describes the mode it was opened from.
@@ -111,6 +111,34 @@ Open origin, Worktrees…), the selection (mark this row, mark visible concrete
 rows, clear all marks) and the session (Add, Remote discovery…, Refresh, Session
 problems…, batch cancellation, Help and Quit). Entries for actions this build
 does not provide report that they are unavailable.
+`w` or Worktrees… opens the worktrees of the current row's checkout; marks are
+not used. The popup lists the primary checkout and every linked worktree Git
+knows, wherever it sits, with its path, branch and state: `primary`, `locked`
+and `prunable` with Git's reason, and `clean` or the counts of modified and
+untracked files. `a` asks for one name with the form of `NAME` in
+[`worktree add`](#worktree-add). The popup and the command treat a name whose
+local branch exists differently. The popup checks that branch out, which is
+`worktree add REPOSITORY NAME --branch NAME`, and its plan marks the branch
+`existing`. The command without `--branch` refuses with
+`branch already exists`. For any other name both create a new branch of that
+name at the primary checkout's HEAD. `--new-branch`, `--start` and `--path`
+belong to the command only. Enter shows the planned path and branch; nothing is
+created before "Create worktree" is chosen there. `r` runs the guards of [`worktree remove`](#worktree-remove) on
+the selected worktree. A blocker is shown with its hint and no confirmation.
+Otherwise a summary of losses, path and kept branch asks with Cancel as the
+default; choosing removal accepts exactly the listed losses, and a worktree that
+changed since the summary is left alone. The choices stay at the bottom of the
+popup. In a terminal too small to show the losses, the full path, the kept
+branch and both choices, or the plan and both choices, the popup says so and the changing choice does nothing until
+the terminal is enlarged. The blocker view scrolls. Keys typed before a plan or summary is
+on screen do not answer it. `r` on the primary checkout reports that it is
+removed from the table. `c` copies the selected path. While Git runs, the
+inventory hands it the terminal as for a clone; Ctrl-C there exits `130`, and
+after a failure Enter returns to the popup. When Git fails a removal partway,
+`remaining:` lines name what is left: the directory, the worktree metadata, or
+nothing. A row without a checkout (missing,
+remote only, wildcard pattern, unreadable) reports `Worktrees unavailable: …`
+and opens nothing.
 Repository actions… → Register and Unregister act on the marked rows, hidden
 ones included, or on the current row when nothing is marked. They change the
 configuration only, through the same registry services as `register` and
