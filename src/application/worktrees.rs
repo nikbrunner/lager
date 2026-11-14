@@ -155,7 +155,14 @@ pub fn named_state_of<G: WorktreeGit, F: WorktreeFilesystem>(
     (!record.is_primary && !record.prunable).then(|| {
         let location = git.locate(&record.path)?;
         let shown = record.path.display().to_string();
-        named_state(git, filesystem, &record.path, &location.git_dir, &shown)
+        named_state(
+            git,
+            filesystem,
+            &record.path,
+            &location.git_dir,
+            &shown,
+            None,
+        )
     })
 }
 
@@ -167,13 +174,14 @@ fn named_state<G: WorktreeGit, F: WorktreeFilesystem>(
     path: &Path,
     git_dir: &Path,
     shown: &str,
+    command: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let entries = filesystem.entries(git_dir)?;
     let mut state = git_dir::losses(
         &entries,
         true,
         &git_dir.display().to_string(),
-        &format!("git -C {shown}"),
+        &command.map_or_else(|| format!("git -C {shown}"), str::to_owned),
         |below| filesystem.holds(&git_dir.join(below)),
     );
     let refs = git
@@ -502,6 +510,9 @@ pub struct RemovalInspection {
     pub losses: WorktreeLosses,
     /// State in the worktree's Git directory that the removal deletes, by name.
     pub git_state: Vec<String>,
+    /// The Git command its hints name, such as `git`, for a caller that shows the worktree
+    /// itself; `git -C PATH` when absent.
+    pub command: Option<String>,
     pub blockers: Vec<Blocker>,
     /// Identity of the worktree directory, its Git directory and the common directory.
     ownership: String,
@@ -525,14 +536,17 @@ pub fn short_id(id: &str) -> &str {
 
 /// Runs every removal guard on one exact path and changes nothing. `context` is a checkout
 /// of the repository expected to own the path; it names the owner of an absent path.
+/// `command` replaces `git -C PATH` in the hints.
 pub fn inspect_removal<G: WorktreeGit, F: WorktreeFilesystem>(
     git: &G,
     filesystem: &F,
     path: &Path,
     context: Option<&Path>,
+    command: Option<&str>,
 ) -> RemovalInspection {
     let mut inspection = RemovalInspection {
         path: path.to_path_buf(),
+        command: command.map(str::to_owned),
         ..RemovalInspection::default()
     };
     if let Err(blocker) = inspect(git, filesystem, context, &mut inspection) {
@@ -721,6 +735,7 @@ fn inspect<G: WorktreeGit, F: WorktreeFilesystem>(
         &path,
         &location.git_dir,
         &path.display().to_string(),
+        inspection.command.as_deref(),
     ) {
         Ok(state) => inspection.git_state = state,
         Err(error) => blockers.push(plain(error)),
@@ -814,7 +829,13 @@ pub fn remove<G: WorktreeGit, F: WorktreeFilesystem>(
     accept_losses: bool,
     context: Option<&Path>,
 ) -> Result<(), RemoveError> {
-    let current = inspect_removal(git, filesystem, &confirmed.path, context);
+    let current = inspect_removal(
+        git,
+        filesystem,
+        &confirmed.path,
+        context,
+        confirmed.command.as_deref(),
+    );
     if current != *confirmed {
         return Err(RemoveError::Stale);
     }

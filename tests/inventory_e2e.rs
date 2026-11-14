@@ -15,7 +15,7 @@ use std::{fs, process::Command};
 #[cfg(unix)]
 #[test]
 fn inventory_inspect_shows_current_declaration_and_action_reason_after_resize_and_scroll() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -79,7 +79,7 @@ fn inventory_inspect_shows_current_declaration_and_action_reason_after_resize_an
 #[cfg(unix)]
 #[test]
 fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -370,10 +370,11 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
                 inner.strip_prefix("  ").unwrap_or(inner).trim_end()
             })
             .collect::<Vec<_>>();
-        // A long value wraps inside its value column; rejoin it to compare whole fields.
+        // A long value wraps at a space inside its value column; rejoin it to compare whole fields.
         let body = body.iter().fold(Vec::<String>::new(), |mut joined, line| {
             match joined.last_mut() {
                 Some(previous) if line.starts_with(&" ".repeat(19)) && !line.trim().is_empty() => {
+                    previous.push(' ');
                     previous.push_str(line.trim())
                 }
                 _ => joined.push((*line).to_owned()),
@@ -483,7 +484,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
 #[cfg(unix)]
 #[test]
 fn inventory_keeps_duplicate_and_same_named_rows_distinct_at_both_sizes() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -583,7 +584,7 @@ fn inventory_keeps_duplicate_and_same_named_rows_distinct_at_both_sizes() {
 #[cfg(unix)]
 #[test]
 fn inventory_keeps_long_named_copies_and_cross_host_rows_distinct_at_80_columns() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -652,7 +653,7 @@ fn inventory_keeps_long_named_copies_and_cross_host_rows_distinct_at_80_columns(
 #[cfg(unix)]
 #[test]
 fn inventory_root_menu_uses_effective_hints_and_preserves_search_and_selection() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -697,7 +698,7 @@ fn inventory_root_menu_uses_effective_hints_and_preserves_search_and_selection()
 #[cfg(unix)]
 #[test]
 fn inventory_search_matches_full_origins_and_keeps_text_and_filters_safe() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -751,7 +752,7 @@ fn inventory_search_matches_full_origins_and_keeps_text_and_filters_safe() {
 #[cfg(unix)]
 #[test]
 fn inventory_search_matches_checkout_state_without_matching_contrasting_rows() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -788,9 +789,43 @@ fn inventory_search_matches_checkout_state_without_matching_contrasting_rows() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn inventory_filter_pulls_the_scrolled_table_back_to_the_first_match() {
+    let temp = temp_dir();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    let mut text = String::from("root = \"repos\"\n");
+    // Search also matches the absolute temp path, so the query must be one no temp dir spells.
+    for name in (1..=30)
+        .map(|index| format!("r{index:02}"))
+        .chain(["zphqxjvk1".to_owned(), "zphqxjvk2".to_owned()])
+    {
+        text.push_str(&format!(
+            "\n[[repositories]]\nurl = \"github.com/aid/{name}\"\n"
+        ));
+    }
+    fs::write(&config, text).unwrap();
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (vec!["NORMAL ·", "r01"], "j".repeat(60).into_bytes()),
+            (vec!["zphqxjvk2"], b"/zphqxjvk\r".to_vec()),
+            (
+                vec!["NORMAL · 2 rows", "zphqxjvk1", "zphqxjvk2"],
+                b"q".to_vec(),
+            ),
+        ],
+        24,
+        80,
+    );
+}
+
 #[test]
 fn tui_is_the_only_command_that_opens_the_inventory() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     fs::create_dir_all(&home).unwrap();
     let config = temp.path().join("config.toml");
@@ -815,7 +850,7 @@ fn tui_is_the_only_command_that_opens_the_inventory() {
 
 #[test]
 fn inventory_aliases_reject_invalid_non_tty_entry_without_provider_requests() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     fs::create_dir_all(&home).unwrap();
     let config = temp.path().join("config.toml");
@@ -857,7 +892,7 @@ fn inventory_aliases_reject_invalid_non_tty_entry_without_provider_requests() {
 #[cfg(unix)]
 #[test]
 fn inventory_keeps_an_origin_query_failure_when_a_later_probe_is_cancelled() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -896,7 +931,7 @@ fn inventory_keeps_an_origin_query_failure_when_a_later_probe_is_cancelled() {
 #[test]
 fn inventory_keeps_real_failures_when_cancelling_a_changed_target_or_config() {
     for change_config in [false, true] {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = temp_dir();
         let home = temp.path().join("home");
         let root = home.join("repos");
         let config = temp.path().join("config.toml");
@@ -945,7 +980,7 @@ fn inventory_keeps_real_failures_when_cancelling_a_changed_target_or_config() {
 #[cfg(unix)]
 #[test]
 fn inventory_pending_checkout_does_not_assert_a_conflicting_origin() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -983,7 +1018,7 @@ fn inventory_pending_checkout_does_not_assert_a_conflicting_origin() {
 #[test]
 fn inventory_refresh_reconciles_deleted_checkouts_without_turning_incomplete_into_missing() {
     for incomplete in [false, true] {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = temp_dir();
         let home = temp.path().join("home");
         let root = home.join("repos");
         let config = temp.path().join("config.toml");
@@ -1038,7 +1073,7 @@ fn inventory_refresh_reconciles_deleted_checkouts_without_turning_incomplete_int
 #[cfg(unix)]
 #[test]
 fn inventory_bare_probe_failure_is_partial_even_when_stderr_says_cancelled() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -1071,7 +1106,7 @@ fn inventory_bare_probe_failure_is_partial_even_when_stderr_says_cancelled() {
 #[cfg(unix)]
 #[test]
 fn inventory_detached_head_is_a_successful_observation() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -1092,7 +1127,7 @@ fn inventory_detached_head_is_a_successful_observation() {
 #[cfg(unix)]
 #[test]
 fn inventory_cancels_an_active_originless_fallback_without_failure() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -1126,7 +1161,7 @@ fn inventory_cancels_an_active_originless_fallback_without_failure() {
 #[cfg(unix)]
 #[test]
 fn inventory_validates_both_terminal_streams_and_startup_before_raw_mode() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(&home).unwrap();
@@ -1182,7 +1217,7 @@ fn inventory_validates_both_terminal_streams_and_startup_before_raw_mode() {
 fn inventory_observation_failures_set_exit_status_even_after_successful_refresh() {
     for operation in ["remote", "symbolic-ref", "status"] {
         for refresh in [false, true] {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = temp_dir();
             let home = temp.path().join("home");
             let root = home.join("repos");
             let config = temp.path().join("config.toml");
@@ -1242,7 +1277,7 @@ fn inventory_observation_failures_set_exit_status_even_after_successful_refresh(
 #[test]
 fn inventory_discovery_failure_sets_exit_status_even_after_successful_refresh() {
     for refresh in [false, true] {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = temp_dir();
         let home = temp.path().join("home");
         let config = temp.path().join("config.toml");
         let root = home.join("repos");
@@ -1288,7 +1323,7 @@ fn inventory_discovery_failure_sets_exit_status_even_after_successful_refresh() 
 #[cfg(unix)]
 #[test]
 fn inventory_missing_root_is_empty_with_a_note_until_it_exists_and_exits_zero() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(&home).unwrap();
@@ -1351,7 +1386,7 @@ fn inventory_missing_root_is_empty_with_a_note_until_it_exists_and_exits_zero() 
 #[test]
 fn inventory_empty_and_partial_states_follow_the_canvas_at_both_sizes() {
     for (rows, cols) in [(32u16, 132u16), (24, 80)] {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = temp_dir();
         let home = temp.path().join("home");
         let config = temp.path().join("config.toml");
         fs::create_dir_all(home.join("repos")).unwrap();
@@ -1496,7 +1531,7 @@ fn inventory_empty_and_partial_states_follow_the_canvas_at_both_sizes() {
 #[cfg(unix)]
 #[test]
 fn inventory_root_that_is_a_file_is_a_session_problem() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(&home).unwrap();
@@ -1518,7 +1553,7 @@ fn inventory_root_that_is_a_file_is_a_session_problem() {
 #[cfg(unix)]
 #[test]
 fn inventory_starts_offline_and_rejects_archives_without_remote_before_raw_mode() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -1578,7 +1613,7 @@ fn inventory_starts_offline_and_rejects_archives_without_remote_before_raw_mode(
 #[test]
 fn inventory_keeps_explicit_registration_wildcard_unions_destination_uncertainty_and_origin_facts()
 {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     fs::create_dir_all(&root).unwrap();
@@ -1681,7 +1716,7 @@ fn inventory_unions_nested_wildcards_with_exclusions_in_each_declaration_order()
             "[[repositories]]\nurl = \"github.com/group/*\"\n",
         ],
     ] {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = temp_dir();
         let home = temp.path().join("home");
         let root = home.join("repos");
         let config = temp.path().join("config.toml");
@@ -1735,7 +1770,7 @@ fn inventory_unions_nested_wildcards_with_exclusions_in_each_declaration_order()
 #[cfg(unix)]
 #[test]
 fn inventory_shows_a_discovered_checkout_pending_before_a_delayed_probe_completes() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -1771,7 +1806,7 @@ fn inventory_shows_a_discovered_checkout_pending_before_a_delayed_probe_complete
 #[cfg(unix)]
 #[test]
 fn inventory_refresh_cancels_delayed_probes_and_quit_remains_responsive() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -1841,7 +1876,7 @@ fn inventory_refresh_cancels_delayed_probes_and_quit_remains_responsive() {
 #[cfg(unix)]
 #[test]
 fn inventory_refresh_keeps_completed_observations_stale_until_reprobed() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -1890,7 +1925,7 @@ fn inventory_refresh_keeps_completed_observations_stale_until_reprobed() {
 #[cfg(unix)]
 #[test]
 fn inventory_quit_reaps_a_probe_descendant_that_is_actually_running() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -1933,7 +1968,7 @@ fn inventory_quit_reaps_a_probe_descendant_that_is_actually_running() {
 #[cfg(unix)]
 #[test]
 fn inventory_quit_reaps_a_traversal_child_while_traversal_is_active() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -1977,7 +2012,7 @@ fn inventory_quit_reaps_a_traversal_child_while_traversal_is_active() {
 #[cfg(unix)]
 #[test]
 fn inventory_rejects_a_probe_result_after_same_path_checkout_replacement() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -2044,7 +2079,7 @@ fn inventory_rejects_a_probe_result_after_same_path_checkout_replacement() {
 #[cfg(unix)]
 #[test]
 fn inventory_rejects_a_probe_result_after_in_place_origin_config_change() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -2116,7 +2151,7 @@ fn inventory_rejects_a_probe_result_after_in_place_origin_config_change() {
 #[cfg(unix)]
 #[test]
 fn inventory_declared_rows_keep_wrong_corrupt_and_unreadable_facts_distinct() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -2176,7 +2211,7 @@ fn inventory_declared_rows_keep_wrong_corrupt_and_unreadable_facts_distinct() {
 #[cfg(unix)]
 #[test]
 fn inventory_keeps_partial_summary_visible_when_rows_overflow_the_viewport() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -2215,7 +2250,7 @@ fn inventory_keeps_partial_summary_visible_when_rows_overflow_the_viewport() {
 #[cfg(unix)]
 #[test]
 fn inventory_informational_git_file_exclusions_do_not_make_scan_partial() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -2259,7 +2294,7 @@ fn inventory_informational_git_file_exclusions_do_not_make_scan_partial() {
 #[test]
 fn inventory_excludes_git_file_entries_reports_unreadable_paths_escapes_controls_and_restores_terminal()
  {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -2415,7 +2450,7 @@ fn inventory_excludes_git_file_entries_reports_unreadable_paths_escapes_controls
 #[cfg(unix)]
 #[test]
 fn status_prints_the_rows_the_inventory_screen_shows() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     fs::create_dir_all(&root).unwrap();
@@ -2508,7 +2543,7 @@ fn status_rows(table: &str) -> Vec<Vec<String>> {
 #[cfg(unix)]
 #[test]
 fn offline_inventory_renders_discovery_identity_and_status_rows_in_a_pty() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     fs::create_dir_all(&root).unwrap();
@@ -2707,7 +2742,7 @@ exclude = ["skip"]
 #[cfg(unix)]
 #[test]
 fn inventory_navigates_every_row_without_shifting_columns() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -2766,7 +2801,7 @@ fn inventory_navigates_every_row_without_shifting_columns() {
 #[cfg(unix)]
 #[test]
 fn inventory_resizes_from_wide_to_compact_without_losing_whole_row_selection() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -2881,7 +2916,7 @@ fn inventory_resizes_from_wide_to_compact_without_losing_whole_row_selection() {
 #[cfg(unix)]
 #[test]
 fn inventory_navigation_remains_responsive_while_status_is_pending() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -2930,7 +2965,7 @@ fn inventory_navigation_remains_responsive_while_status_is_pending() {
 #[cfg(unix)]
 #[test]
 fn inventory_shows_unknown_config_warnings_without_corrupting_the_terminal() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -2964,7 +2999,7 @@ fn inventory_shows_unknown_config_warnings_without_corrupting_the_terminal() {
 #[cfg(unix)]
 #[test]
 fn inventory_bindings_refresh_atomically_and_keep_failures_sticky() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -3023,7 +3058,7 @@ fn inventory_bindings_refresh_atomically_and_keep_failures_sticky() {
 #[cfg(unix)]
 #[test]
 fn inventory_search_bindings_override_accept_and_retain_the_previous_map_on_refresh_error() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -3093,7 +3128,7 @@ fn inventory_search_bindings_override_accept_and_retain_the_previous_map_on_refr
 #[cfg(unix)]
 #[test]
 fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -3184,7 +3219,7 @@ fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
 #[cfg(unix)]
 #[test]
 fn inventory_selection_follows_a_pending_path_when_its_identity_arrives() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -3222,7 +3257,7 @@ fn inventory_selection_follows_a_pending_path_when_its_identity_arrives() {
 #[cfg(unix)]
 #[test]
 fn inventory_validates_all_binding_modes_before_entering_raw_mode() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -3300,7 +3335,7 @@ fn inventory_validates_all_binding_modes_before_entering_raw_mode() {
 #[cfg(unix)]
 #[test]
 fn inventory_bindings_survive_symlinked_registration_and_show_direct_actions() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let target = temp.path().join("settings.toml");
     let config = temp.path().join("config.toml");
@@ -3348,7 +3383,7 @@ fn inventory_bindings_survive_symlinked_registration_and_show_direct_actions() {
 #[cfg(unix)]
 #[test]
 fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -3474,7 +3509,7 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
 #[cfg(unix)]
 #[test]
 fn inventory_terminal_equivalent_keys_share_reachability_and_collision_checks() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -3543,7 +3578,7 @@ fn inventory_terminal_equivalent_keys_share_reachability_and_collision_checks() 
 fn inventory_interruptions_restore_the_controlling_terminal_and_reap_active_probes() {
     use std::os::fd::AsRawFd;
     for signal in [Some(libc::SIGINT), Some(libc::SIGTERM), None] {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = temp_dir();
         let home = temp.path().join("home");
         let root = home.join("repos");
         let config = temp.path().join("config.toml");
@@ -3595,7 +3630,7 @@ fn inventory_interruptions_restore_the_controlling_terminal_and_reap_active_prob
 #[cfg(unix)]
 #[test]
 fn inventory_menu_refresh_uses_effective_binding_and_preserves_filter() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -3641,7 +3676,7 @@ fn inventory_menu_refresh_uses_effective_binding_and_preserves_filter() {
 #[cfg(unix)]
 #[test]
 fn inventory_compact_hints_keep_actions_and_popup_exit_routes_visible() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -3688,7 +3723,7 @@ fn inventory_compact_hints_keep_actions_and_popup_exit_routes_visible() {
 #[cfg(unix)]
 #[test]
 fn inventory_help_uses_the_invoking_mode_and_returns_to_it() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -3736,7 +3771,7 @@ fn inventory_help_uses_the_invoking_mode_and_returns_to_it() {
 #[cfg(unix)]
 #[test]
 fn inventory_inspect_explains_unavailable_actions_without_changing_the_checkout() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     let repository = home.join("repos/org/alpha");
@@ -3781,7 +3816,7 @@ fn inventory_inspect_explains_unavailable_actions_without_changing_the_checkout(
 #[test]
 fn inventory_inspect_keeps_wildcard_relationships_on_exact_declarations() {
     for cloned in [false, true] {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = temp_dir();
         let home = temp.path().join("home");
         let config = temp.path().join("config.toml");
         let root = home.join("repos");
@@ -3820,7 +3855,7 @@ fn inventory_inspect_keeps_wildcard_relationships_on_exact_declarations() {
 #[cfg(unix)]
 #[test]
 fn inventory_menu_scrolls_with_visible_title_and_hints_after_resize() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -3868,7 +3903,7 @@ fn inventory_menu_scrolls_with_visible_title_and_hints_after_resize() {
 #[cfg(unix)]
 #[test]
 fn inventory_search_and_inspection_remain_live_during_a_controlled_probe() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -3926,8 +3961,66 @@ fn inventory_search_and_inspection_remain_live_during_a_controlled_probe() {
 
 #[cfg(unix)]
 #[test]
+fn inventory_inspect_during_a_scan_says_the_destination_is_not_observed_yet() {
+    let temp = temp_dir();
+    // Search also matches the absolute temp path, so the query must be one no temp dir spells.
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    let tools = temp.path().join("tools");
+    let marker = temp.path().join("started");
+    let release = temp.path().join("release");
+    fs::create_dir_all(root.join("org/zphqxjvk")).unwrap();
+    fs::write(root.join("org/zphqxjvk/notes"), "kept\n").unwrap();
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(
+        &config,
+        "root = \"repos\"\n\n[[repositories]]\nurl = \"github.com/org/zphqxjvk\"\n",
+    )
+    .unwrap();
+    init_repo(
+        &root.join("hold/zephyr"),
+        "git@github.com:org/zephyr.git",
+        true,
+    );
+    fs::write(tools.join("git"), format!(
+        "#!/bin/sh\nif [ \"$3\" = status ]; then printf started > {}; while [ ! -f {} ]; do /bin/sleep 0.02; done; fi\nexec {} \"$@\"\n",
+        shell_word(&marker), shell_word(&release), shell_word(&support::real_tool("git")),
+    )).unwrap();
+    fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    run_inventory_pty_actions_with_hook(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
+        &[
+            (vec!["pending"], b"/zphqxjvk".to_vec()),
+            (vec!["SEARCH ·", "1 row"], b"\x1b".to_vec()),
+            (vec!["NORMAL ·", "/ zphqxjvk"], b"\r".to_vec()),
+            (
+                vec![
+                    "INSPECT",
+                    "unavailable · checkout state is unknown until it is observed",
+                    "absent: holds no observed checkout",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL ·", "/ zphqxjvk"], b"q".to_vec()),
+        ],
+        40,
+        132,
+        |action| {
+            if action == 0 {
+                wait_for_file(&marker);
+            }
+            if action == 4 {
+                fs::write(&release, "go").unwrap();
+            }
+        },
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn inventory_dialog_overrides_refresh_atomically_and_keep_all_exit_routes_reachable() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -3999,7 +4092,7 @@ fn inventory_inspect_keeps_originless_conflict_and_unreadable_facts_distinct() {
         ("unreadable", ("Checkout", "unreadable"), 1),
     ] {
         let fact = format!("{:<19}{}", fact.0, fact.1);
-        let temp = tempfile::tempdir().unwrap();
+        let temp = temp_dir();
         let home = temp.path().join("home");
         let config = temp.path().join("config.toml");
         let repository = home.join("repos/org/alpha");
@@ -4044,7 +4137,7 @@ fn inventory_inspect_keeps_originless_conflict_and_unreadable_facts_distinct() {
 #[cfg(unix)]
 #[test]
 fn inventory_no_color_applies_to_rows_and_popups() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -4089,7 +4182,7 @@ fn inventory_no_color_applies_to_rows_and_popups() {
 #[cfg(unix)]
 #[test]
 fn inventory_help_wraps_long_effective_binding_lists() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -4147,7 +4240,7 @@ fn inventory_event_reader_preserves_input_ready_with_resize() {
         return;
     }
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let release = temp.path().join("release");
     run_inventory_pty_with_exit_observing(
         Command::new(std::env::current_exe().unwrap())
@@ -4239,7 +4332,7 @@ fn inventory_popup_q_returns_to_the_previous_view() {
 #[cfg(unix)]
 #[test]
 fn inventory_popup_quit_routes_and_explicit_overrides_remain_effective() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -4279,7 +4372,7 @@ fn inventory_popup_quit_routes_and_explicit_overrides_remain_effective() {
 #[cfg(unix)]
 #[test]
 fn inventory_marks_survive_filtering_and_refresh_and_report_vanished_entries() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -4367,7 +4460,7 @@ fn inventory_marks_survive_filtering_and_refresh_and_report_vanished_entries() {
 #[cfg(unix)]
 #[test]
 fn inventory_copy_value_sends_the_full_original_value_to_the_clipboard() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -4464,7 +4557,7 @@ fn inventory_copy_value_sends_the_full_original_value_to_the_clipboard() {
 #[cfg(unix)]
 #[test]
 fn inventory_open_origin_opens_only_a_derived_https_address() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -4547,7 +4640,7 @@ fn inventory_open_origin_opens_only_a_derived_https_address() {
 #[cfg(unix)]
 #[test]
 fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -4738,7 +4831,7 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
 #[cfg(unix)]
 #[test]
 fn inventory_session_problems_list_every_failure_behind_exit_one() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     let root = home.join("repos");
@@ -4816,7 +4909,7 @@ fn inventory_session_problems_list_every_failure_behind_exit_one() {
 #[cfg(unix)]
 #[test]
 fn inventory_keeps_drawing_while_the_opener_and_clipboard_hang() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -4869,7 +4962,7 @@ fn inventory_keeps_drawing_while_the_opener_and_clipboard_hang() {
 #[cfg(unix)]
 #[test]
 fn inventory_registers_and_unregisters_the_current_row_without_touching_files() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -4966,7 +5059,7 @@ fn inventory_registers_and_unregisters_the_current_row_without_touching_files() 
 #[cfg(unix)]
 #[test]
 fn inventory_direct_bindings_run_their_menu_actions_on_the_current_row() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -5046,7 +5139,7 @@ fn inventory_direct_bindings_run_their_menu_actions_on_the_current_row() {
 #[cfg(unix)]
 #[test]
 fn inventory_direct_bindings_cover_marks_copy_open_and_remote_actions() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -5142,7 +5235,7 @@ fn inventory_direct_bindings_cover_marks_copy_open_and_remote_actions() {
 #[cfg(unix)]
 #[test]
 fn inventory_remapped_keys_work_in_every_mode_and_their_defaults_are_dead() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -5264,7 +5357,7 @@ fn inventory_remapped_keys_work_in_every_mode_and_their_defaults_are_dead() {
 #[cfg(unix)]
 #[test]
 fn inventory_later_defaults_yield_and_confirmation_quit_falls_back_to_q() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -5344,7 +5437,7 @@ fn inventory_later_defaults_yield_and_confirmation_quit_falls_back_to_q() {
 #[cfg(unix)]
 #[test]
 fn inventory_help_shows_configured_directions_and_emptied_actions() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -5386,7 +5479,7 @@ fn inventory_help_shows_configured_directions_and_emptied_actions() {
 #[cfg(unix)]
 #[test]
 fn inventory_help_keeps_the_refresh_failure_visible_above_three_status_lines() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -5437,7 +5530,7 @@ fn inventory_help_keeps_the_refresh_failure_visible_above_three_status_lines() {
 #[cfg(unix)]
 #[test]
 fn inventory_confirmation_cancel_q_yields_to_an_explicit_help_key() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -5481,7 +5574,7 @@ fn inventory_confirmation_cancel_q_yields_to_an_explicit_help_key() {
 #[cfg(unix)]
 #[test]
 fn inventory_help_scrolls_to_every_mode_and_the_keyless_actions_at_80_columns() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -5524,7 +5617,7 @@ fn inventory_help_scrolls_to_every_mode_and_the_keyless_actions_at_80_columns() 
 #[cfg(unix)]
 #[test]
 fn inventory_invalid_binding_refresh_keeps_the_previous_map_and_is_a_session_problem() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -5590,7 +5683,7 @@ fn inventory_invalid_binding_refresh_keeps_the_previous_map_and_is_a_session_pro
 #[test]
 fn inventory_scan_leaves_a_stat_dirty_index_untouched() {
     use std::os::unix::fs::MetadataExt;
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -5630,7 +5723,7 @@ fn inventory_scan_leaves_a_stat_dirty_index_untouched() {
 #[cfg(unix)]
 #[test]
 fn inventory_registers_every_marked_row_including_hidden_ones_and_reports_each_outcome() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -5740,7 +5833,7 @@ fn inventory_registers_every_marked_row_including_hidden_ones_and_reports_each_o
 #[cfg(unix)]
 #[test]
 fn inventory_registration_edits_wildcard_exclusions_and_keeps_patterns_inspect_only() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -5849,7 +5942,7 @@ fn inventory_registration_edits_wildcard_exclusions_and_keeps_patterns_inspect_o
 #[cfg(unix)]
 #[test]
 fn inventory_cancelled_preview_changes_nothing_and_keeps_query_cursor_and_marks() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -5931,7 +6024,7 @@ fn inventory_cancelled_preview_changes_nothing_and_keeps_query_cursor_and_marks(
 #[cfg(unix)]
 #[test]
 fn inventory_add_rejects_wildcards_and_credentials_without_showing_them() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -6041,7 +6134,7 @@ fn inventory_add_rejects_wildcards_and_credentials_without_showing_them() {
 #[cfg(unix)]
 #[test]
 fn inventory_cancelled_add_changes_nothing_and_keeps_query_cursor_and_marks() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -6128,7 +6221,7 @@ fn inventory_cancelled_add_changes_nothing_and_keeps_query_cursor_and_marks() {
 #[cfg(unix)]
 #[test]
 fn inventory_add_never_offers_an_unknown_destination_as_missing() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -6223,7 +6316,7 @@ fn inventory_add_never_offers_an_unknown_destination_as_missing() {
 #[cfg(unix)]
 #[test]
 fn inventory_add_stays_usable_while_a_probe_is_pending_and_keeps_its_state_unknown() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -6289,7 +6382,7 @@ fn inventory_add_stays_usable_while_a_probe_is_pending_and_keeps_its_state_unkno
 #[cfg(unix)]
 #[test]
 fn inventory_add_registers_a_typed_reference_through_the_batch_and_keeps_marks() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -6414,7 +6507,7 @@ const HANDOFF_NOTICE: &str =
 #[cfg(unix)]
 #[test]
 fn inventory_clone_register_hands_the_terminal_to_git_and_returns_with_the_new_state() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -6511,7 +6604,7 @@ fn inventory_clone_register_hands_the_terminal_to_git_and_returns_with_the_new_s
 #[cfg(unix)]
 #[test]
 fn inventory_clone_only_from_the_row_menu_runs_the_hook_on_the_terminal_and_keeps_config() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -6580,10 +6673,152 @@ fn inventory_clone_only_from_the_row_menu_runs_the_hook_on_the_terminal_and_keep
     assert_screen_left(&transcript);
 }
 
+/// A provider catalog of two repositories that exist only remotely, each cloneable from a local
+/// bare repository through `insteadOf`.
+#[cfg(unix)]
+fn remote_only_clone_fixture(
+    temp: &std::path::Path,
+) -> (
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let home = temp.join("home");
+    let config = temp.join("config.toml");
+    let tools = temp.join("tools");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(
+        &config,
+        "root = \"repos\"\n\n[providers.\"github.com\"]\npreset = \"github\"\n",
+    )
+    .unwrap();
+    for name in ["yak", "zebra"] {
+        let source = clone_source(temp, name);
+        let bare = temp.join("remotes/me").join(format!("{name}.git"));
+        fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        let source = source.strip_prefix("file://").unwrap();
+        let status = Command::new(support::real_tool("git"))
+            .args(["clone", "--bare", "--quiet", source])
+            .arg(&bare)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let node = |name: &str| {
+        format!(
+            r#"{{"name":"{name}","isArchived":false,"sshUrl":"git@github.com:me/{name}.git","owner":{{"login":"me"}}}}"#
+        )
+    };
+    fs::write(
+        temp.join("viewer.json"),
+        format!(
+            r#"[{{"data":{{"viewer":{{"repositories":{{"nodes":[{},{}],"pageInfo":{{"hasNextPage":false,"endCursor":null}}}}}}}}}}]"#,
+            node("yak"),
+            node("zebra")
+        ),
+    )
+    .unwrap();
+    fs::write(
+        tools.join("gh"),
+        format!(
+            "#!/bin/sh\nexec cat {}\n",
+            shell_word(&temp.join("viewer.json"))
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(tools.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
+    let git_config = temp.join("gitconfig");
+    fs::write(
+        &git_config,
+        format!(
+            "[url \"file://{}/\"]\n    insteadOf = git@github.com:\n",
+            temp.join("remotes").display()
+        ),
+    )
+    .unwrap();
+    (home, config, tools, git_config)
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_clone_only_clones_a_remote_only_row_and_leaves_the_config_alone() {
+    let temp = temp_dir();
+    let (home, config, tools, git_config) = remote_only_clone_fixture(temp.path());
+    let original = fs::read_to_string(&config).unwrap();
+
+    run_inventory_pty_actions(
+        support::lager_with_path(&home, &config, Some(&tools))
+            .env("GIT_CONFIG_GLOBAL", &git_config)
+            .args(["tui", "--remote"]),
+        &[
+            (
+                vec!["github.com: ready, 2 candidates", "remote only"],
+                b"jjm\r".to_vec(),
+            ),
+            (
+                vec!["Repository actions / zebra", "Clone only"],
+                b"jj\r".to_vec(),
+            ),
+            (
+                vec!["Batch / Clone only", "Clone only: 1 succeeded"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL ·"], b"q".to_vec()),
+        ],
+        32,
+        132,
+    );
+
+    assert!(home.join("repos/me/zebra/.git").is_dir());
+    assert!(!home.join("repos/me/yak").exists());
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_clone_register_clones_a_remote_only_row_and_registers_it() {
+    let temp = temp_dir();
+    let (home, config, tools, git_config) = remote_only_clone_fixture(temp.path());
+
+    run_inventory_pty_actions(
+        support::lager_with_path(&home, &config, Some(&tools))
+            .env("GIT_CONFIG_GLOBAL", &git_config)
+            .args(["tui", "--remote"]),
+        &[
+            (
+                vec!["github.com: ready, 2 candidates", "remote only"],
+                b"jjm\r".to_vec(),
+            ),
+            (
+                vec!["Repository actions / zebra", "Clone + register"],
+                b"jjj\r".to_vec(),
+            ),
+            (
+                vec!["Batch / Clone + register", "Clone + register: 1 succeeded"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL ·"], b"q".to_vec()),
+        ],
+        32,
+        132,
+    );
+
+    assert!(home.join("repos/me/zebra/.git").is_dir());
+    assert!(!home.join("repos/me/yak").exists());
+    let saved = fs::read_to_string(&config).unwrap();
+    assert!(
+        saved.contains("url = \"git@github.com:me/zebra.git\""),
+        "{saved}"
+    );
+    assert!(!saved.contains("yak"), "{saved}");
+}
+
 #[cfg(unix)]
 #[test]
 fn inventory_clone_batch_reports_each_target_and_continues_past_a_failed_and_a_stale_one() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -6705,7 +6940,7 @@ fn inventory_clone_batch_reports_each_target_and_continues_past_a_failed_and_a_s
 #[cfg(unix)]
 #[test]
 fn inventory_ctrl_c_during_a_clone_handoff_exits_130_and_keeps_the_earlier_clone() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -6773,7 +7008,7 @@ fn inventory_ctrl_c_during_a_clone_handoff_exits_130_and_keeps_the_earlier_clone
 #[cfg(unix)]
 #[test]
 fn inventory_clone_register_on_a_matching_checkout_registers_without_cloning() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -6837,7 +7072,7 @@ fn inventory_clone_register_on_a_matching_checkout_registers_without_cloning() {
 #[cfg(unix)]
 #[test]
 fn inventory_add_blocks_a_clone_whose_destination_appeared_after_the_preview() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -6866,7 +7101,9 @@ fn inventory_add_blocks_a_clone_whose_destination_appeared_after_the_preview() {
                     "Batch / Clone + register",
                     "1 / 1 processed",
                     "BLOCKED",
-                    "stale: destination is no longer missing after preview",
+                    // The reason wraps or moves below its row, depending on the URL's width.
+                    "stale: destination",
+                    "preview",
                     "Clone + register: 1 blocked",
                     "· 1 problem",
                 ],
@@ -6909,7 +7146,7 @@ fn redirecting_git(tools: &std::path::Path, directory: &std::path::Path) {
 #[cfg(unix)]
 #[test]
 fn inventory_failed_hook_keeps_the_clone_skips_registration_and_lets_the_next_target_run() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -6989,7 +7226,7 @@ fn inventory_failed_hook_keeps_the_clone_skips_registration_and_lets_the_next_ta
 #[cfg(unix)]
 #[test]
 fn inventory_ctrl_c_during_a_hook_exits_130_and_keeps_the_clone() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -7033,7 +7270,7 @@ fn inventory_ctrl_c_during_a_hook_exits_130_and_keeps_the_clone() {
 #[cfg(unix)]
 #[test]
 fn inventory_ctrl_c_while_a_failed_clone_waits_for_enter_exits_130() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -7071,7 +7308,7 @@ fn inventory_ctrl_c_while_a_failed_clone_waits_for_enter_exits_130() {
 #[cfg(unix)]
 #[test]
 fn inventory_keeps_keys_typed_at_it_when_a_suspend_starts_no_child() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -7129,7 +7366,7 @@ fn inventory_recheck_ignores_an_exported_git_dir_and_work_tree() {
 
 #[cfg(unix)]
 fn recheck_blocks_a_vanished_checkout(exported_git: bool) {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -7204,7 +7441,7 @@ fn recheck_blocks_a_vanished_checkout(exported_git: bool) {
 #[cfg(unix)]
 #[test]
 fn inventory_blocks_a_previewed_no_op_whose_registration_changed_before_its_write() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -7272,7 +7509,7 @@ fn inventory_blocks_a_previewed_no_op_whose_registration_changed_before_its_writ
 #[cfg(unix)]
 #[test]
 fn inventory_long_preview_scrolls_its_targets_while_the_choices_stay_in_view() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -7339,7 +7576,7 @@ fn inventory_long_preview_scrolls_its_targets_while_the_choices_stay_in_view() {
 #[cfg(unix)]
 #[test]
 fn inventory_failed_registration_write_is_one_problem_per_identity_and_keeps_columns() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let directory = temp.path().join("etc");
@@ -7506,7 +7743,7 @@ fn removal_fixture(root: &std::path::Path, outside: &std::path::Path) {
 #[test]
 fn inventory_removal_confirmation_lists_clean_loss_and_blocked_targets_and_cancelling_changes_nothing()
  {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -7597,7 +7834,7 @@ fn inventory_removal_confirmation_lists_clean_loss_and_blocked_targets_and_cance
 #[cfg(unix)]
 #[test]
 fn inventory_removal_names_state_it_cannot_prove_safe_as_a_loss() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -7663,7 +7900,7 @@ fn overflowing_losses(root: &std::path::Path) -> std::path::PathBuf {
 #[cfg(unix)]
 #[test]
 fn inventory_removal_confirmation_at_80_by_24_shows_every_loss_before_it_arms() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -7723,7 +7960,7 @@ fn inventory_removal_confirmation_at_80_by_24_shows_every_loss_before_it_arms() 
 #[cfg(unix)]
 #[test]
 fn remove_in_a_terminal_lists_one_warning_per_line() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -7763,7 +8000,7 @@ fn remove_in_a_terminal_lists_one_warning_per_line() {
 #[cfg(unix)]
 #[test]
 fn inventory_worktree_confirmation_at_80_by_24_fits_file_losses_and_a_hint() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
     let hot = linked_worktree(&core, "hot", &["-b", "hot"]);
     run_git(&hot, &["switch", "-qc", "theirs"]);
@@ -7806,21 +8043,87 @@ fn inventory_worktree_confirmation_at_80_by_24_fits_file_losses_and_a_hint() {
                     "pair: Cancel default",
                     "Accept these losses and remove this worktree",
                 ],
+                b"j\r".to_vec(),
+            ),
+            // The removal inspects again with the popup's hint prefix and must match.
+            (
+                vec![
+                    "Removed worktree",
+                    "Worktrees / core",
+                    "absent: Remove worktree /",
+                ],
                 b"\x1b".to_vec(),
             ),
-            (vec!["Worktrees / core"], b"\x1b".to_vec()),
             (vec!["NORMAL · 1 row", "absent: Worktrees /"], b"q".to_vec()),
         ],
         24,
         80,
     );
-    assert!(hot.exists());
+    assert!(!hot.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_paths_with_spaces_wrap_by_cell_and_keep_every_character() {
+    let temp = temp_dir();
+    let root = "Shared Repository Folder With A Rather Long Name Off Many Words";
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, format!("root = \"{root}\"\n")).unwrap();
+    let core = home.join(root).join("org/core");
+    tracked_repo(&core, "git@github.com:org/core.git");
+    linked_worktree(&core, "hot", &["-b", "hot"]);
+
+    // Each path continues mid-word on its next line, which a wrap at spaces never does.
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"\r".to_vec()),
+            (
+                vec![
+                    "Inspect / core",
+                    "Found path         ~/Shared Repository Folder With A Rather Long Name Of  │",
+                    "│                     f Many Words/org/core ",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Inspect /"], b"w".to_vec()),
+            (vec!["Worktrees / core"], b"jr".to_vec()),
+            (
+                vec![
+                    "Remove worktree / hot",
+                    "path               ~/Shared Repository Folder With A Rather Long Name Of  │",
+                    "│                     f Many Words/org/core.worktrees/hot ",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["Worktrees / core"], b"\x1b".to_vec()),
+            (
+                vec!["NORMAL · 1 row", "absent: Worktrees /"],
+                b" r".to_vec(),
+            ),
+            (
+                vec![
+                    "BLOCKED core",
+                    "│  ~/Shared Repository Folder With A Rather Long Name Off Many Words/org/co  │",
+                    "│  re · github.com/org/core · dependent worktree metadata prevents primary",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Remove checkouts"],
+                b"q".to_vec(),
+            ),
+        ],
+        24,
+        80,
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn inventory_worktree_popup_never_calls_a_worktree_with_named_state_clean() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
     linked_worktree(&core, "hot", &["-b", "hot"]);
     fs::write(core.join(".git/worktrees/hot/planted"), "state\n").unwrap();
@@ -7840,7 +8143,7 @@ fn inventory_worktree_popup_never_calls_a_worktree_with_named_state_clean() {
 #[cfg(unix)]
 #[test]
 fn inventory_remove_only_continues_past_blocked_targets_and_keeps_registration() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -7910,7 +8213,7 @@ fn inventory_remove_only_continues_past_blocked_targets_and_keeps_registration()
 #[cfg(unix)]
 #[test]
 fn inventory_acknowledged_losses_are_removed_while_a_blocker_and_a_new_loss_stay() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -8000,7 +8303,7 @@ fn inventory_acknowledged_losses_are_removed_while_a_blocker_and_a_new_loss_stay
 #[cfg(unix)]
 #[test]
 fn inventory_remove_unregister_reports_a_deleted_checkout_and_a_failed_config_write_separately() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let directory = temp.path().join("etc");
@@ -8081,7 +8384,7 @@ fn inventory_remove_unregister_reports_a_deleted_checkout_and_a_failed_config_wr
 #[test]
 fn inventory_remove_unregister_keeps_registration_while_a_selected_checkout_of_the_identity_stays()
 {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -8148,7 +8451,7 @@ fn inventory_remove_unregister_keeps_registration_while_a_selected_checkout_of_t
 #[cfg(unix)]
 #[test]
 fn inventory_remove_unregister_writes_once_per_identity_and_previews_the_unselected_checkout() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -8177,7 +8480,7 @@ fn inventory_remove_unregister_writes_once_per_identity_and_previews_the_unselec
                     "3 exact targets",
                     "ELIGIBLE beta",
                     "~/repos/org/beta · github.com/org/beta · clean",
-                    "also unregisters ~/repos/keep/beta · not selected, its files stay",
+                    "~/repos/keep/beta · also unregistered · not selected, its files stay",
                     "ELIGIBLE gone",
                     "~/repos/org/gone · github.com/org/gone · known missing · absence is rechecked first",
                     "ELIGIBLE beta (copy)",
@@ -8229,7 +8532,7 @@ fn inventory_remove_unregister_writes_once_per_identity_and_previews_the_unselec
 #[cfg(unix)]
 #[test]
 fn inventory_removal_blocks_targets_whose_origin_path_or_registration_changed_after_confirmation() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -8326,7 +8629,7 @@ fn inventory_removal_blocks_targets_whose_origin_path_or_registration_changed_af
 #[cfg(unix)]
 #[test]
 fn inventory_remove_unregister_rechecks_that_a_known_missing_destination_is_still_absent() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -8391,7 +8694,7 @@ fn inventory_remove_unregister_rechecks_that_a_known_missing_destination_is_stil
 #[cfg(unix)]
 #[test]
 fn inventory_keys_typed_before_a_confirmation_is_drawn_never_answer_it() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -8467,7 +8770,7 @@ fn inventory_keys_typed_before_a_confirmation_is_drawn_never_answer_it() {
 #[cfg(unix)]
 #[test]
 fn inventory_removal_never_deletes_a_checkout_that_replaced_the_confirmed_one() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -8528,7 +8831,7 @@ fn inventory_removal_never_deletes_a_checkout_that_replaced_the_confirmed_one() 
 #[cfg(unix)]
 #[test]
 fn inventory_removal_never_follows_an_ancestor_that_became_a_symlink_to_another_checkout() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -8601,7 +8904,7 @@ fn inventory_removal_never_follows_an_ancestor_that_became_a_symlink_to_another_
 #[cfg(unix)]
 #[test]
 fn inventory_remove_unregister_waits_for_a_complete_scan_and_then_previews_every_checkout() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -8665,7 +8968,7 @@ fn inventory_remove_unregister_waits_for_a_complete_scan_and_then_previews_every
                     "Remove checkouts / unregister",
                     "1 exact target",
                     "ELIGIBLE alpha",
-                    "also unregisters ~/repos/zeta/alpha · not selected, its files stay",
+                    "~/repos/zeta/alpha · also unregistered · not selected, its files stay",
                 ],
                 b"\x1b".to_vec(),
             ),
@@ -8689,7 +8992,7 @@ fn inventory_remove_unregister_waits_for_a_complete_scan_and_then_previews_every
 #[cfg(unix)]
 #[test]
 fn inventory_direct_remove_unregister_is_blocked_while_the_scan_is_incomplete() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -8747,7 +9050,7 @@ fn inventory_direct_remove_unregister_is_blocked_while_the_scan_is_incomplete() 
 #[cfg(unix)]
 #[test]
 fn inventory_removal_names_the_declaration_whose_destination_a_found_checkout_occupies() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -8803,7 +9106,7 @@ fn removal_held_at_its_second_target(
     typed: &[u8],
     tail: Vec<(Vec<&'static str>, Vec<u8>)>,
 ) -> (tempfile::TempDir, std::path::PathBuf, String) {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -9001,7 +9304,7 @@ fn inventory_esc_and_the_key_typed_after_it_during_a_target_are_both_applied_in_
 #[cfg(unix)]
 #[test]
 fn inventory_alt_keys_outside_a_batch_do_nothing() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -9038,7 +9341,7 @@ fn inventory_alt_keys_outside_a_batch_do_nothing() {
 #[cfg(unix)]
 #[test]
 fn inventory_keys_typed_before_the_add_preview_is_drawn_never_choose_in_it() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -9089,7 +9392,7 @@ fn inventory_keys_typed_before_the_add_preview_is_drawn_never_choose_in_it() {
 /// The configuration the CLI produces from `before` for the same request.
 #[cfg(unix)]
 fn cli_config(home: &std::path::Path, before: &str, args: &[&str]) -> String {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = temp_dir();
     let config = directory.path().join("config.toml");
     fs::write(&config, before).unwrap();
     let result = support::lager(home, &config).args(args).output().unwrap();
@@ -9150,6 +9453,22 @@ fn output(command: &mut Command) -> std::process::Output {
 
 #[cfg(unix)]
 static TRANSCRIPT_ID: AtomicU64 = AtomicU64::new(1);
+static TEMP_ID: AtomicU64 = AtomicU64::new(1);
+
+/// A fresh directory named by digits under a fixed base. Search matches absolute paths, so a
+/// fixture path must not spell a test's query by chance, whatever TMPDIR or a random name holds.
+fn temp_dir() -> tempfile::TempDir {
+    let name = format!(
+        "{}-{}",
+        std::process::id(),
+        TEMP_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    tempfile::Builder::new()
+        .prefix(&name)
+        .rand_bytes(0)
+        .tempdir_in("/tmp")
+        .unwrap()
+}
 
 /// Gives a directory made unreadable by a test its mode back, so the tempdir can drop it.
 #[cfg(unix)]
@@ -9829,7 +10148,7 @@ const POPUP_FOOTER: &str = "j/k ↑/↓ select · a add worktree… · r remove 
 #[cfg(unix)]
 #[test]
 fn inventory_worktree_popup_lists_every_working_tree_and_copies_the_selected_path() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
     let hotfix = linked_worktree(&core, "hotfix", &["-b", "hotfix"]);
     // Created outside Lager with a control character in its directory name.
@@ -9994,7 +10313,7 @@ fn inventory_worktree_popup_lists_every_working_tree_and_copies_the_selected_pat
 #[cfg(unix)]
 #[test]
 fn inventory_worktree_popup_adds_a_worktree_through_input_and_plan() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
     let created = core.parent().unwrap().join("core.worktrees/fix");
 
@@ -10135,7 +10454,7 @@ const LOSS_CONFIRMATION: [&str; 9] = [
 #[cfg(unix)]
 #[test]
 fn inventory_worktree_popup_removes_a_worktree_with_losses_only_after_yes() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
     let draft = dirty_worktree(&core);
 
@@ -10194,7 +10513,7 @@ fn inventory_worktree_popup_removes_a_worktree_with_losses_only_after_yes() {
 #[cfg(unix)]
 #[test]
 fn inventory_worktree_popup_shows_blockers_without_offering_a_confirmation() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
     let locked = linked_worktree(&core, "locked", &["-b", "locked"]);
     run_git(
@@ -10271,7 +10590,7 @@ fn inventory_worktree_popup_shows_blockers_without_offering_a_confirmation() {
 #[cfg(unix)]
 #[test]
 fn inventory_worktree_popup_is_unavailable_on_rows_without_a_checkout() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let (home, config, _) = worktree_fixture(
         temp.path(),
         "\n[providers.\"github.com\"]\npreset = \"github\"\n\n[[repositories]]\nurl = \"github.com/org/ghost\"\n\n[[repositories]]\nurl = \"github.com/org/sealed\"\n\n[[repositories]]\nurl = \"github.com/team/*\"\n",
@@ -10337,7 +10656,7 @@ fn inventory_worktree_popup_is_unavailable_on_rows_without_a_checkout() {
 #[cfg(unix)]
 #[test]
 fn inventory_worktree_popup_keys_typed_before_the_confirmation_is_drawn_never_answer_it() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
     let draft = dirty_worktree(&core);
 
@@ -10394,7 +10713,7 @@ fn inventory_worktree_popup_keys_typed_before_the_confirmation_is_drawn_never_an
 #[cfg(unix)]
 #[test]
 fn inventory_worktree_popup_aborts_when_the_worktree_changed_after_the_confirmation() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
     let hotfix = linked_worktree(&core, "hotfix", &["-b", "hotfix"]);
 
@@ -10442,7 +10761,7 @@ fn inventory_worktree_popup_aborts_when_the_worktree_changed_after_the_confirmat
 #[cfg(unix)]
 #[test]
 fn inventory_worktree_popup_reports_a_failed_creation_and_returns_after_enter() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
     let destination = core.parent().unwrap().join("core.worktrees/fix");
 
@@ -10492,7 +10811,7 @@ fn inventory_worktree_popup_reports_a_failed_creation_and_returns_after_enter() 
 #[cfg(unix)]
 #[test]
 fn inventory_worktree_popup_ctrl_c_during_git_exits_130_with_the_terminal_restored() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
     let hook = core.join(".git/hooks/post-checkout");
     fs::create_dir_all(hook.parent().unwrap()).unwrap();
@@ -10529,7 +10848,7 @@ fn inventory_worktree_popup_ctrl_c_during_git_exits_130_with_the_terminal_restor
 #[cfg(unix)]
 #[test]
 fn inventory_worktree_popup_keys_follow_the_configured_maps() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let (home, config, _) = worktree_fixture(
         temp.path(),
         "\n[inventory.keys.normal]\nworktrees = [\"W\"]\n\n[inventory.keys.worktrees]\nadd = [\"n\"]\nremove = [\"x\"]\n",
@@ -10668,7 +10987,7 @@ const TOO_SMALL: &str = "Too small to choose here · enlarge the terminal";
 #[cfg(unix)]
 #[test]
 fn inventory_worktree_popup_never_removes_while_losses_and_choices_are_off_screen() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
     let draft = dirty_worktree(&core);
 
@@ -10726,7 +11045,7 @@ fn inventory_worktree_popup_never_removes_while_losses_and_choices_are_off_scree
 #[cfg(unix)]
 #[test]
 fn inventory_worktree_popup_acts_at_80x12_only_once_the_choices_and_fields_fit() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
     let hotfix = linked_worktree(&core, "hotfix", &["-b", "hotfix"]);
     let planned = core.parent().unwrap().join("core.worktrees/fix");
@@ -10832,7 +11151,7 @@ fn inventory_worktree_popup_acts_at_80x12_only_once_the_choices_and_fields_fit()
 #[cfg(unix)]
 #[test]
 fn inventory_worktree_popup_reports_what_a_failed_removal_left() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
     let draft = dirty_worktree(&core);
     // Git can empty the worktree but not delete its directory.
@@ -10881,10 +11200,10 @@ fn inventory_worktree_popup_reports_what_a_failed_removal_left() {
 #[cfg(unix)]
 #[test]
 fn inventory_worktree_popup_starts_on_the_primary_and_scrolls_every_blocker_into_view() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
-    // Sorts before the primary and carries three blockers.
-    let first = home.join("aaa/first");
+    // Sorts before the primary and carries three blockers, with hints long enough to scroll.
+    let first = home.join("aaa").join("0".repeat(100)).join("first");
     run_git(
         &core,
         &["worktree", "add", "-q", "--detach", first.to_str().unwrap()],
@@ -11099,7 +11418,7 @@ exclude = ["skip"]
 #[cfg(unix)]
 impl RemoteFixture {
     fn new() -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = temp_dir();
         let home = temp.path().join("home");
         let root = home.join("repos");
         let config = temp.path().join("config.toml");
@@ -11677,7 +11996,7 @@ fn inventory_opening_add_from_the_menu_enables_remote_and_without_providers_asks
     );
 
     // No provider configured: remote stays off, nothing is asked, nothing is a problem.
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -11980,7 +12299,7 @@ fn inventory_remote_rows_agree_with_status_remote() {
 #[cfg(unix)]
 #[test]
 fn inventory_remote_without_providers_starts_and_says_so() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -12124,7 +12443,7 @@ fn inventory_remote_keeps_a_provider_catalog_when_one_of_its_wildcards_fails() {
 #[cfg(unix)]
 fn blocked_scan_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     use std::os::unix::ffi::OsStrExt;
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     let git = home.join("repos/stalled/.git");
@@ -12235,7 +12554,7 @@ fn inventory_refresh_keeps_drawing_while_the_previous_scan_is_blocked() {
 #[test]
 fn inventory_sighup_restores_the_terminal_and_exits_129() {
     use std::os::fd::AsRawFd;
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
@@ -12271,7 +12590,7 @@ fn slow_probe_fixture() -> (
     std::path::PathBuf,
     std::path::PathBuf,
 ) {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
     let tools = temp.path().join("tools");
@@ -12339,8 +12658,8 @@ fn inventory_half_saved_config_during_a_scan_is_a_notice_and_the_repaired_save_c
             (vec!["slow", "pending"], Vec::new()),
             (
                 vec![
-                    "Config changed on disk but did not load:",
-                    "· previous configuration stays · R retries",
+                    "R retries · config changed on disk but did not load:",
+                    "· previous configuration stays",
                     "absent: problem",
                 ],
                 Vec::new(),
@@ -12350,6 +12669,7 @@ fn inventory_half_saved_config_during_a_scan_is_a_notice_and_the_repaired_save_c
                     "Local + declarations",
                     "clean",
                     "Config changed on disk · reloaded",
+                    "absent: ! Config changed on disk · reloaded",
                     "absent: problem",
                 ],
                 b"q".to_vec(),
@@ -12369,6 +12689,46 @@ fn inventory_half_saved_config_during_a_scan_is_a_notice_and_the_repaired_save_c
             _ => {}
         },
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_broken_config_saved_during_a_scan_completes_the_scan_with_the_previous_one() {
+    let (_temp, home, config, tools, state) = slow_probe_fixture();
+    run_inventory_pty_actions_with_hook(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
+        &[
+            (vec!["slow", "pending"], Vec::new()),
+            (
+                vec![
+                    "R retries · config changed on disk but did not load:",
+                    "· previous configuration stays",
+                ],
+                Vec::new(),
+            ),
+            (
+                vec![
+                    "clean",
+                    "absent: pending",
+                    "absent: Scanning local repositories",
+                    "R retries · config changed on disk but did not load:",
+                    "absent: problem",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        24,
+        132,
+        |action| match action {
+            0 => {
+                wait_for_file(&state.join("started"));
+                fs::write(&config, "root = [\n").unwrap();
+            }
+            1 => fs::remove_file(state.join("slow")).unwrap(),
+            _ => {}
+        },
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), "root = [\n");
 }
 
 #[cfg(unix)]
@@ -12453,14 +12813,11 @@ fn inventory_refresh_drops_a_provider_answer_fetched_with_the_previous_wildcards
             ),
             // Checked while the old request is still held: `R` alone invalidates it.
             (
-                vec![
-                    "NORMAL · 4 rows",
-                    "github.com: 0 cached (stale) · config changed",
-                ],
+                vec!["NORMAL · 4 rows", "github.com: config changed, not fetched"],
                 b"j".to_vec(),
             ),
             (
-                vec!["github.com: 0 cached (stale) · config changed"],
+                vec!["github.com: config changed, not fetched"],
                 b"q".to_vec(),
             ),
         ],

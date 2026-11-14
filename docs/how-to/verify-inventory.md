@@ -1,7 +1,8 @@
 # Verify inventory in a disposable sandbox
 
-This is the combined M1 owner walkthrough. It covers the read-only inventory,
-not repository mutations, providers or native Git handoff. Use an ordinary
+This is the owner walkthrough for the inventory TUI and `status`. It covers
+listing, search, Inspect and `status --json`; repository actions, providers and
+native Git handoff have their own checklists in `HOW_TO_TEST.md`. Use an ordinary
 macOS or Linux account and a real terminal. Human checkboxes remain unchecked
 until the tester verifies them.
 
@@ -58,5 +59,4 @@ configuration for the printed sandbox config.
 | --- | --- | --- | --- |
 | | | | |
 
-M1 sign-off requires the child acceptance evidence and this completed walkthrough.
-Parent #16 continues through later inventory milestones.
+Sign-off requires the agent checks above and this completed walkthrough.

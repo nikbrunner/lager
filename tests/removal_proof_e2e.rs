@@ -926,6 +926,26 @@ fn the_ref_warning_names_eight_refs_and_counts_the_rest() {
     fixture.assert_named("tag on a blob", &["commits not on any remote: tag blobtag"]);
 }
 
+#[test]
+fn the_ref_warning_sorts_numbers_naturally_and_reads_the_same_twice() {
+    let fixture = Fixture::new();
+    fixture.commit(&fixture.checkout, "local");
+    for name in ["feature-10", "feature-2", "feature-1", "feature-11"] {
+        git(&fixture.checkout, &["branch", name]);
+    }
+    git(&fixture.checkout, &["reset", "-q", "--hard", "origin/main"]);
+    let first = fixture.remove(&[]).stderr;
+    let second = fixture.remove(&[]).stderr;
+    assert_eq!(first, second);
+    let shown = String::from_utf8_lossy(&first);
+    assert!(
+        shown.contains(
+            "commits not on any remote: branch feature-1, branch feature-2, branch feature-10, branch feature-11"
+        ),
+        "{shown}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn an_unreadable_rebase_directory_still_names_its_autostash() {

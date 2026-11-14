@@ -12,7 +12,7 @@ lager status --remote --json > repositories.json
 `register` and `unregister` accept repeated repository arguments. `add` requires exactly `--register` or `--no-register` outside a TTY; `--post-clone` implies registration and conflicts with `--no-register`. `remove` similarly requires exactly one of `--unregister`/`--keep-registered` plus `--yes` outside a TTY. Invalid choices fail before disk or config mutation.
 
 Use `status --json` as the automation boundary. It prints the rows `lager tui`
-shows, as one [JSON document](../reference/status-json.md) on stdout; warnings and
+shows, as one [JSON document](../reference/status-json.md) on stdout. With `--remote`, `tui` adds the providers' unregistered and excluded repositories as candidates that `status` does not print; warnings and
 problems use stderr, and any problem makes it exit `1`. Git and hook subprocesses inherit stdin,
 stdout, and stderr.
 

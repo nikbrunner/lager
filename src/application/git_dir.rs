@@ -65,7 +65,7 @@ pub fn losses(
     .any(has);
     // A command run elsewhere (`git -C PATH`) names its path once.
     let ends = |command: &str| {
-        let again = if git == "git" {
+        let again = if !git.contains(" -C ") {
             format!("git {command} ")
         } else {
             String::new()
@@ -204,6 +204,16 @@ mod tests {
                 |path| { (path != "rebase-merge/autostash").then_some(false) }
             ),
             ["stopped rebase (git rebase --continue or git rebase --abort)"]
+        );
+        assert_eq!(
+            losses(
+                &names(&["rebase-apply"]),
+                true,
+                "/r/.git/worktrees/w",
+                "in the worktree: git",
+                |path| (path == "rebase-apply/applying").then_some(true)
+            ),
+            ["stopped git am (in the worktree: git am --continue or git am --abort)"]
         );
         assert_eq!(
             without_hint("stopped git am (git -C /w am --continue or --abort)"),

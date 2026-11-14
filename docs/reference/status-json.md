@@ -1,6 +1,6 @@
 # `status --json` reference
 
-`lager status --json` (also `list --json` and `ls --json`) writes exactly one JSON object and a newline to stdout. Warnings and problems go to stderr, one line each. The rows are the rows `lager tui` shows for the same configuration and disk, after its scan has finished, in the same order.
+`lager status --json` (also `list --json` and `ls --json`) writes exactly one JSON object and a newline to stdout. Warnings and problems go to stderr, one line each. The rows are the rows `lager tui` shows for the same configuration and disk, after its scan has finished, in the same order. With `--remote`, `tui` also lists the providers' unregistered and excluded repositories as candidates; `status` prints the rows without them, so its remote rows are a subset of the screen's.
 
 ```json
 {

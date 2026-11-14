@@ -55,7 +55,7 @@ mise uninstall --all github:nikbrunner/lager
 mise reshim --force
 ```
 
-Git is required for `add`, `remove`, `ensure`, `hook`, and `tui`. Interactive repository selection uses [`fzf`](https://github.com/junegunn/fzf). GitHub discovery uses an authenticated `gh` CLI; Bitbucket discovery uses the credentials named in the configuration.
+Git is required for `add`, `remove`, `ensure`, `hook`, `status` (and `list`, `ls`), `worktree`, and `tui`. Interactive repository selection uses [`fzf`](https://github.com/junegunn/fzf). GitHub discovery uses an authenticated `gh` CLI; Bitbucket discovery uses the credentials named in the configuration.
 
 ## Quick start
 
@@ -100,7 +100,7 @@ See the [configuration reference](docs/reference/config.md) for every field, def
 | `remove` | Permanently deletes guarded local checkouts. | `--unregister`, `--keep-registered`, `--yes`, `--force` |
 | `ensure` | Creates missing declared checkouts. | `--include-archived` |
 | `hook` | Runs a declared repository's post-clone hook again. | — |
-| `status`, `list`, `ls` | Prints the rows `tui` shows: declarations, checkouts and their state. | `--remote`, `--include-archived`, `--registered`, `--json` |
+| `status`, `list`, `ls` | Prints the rows `tui` shows: declarations, checkouts and their state. With `--remote`, `tui` adds unregistered and excluded candidates that `status` omits. | `--remote`, `--include-archived`, `--registered`, `--json` |
 | `worktree list`, `add`, `remove` | Lists, creates and removes linked worktrees of one repository through native Git. | `--json`, `--branch`, `--new-branch`, `--start`, `--path`, `--yes`, `--force` |
 | `tui` | Opens the inventory in a terminal: it registers, unregisters, clones and removes repositories and browses what the providers list. | `--remote`, `--include-archived`; `r` removes a checkout after confirmation; `w` opens its worktrees; `m` opens the actions; `R` refreshes local state; `q` or Esc quits. |
 

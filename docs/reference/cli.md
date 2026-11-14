@@ -103,11 +103,11 @@ Two inspections of the same checkout give the same warnings, word for word. The 
 
 The proof covers what the remote-tracking refs held at the last fetch; Lager does not contact the remote, so a branch deleted there after the last fetch still counts as pushed. Commits that only a reflog reaches, the names of local branches and tags whose commits a remote holds, local configuration, and the files inside `info/`, `logs/`, `hooks/` and `lfs/` (custom hooks, notes in `info/`, LFS objects never uploaded) go with the checkout unnamed: of the Git directory only the top-level entries are read.
 
-## Offline inventory
+## Inventory
 
-`tui` shows declarations and local
-Git roots beneath the configured root without provider requests or configuration
-writes. Registration and checkout state are independent; duplicate origins keep
+`tui` starts from declarations and local
+Git roots beneath the configured root. It makes no provider request until remote
+discovery is on and writes no configuration until an action is chosen. Registration and checkout state are independent; duplicate origins keep
 separate rows for their exact paths. Originless checkouts display `No origin`.
 
 Discovery recurses through directories, prunes found Git roots, and excludes
@@ -397,12 +397,13 @@ The Remote discovery menu lists the providers and these entries:
 An answer to a request that was dropped by disabling, a refresh or the archive
 preference is ignored. `R` reloads the configuration and rescans the disk; it
 merges the cached answers into the new rows and asks no provider. A provider
-whose settings or wildcards changed reads `N cached (stale) · config changed`
+whose settings or wildcards changed reads `N cached (stale), config changed`
 until remote discovery fetches again. A configuration saved during a scan is
 reloaded once per saved revision as soon as no dialog, menu or input is open
 (`Config changed on disk · reloaded`). A save that does not load keeps the
-previous configuration with `Config changed on disk but did not load: <reason> ·
-previous configuration stays · R retries`, and the next save is tried again.
+previous configuration with `R retries · config changed on disk but did not load:
+<reason> · previous configuration stays`; a scan in progress completes with the
+previous configuration, and the next save is tried again.
 
 On Unix, Ctrl-C or SIGINT interrupts binary inventory with exit `130`, SIGTERM
 with `143` and SIGHUP with `129`. Inventory restores the terminal first, then

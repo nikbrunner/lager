@@ -123,15 +123,14 @@ struct InventorySession {
     scan: LocalScan,
     worker: ScanHandle,
     generation: u64,
-    /// The configuration revision the running scan started from.
+    /// The configuration revision the last refresh tried, loaded or not. The running scan
+    /// started from it, and a changed revision reloads automatically.
     scan_revision: String,
-    /// The configuration revision the last automatic reload tried.
-    reload_attempt: String,
     complete: bool,
     problems: SessionProblems,
     marks: Marks,
     bindings: Bindings,
-    notice: Option<String>,
+    notice: Option<Notice>,
     /// The outcome of the last action; the next key press clears it.
     message: Option<String>,
     cached_report: Option<InventoryReport>,
@@ -179,7 +178,6 @@ impl InventorySession {
             worker,
             generation: 1,
             scan_revision,
-            reload_attempt: String::new(),
             complete: false,
             problems: SessionProblems::default(),
             marks: Marks::default(),
@@ -328,18 +326,20 @@ impl InventorySession {
             return;
         }
         let revision = LocalInventoryFilesystem.config_revision(&self.config_path);
-        if revision == self.scan_revision || revision == self.reload_attempt {
+        if revision == self.scan_revision {
             return;
         }
         self.notice = Some(match self.refresh() {
             Ok(()) => match self.notice.take() {
-                Some(warning) => format!("Config changed on disk · reloaded · {warning}"),
-                None => "Config changed on disk · reloaded".to_owned(),
+                Some(Notice::Warning(warning)) => {
+                    Notice::Warning(format!("Config changed on disk · reloaded · {warning}"))
+                }
+                _ => Notice::Info("Config changed on disk · reloaded".to_owned()),
             },
-            Err((error, _)) => format!(
-                "Config changed on disk but did not load: {} · previous configuration stays · R retries",
+            Err((error, _)) => Notice::Warning(format!(
+                "R retries · config changed on disk but did not load: {} · previous configuration stays",
                 reload_reason(&error, &self.config_path)
-            ),
+            )),
         });
     }
 
@@ -377,10 +377,21 @@ impl InventorySession {
     }
 
     /// Installs the configuration and bindings together, or neither. The error names what
-    /// stays active.
+    /// stays active. A scan in progress when a revision fails to load restarts with the
+    /// previous configuration, since its events carry a revision that is no longer on disk.
     fn refresh(&mut self) -> Result<(), (String, &'static str)> {
+        let installed = self.install_config();
+        if installed.is_err() && !self.complete {
+            self.worker.cancel();
+            self.receive_events();
+            self.restart_scan();
+        }
+        installed
+    }
+
+    fn install_config(&mut self) -> Result<(), (String, &'static str)> {
         // A revision tried here, automatically or by `R`, is not reloaded automatically again.
-        self.reload_attempt = LocalInventoryFilesystem.config_revision(&self.config_path);
+        self.scan_revision = LocalInventoryFilesystem.config_revision(&self.config_path);
         let kept = |error: String| (error, "configuration stays");
         let (config, overrides, warnings) =
             load_inventory(&self.config_path).map_err(|error| kept(error.to_string()))?;
@@ -392,27 +403,31 @@ impl InventorySession {
         // not waited for, so a scan blocked in a filesystem call cannot hold the screen.
         self.worker.cancel();
         self.receive_events();
-        self.generation += 1;
         self.remote
             .reconfigure(configured_providers(&config), remote::wildcards(&config));
         self.config = config;
         self.bindings = bindings;
         self.notice = warning_notice(warnings);
+        self.root = root;
+        self.restart_scan();
+        Ok(())
+    }
+
+    /// Starts a scan of the installed configuration under `scan_revision`.
+    fn restart_scan(&mut self) {
+        self.generation += 1;
         self.cached_report = None;
-        self.root = root.clone();
         self.scan = stale_scan(&self.scan);
-        self.scan_revision = LocalInventoryFilesystem.config_revision(&self.config_path);
         std::mem::replace(
             &mut self.worker,
             start_local_scan_with_context(ScanContext {
                 generation: self.generation,
                 config_revision: self.scan_revision.clone(),
-                root,
+                root: self.root.clone(),
             }),
         )
         .detach();
         self.complete = false;
-        Ok(())
     }
 
     /// Runs the next batch target, records its blocker or failure, and refreshes once the batch
@@ -652,8 +667,14 @@ fn reload_reason(error: &str, config_path: &Path) -> String {
     }
 }
 
-fn warning_notice(warnings: Vec<String>) -> Option<String> {
-    (!warnings.is_empty()).then(|| format!("warning: {}", warnings.join(" · ")))
+/// A line above the status that stays until the next refresh replaces it.
+enum Notice {
+    Info(String),
+    Warning(String),
+}
+
+fn warning_notice(warnings: Vec<String>) -> Option<Notice> {
+    (!warnings.is_empty()).then(|| Notice::Warning(format!("warning: {}", warnings.join(" · "))))
 }
 
 fn stale_scan(previous: &LocalScan) -> LocalScan {
@@ -1362,6 +1383,7 @@ impl TerminalSession {
                                             &report.rows,
                                             &session.home,
                                             &session.config,
+                                            session.complete,
                                         )
                                     })
                                     .unwrap_or(0);
@@ -1381,6 +1403,7 @@ impl TerminalSession {
                                             &report.rows,
                                             &session.home,
                                             &session.config,
+                                            session.complete,
                                         )
                                     })
                                     .unwrap_or(0);
@@ -1437,6 +1460,7 @@ impl TerminalSession {
         rows: &[model::InventoryRow],
         home: &Path,
         config: &crate::domain::config::Config,
+        complete: bool,
     ) -> u16 {
         let area = self.area();
         popup_scroll_limit(
@@ -1448,6 +1472,7 @@ impl TerminalSession {
                 rows,
                 home,
                 config,
+                complete,
                 popup_body_width(area, WIDE_POPUP),
             ),
         )
@@ -1527,6 +1552,7 @@ impl TerminalSession {
                         &report.rows,
                         &session.home,
                         &session.config,
+                        session.complete,
                     ));
         }
         let names = short_names(&report.rows);
@@ -1583,7 +1609,7 @@ impl TerminalSession {
             report,
             &session.home,
             complete,
-            session.notice.as_deref(),
+            session.notice.as_ref(),
             session.message.as_deref().or(progress.as_deref()),
             remote_state.as_ref(),
             view,
@@ -1702,6 +1728,12 @@ impl TerminalSession {
                         padded(body),
                     );
                 } else {
+                    // ratatui scrolls only far enough to show the selection and never pulls the
+                    // window back, so a shorter list would keep rows above the viewport.
+                    let page = usize::from(table.height.saturating_sub(1));
+                    *table_state.offset_mut() = table_state
+                        .offset()
+                        .min(visible_rows.len().saturating_sub(page));
                     frame.render_stateful_widget(
                         repository_table(
                             visible_rows,
@@ -1763,6 +1795,7 @@ impl TerminalSession {
                                     &report.rows,
                                     home,
                                     &session.config,
+                                    complete,
                                     popup_body_width(area, WIDE_POPUP),
                                 )
                                 .scroll((shown.inspection_scroll, 0)),
@@ -2508,9 +2541,10 @@ fn provider_text(
     match (&provider.phase, fetched) {
         (_, Some(fetched)) if !enabled => format!("off{separator}{fetched}"),
         (_, None) if !enabled => "not fetched".to_owned(),
-        (_, _) if provider.config_changed => {
-            format!("{candidates} cached (stale) · config changed")
+        (_, Some(_)) if provider.config_changed => {
+            format!("{candidates} cached (stale){separator}config changed")
         }
+        (_, None) if provider.config_changed => format!("config changed{separator}not fetched"),
         (ProviderPhase::Idle, _) => format!("not fetched{stale}"),
         (ProviderPhase::Loading { .. }, Some(_)) => format!("refreshing{stale}"),
         (ProviderPhase::Loading { since }, None) => {
@@ -2582,7 +2616,7 @@ fn status_lines(
     report: &InventoryReport,
     home: &Path,
     complete: bool,
-    notice: Option<&str>,
+    notice: Option<&Notice>,
     message: Option<&str>,
     remote: Option<&RemoteState>,
     view: View,
@@ -2590,8 +2624,10 @@ fn status_lines(
     bindings: &Bindings,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    if let Some(notice) = notice {
-        lines.push(Line::styled(format!("! {notice}"), warn()));
+    match notice {
+        Some(Notice::Info(text)) => lines.push(Line::raw(text.clone())),
+        Some(Notice::Warning(text)) => lines.push(Line::styled(format!("! {text}"), warn())),
+        None => {}
     }
     let (notes, diagnostics): (Vec<_>, Vec<_>) = report
         .diagnostics
@@ -3175,22 +3211,39 @@ fn trailing(group: &str, separator: char, depth: usize) -> &str {
 
 /// Names every row for the table: the last identity segment (`owner/*` for patterns, the
 /// directory for path-identified checkouts), widened to `owner/name` when another repository
-/// shares that last segment, then one leading segment at a time while another repository of
-/// the same kind (identity, pattern or path) still shares the name. A checkout reads
+/// shares that last segment, then one leading segment at a time while another repository
+/// still shares the name. Patterns compare only with patterns, and a path row at a declared
+/// destination counts as that declaration. A checkout reads
 /// `name (copy)`, `name (copy 2)`, … when its identity already has a cloned declaration or a
 /// checkout at an earlier path.
 fn short_names(rows: &[model::InventoryRow]) -> HashMap<model::RowKey, String> {
+    let declared: HashMap<&Path, &str> = rows
+        .iter()
+        .filter_map(|row| match &row.key {
+            model::RowKey::Declaration {
+                identity,
+                destination,
+            } => Some((destination.as_path(), identity.as_str())),
+            _ => None,
+        })
+        .collect();
+    // The last field is the group a row counts as when names are compared past depth 1: a path
+    // row at a declared destination counts as that declaration.
     let groups = rows
         .iter()
         .map(|row| match &row.key {
             model::RowKey::Checkout { identity, .. }
-            | model::RowKey::Declaration { identity, .. } => (0, identity.clone(), '/'),
-            model::RowKey::Pattern(pattern) => (1, pattern.clone(), '/'),
-            model::RowKey::Path(path) => (
-                2,
-                path.to_string_lossy().into_owned(),
-                std::path::MAIN_SEPARATOR,
-            ),
+            | model::RowKey::Declaration { identity, .. } => {
+                (0, identity.clone(), '/', identity.clone())
+            }
+            model::RowKey::Pattern(pattern) => (1, pattern.clone(), '/', pattern.clone()),
+            model::RowKey::Path(path) => {
+                let text = path.to_string_lossy().into_owned();
+                let counted = declared
+                    .get(path.as_path())
+                    .map_or_else(|| text.clone(), |identity| (*identity).to_owned());
+                (2, text, std::path::MAIN_SEPARATOR, counted)
+            }
         })
         .collect::<Vec<_>>();
     let mut depths = groups
@@ -3199,16 +3252,17 @@ fn short_names(rows: &[model::InventoryRow]) -> HashMap<model::RowKey, String> {
         .collect::<Vec<usize>>();
     loop {
         let name = |index: usize| {
-            let (kind, group, separator) = &groups[index];
+            let (kind, group, separator, _) = &groups[index];
             let depth = depths[index];
             (
-                (depth > 1).then_some(*kind),
+                (depth > 1).then_some(*kind == 1),
                 trailing(group, *separator, depth),
             )
         };
         let mut sharing: HashMap<_, HashSet<&str>> = HashMap::new();
-        for (index, (_, group, _)) in groups.iter().enumerate() {
-            sharing.entry(name(index)).or_default().insert(group);
+        for (index, (_, group, _, counted)) in groups.iter().enumerate() {
+            let value = if depths[index] > 1 { counted } else { group };
+            sharing.entry(name(index)).or_default().insert(value);
         }
         let shared = (0..groups.len())
             .filter(|index| name(*index).1 != groups[*index].1 && sharing[&name(*index)].len() > 1)
@@ -3222,7 +3276,7 @@ fn short_names(rows: &[model::InventoryRow]) -> HashMap<model::RowKey, String> {
     }
     rows.iter()
         .zip(groups.iter().zip(&depths))
-        .map(|(row, ((_, group, separator), depth))| {
+        .map(|(row, ((_, group, separator, _), depth))| {
             let mut name = trailing(group, *separator, *depth).to_owned();
             if let model::RowKey::Checkout { identity, path } = &row.key {
                 let earlier = rows
@@ -3287,8 +3341,40 @@ fn observation_text(field: &model::ObservationField) -> String {
     }
 }
 
-/// Splits `value` into pieces at most `room` cells wide, so a column can wrap in place.
+/// Splits `value` into pieces at most `room` cells wide, so a column can wrap in place. A piece
+/// breaks at the last space that fits and drops it; a word wider than `room` is cut.
 fn column_chunks(value: &str, room: usize) -> Vec<String> {
+    let room = room.max(1);
+    let width = |text: &str| Span::raw(text.to_owned()).width();
+    let mut chunks = vec![String::new()];
+    let mut used = 0;
+    for character in value.chars() {
+        let size = Span::raw(character.to_string()).width();
+        if used + size > room && used > 0 {
+            let current = chunks.last_mut().expect("one chunk");
+            let carried = match current.rfind(' ').filter(|space| *space > 0) {
+                Some(space) if character != ' ' => {
+                    let tail = current.split_off(space + 1);
+                    current.pop();
+                    tail
+                }
+                _ => String::new(),
+            };
+            used = width(&carried);
+            chunks.push(carried);
+        }
+        if character == ' ' && used == 0 && chunks.len() > 1 {
+            continue;
+        }
+        chunks.last_mut().expect("one chunk").push(character);
+        used += size;
+    }
+    chunks
+}
+
+/// Splits `value` into pieces at most `room` cells wide, cutting by cell, so an exact value keeps
+/// every character, spaces included.
+fn cell_chunks(value: &str, room: usize) -> Vec<String> {
     let room = room.max(1);
     let mut chunks = vec![String::new()];
     let mut used = 0;
@@ -3304,9 +3390,26 @@ fn column_chunks(value: &str, room: usize) -> Vec<String> {
     chunks
 }
 
-/// Lays out `name value` with the value in its own column; long values wrap inside it.
+/// Lays out `name value` with the value in its own column; long prose wraps at spaces inside it.
 fn field_lines(name: &str, value: &str, style: Style, width: u16) -> Vec<Line<'static>> {
-    column_chunks(value, usize::from(width).saturating_sub(INSPECT_KEY_COLUMN))
+    labelled_lines(
+        name,
+        column_chunks(value, usize::from(width).saturating_sub(INSPECT_KEY_COLUMN)),
+        style,
+    )
+}
+
+/// Like [`field_lines`] for a path, identity, URL or branch: it wraps by cell.
+fn exact_field_lines(name: &str, value: &str, style: Style, width: u16) -> Vec<Line<'static>> {
+    labelled_lines(
+        name,
+        cell_chunks(value, usize::from(width).saturating_sub(INSPECT_KEY_COLUMN)),
+        style,
+    )
+}
+
+fn labelled_lines(name: &str, chunks: Vec<String>, style: Style) -> Vec<Line<'static>> {
+    chunks
         .into_iter()
         .enumerate()
         .map(|(index, chunk)| {
@@ -3325,24 +3428,36 @@ fn inspection_widget(
     rows: &[model::InventoryRow],
     home: &Path,
     config: &crate::domain::config::Config,
+    complete: bool,
     width: u16,
 ) -> Paragraph<'static> {
     let mut lines = Vec::new();
-    let mut field = |name: &str, value: String, style: Style| {
-        lines.extend(field_lines(name, &value, style, width));
+    // Paths, identities, origins and branches wrap by cell; prose wraps at spaces.
+    let mut field = |name: &str, value: String, style: Style, exact: bool| {
+        lines.extend(if exact {
+            exact_field_lines(name, &value, style, width)
+        } else {
+            field_lines(name, &value, style, width)
+        });
     };
-    field("Repository", name, Style::default());
+    field("Repository", name, Style::default(), true);
     if let Some(identity) = identity(row) {
-        field("Identity", escape(identity), Style::default());
+        field("Identity", escape(identity), Style::default(), true);
     }
     if let Some(path) = &row.observed_path {
-        field("Found path", home_relative(path, home), Style::default());
+        field(
+            "Found path",
+            home_relative(path, home),
+            Style::default(),
+            true,
+        );
     }
     if let Some(path) = &row.configured_destination {
         field(
             "Configured path",
             home_relative(path, home),
             Style::default(),
+            true,
         );
     }
     if row.observed_path.is_none() && row.configured_destination.is_none() {
@@ -3350,6 +3465,7 @@ fn inspection_widget(
             "Path",
             home_relative(Path::new(&row.path), home),
             Style::default(),
+            true,
         );
     }
     let registration = match &row.registration {
@@ -3369,6 +3485,7 @@ fn inspection_widget(
         "Registration",
         registration,
         registration_style(&row.registration),
+        false,
     );
     if let Some(declaration) = &row.declaration {
         let kind = if declaration.contains('*') {
@@ -3394,14 +3511,16 @@ fn inspection_widget(
             "Declaration",
             format!("{} ({kind}){target}", escape(declaration)),
             Style::default(),
+            false,
         );
     }
     field(
         "Checkout",
         checkout_text(&row.checkout).to_owned(),
         checkout_style(&row.checkout),
+        false,
     );
-    field("Origin", escape(&row.origin), Style::default());
+    field("Origin", escape(&row.origin), Style::default(), true);
     for (name, observation, gloss) in [
         ("Branch", &row.branch, "not observed yet"),
         ("Changes", &row.changes, "status not observed yet"),
@@ -3410,7 +3529,12 @@ fn inspection_widget(
             model::ObservationField::Pending => format!("pending · {gloss}"),
             other => observation_text(other),
         };
-        field(name, value, observation_style(observation));
+        field(
+            name,
+            value,
+            observation_style(observation),
+            name == "Branch",
+        );
     }
     if !row.warnings.is_empty() {
         lines.push(Line::default());
@@ -3433,7 +3557,14 @@ fn inspection_widget(
         .resolve_root(home)
         .map_err(|_| "configured root is unavailable")
         .and_then(|root| {
-            batch::clone_preview(row, config, &root, rows, true, &LocalInventoryFilesystem)
+            batch::clone_preview(
+                row,
+                config,
+                &root,
+                rows,
+                complete,
+                &LocalInventoryFilesystem,
+            )
         });
     let clone = match clone.as_ref().map(|preview| {
         (
@@ -4474,7 +4605,13 @@ fn add_preview_lines(
         ),
     ]
     .into_iter()
-    .flat_map(|(name, value, style)| field_lines(name, &value, style, width))
+    .flat_map(|(name, value, style)| {
+        if matches!(name, "Checkout" | "Registration" | "Existing marks") {
+            field_lines(name, &value, style, width)
+        } else {
+            exact_field_lines(name, &value, style, width)
+        }
+    })
     .collect::<Vec<_>>();
     let mut lines = vec![Line::default()];
     let width = usize::from(width);
@@ -4610,10 +4747,10 @@ fn refresh(session: &mut InventorySession) {
                 escape(model::problem_reason(&error))
             ),
         );
-        session.notice = Some(format!(
+        session.notice = Some(Notice::Warning(format!(
             "Config refresh failed: {} · previous {kept} active",
             escape(error)
-        ));
+        )));
     }
 }
 
@@ -4810,6 +4947,21 @@ fn quit_widget(batch: &Batch, cancel: bool, width: u16) -> Paragraph<'static> {
     .wrap(Wrap { trim: false })
 }
 
+/// Joins `detail` with ` · `. The path in front wraps by cell, so the paragraph's word wrap only
+/// breaks the prose after it.
+fn path_first_lines(detail: &[String], width: u16) -> Vec<Line<'static>> {
+    let mut chunks = cell_chunks(&detail[0], usize::from(width));
+    let last = chunks.pop().unwrap_or_default();
+    chunks
+        .into_iter()
+        .chain([std::iter::once(last)
+            .chain(detail[1..].iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" · ")])
+        .map(|line| Line::styled(line, dim()))
+        .collect()
+}
+
 /// Every frozen target before the batch runs: its exact path and identity, and whether it is
 /// eligible, a no-op or blocked, with the reason.
 fn preview_lines(batch: &Batch, home: &Path, width: u16) -> Vec<Line<'static>> {
@@ -4880,7 +5032,7 @@ fn preview_lines(batch: &Batch, home: &Path, width: u16) -> Vec<Line<'static>> {
         if lossy {
             // The losses to acknowledge come first, one per line; the identity follows.
             let identity = detail.remove(1);
-            lines.push(Line::styled(detail.join(" · "), dim()));
+            lines.extend(path_first_lines(&detail, width));
             // A loss that wraps continues under its text, so each bullet reads as one block.
             for loss in &target.removal.losses {
                 let chunks = column_chunks(&escape(loss), usize::from(width).saturating_sub(4));
@@ -4891,7 +5043,7 @@ fn preview_lines(batch: &Batch, home: &Path, width: u16) -> Vec<Line<'static>> {
             }
             lines.push(Line::styled(identity, dim()));
         } else {
-            lines.push(Line::styled(detail.join(" · "), dim()));
+            lines.extend(path_first_lines(&detail, width));
         }
         lines.extend(target.removal.occupies.iter().map(|identity| {
             Line::styled(
@@ -4902,14 +5054,16 @@ fn preview_lines(batch: &Batch, home: &Path, width: u16) -> Vec<Line<'static>> {
                 warn(),
             )
         }));
-        lines.extend(target.removal.shared.iter().map(|path| {
-            Line::styled(
-                format!(
-                    "also unregisters {} · not selected, its files stay",
-                    home_relative(path, home)
-                ),
-                warn(),
+        lines.extend(target.removal.shared.iter().flat_map(|path| {
+            path_first_lines(
+                &[
+                    home_relative(path, home),
+                    "also unregistered · not selected, its files stay".to_owned(),
+                ],
+                width,
             )
+            .into_iter()
+            .map(|line| line.style(warn()))
         }));
     }
     lines
@@ -5728,7 +5882,6 @@ mod tests {
             worker: ScanHandle::for_test(receiver),
             generation: 1,
             scan_revision: String::new(),
-            reload_attempt: String::new(),
             complete: false,
             problems: Default::default(),
             marks: Default::default(),
@@ -5952,6 +6105,8 @@ mod tests {
                 "/r/org/pending",
                 CheckoutState::Missing,
             ),
+            display_row(RowKey::Path("/r/x/org/proj".into()), CheckoutState::Cloned),
+            checkout("github.com/org/proj", "/r/hub/proj"),
         ];
         let names = super::short_names(&rows);
         let name = |row: &InventoryRow| names[&row.key].as_str();
@@ -5978,6 +6133,8 @@ mod tests {
                 "two/work/proj",
                 "org/pending",
                 "org/pending",
+                "x/org/proj",
+                "github.com/org/proj",
             ]
         );
     }
@@ -6071,6 +6228,45 @@ mod tests {
         alternate_only.restore();
         assert!(!alternate_only.raw);
         assert!(!alternate_only.alternate);
+    }
+
+    #[test]
+    fn column_chunks_wrap_on_spaces_and_cut_only_what_never_fits() {
+        let chunks = super::column_chunks(
+            "commits not on any remote: branch feature-1, branch feature-10, branch feature-11",
+            36,
+        );
+        assert_eq!(
+            chunks,
+            [
+                "commits not on any remote: branch",
+                "feature-1, branch feature-10, branch",
+                "feature-11"
+            ]
+        );
+        assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 36));
+        assert_eq!(
+            super::column_chunks("see /very/long/path/that/never/fits ok", 10),
+            ["see", "/very/long", "/path/that", "/never/fit", "s ok"]
+        );
+    }
+
+    #[test]
+    fn a_revision_that_fails_to_load_is_the_revision_already_tried() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_path_buf();
+        let path = temp.path().join("config.toml");
+        std::fs::create_dir_all(home.join("repos")).unwrap();
+        std::fs::write(&path, "root = \"repos\"\n").unwrap();
+        let (config, ..) = crate::infrastructure::config::load_inventory(&path).unwrap();
+        let root = config.resolve_root(&home).unwrap();
+        let mut session = InventorySession::new(config, path.clone(), home, root);
+        std::fs::write(&path, "root = [\n").unwrap();
+        assert!(session.refresh().is_err());
+        assert_eq!(
+            session.scan_revision,
+            LocalInventoryFilesystem.config_revision(&path)
+        );
     }
 
     #[test]

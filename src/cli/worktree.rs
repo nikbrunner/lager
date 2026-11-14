@@ -368,21 +368,6 @@ fn print_blockers(blockers: &[Blocker]) {
     }
 }
 
-/// A loss as the popup shows it, where the path is on screen: its hint without `-C PATH`.
-pub(super) fn in_the_worktree(loss: &str, path: &str) -> String {
-    let Some((state, hint)) = loss.split_once(&format!(" (git -C {path} ")) else {
-        return loss.to_owned();
-    };
-    let hint = hint.strip_suffix(')').unwrap_or(hint);
-    let hint = match hint.split_once(" --continue or --abort") {
-        Some((command, rest)) => {
-            format!("git {command} --continue or git {command} --abort{rest}")
-        }
-        None => format!("git {hint}"),
-    };
-    format!("{state} (in the worktree: {hint})")
-}
-
 /// Everything the removal deletes, one loss per line: the files, then each named state.
 pub(super) fn removal_losses(inspection: &RemovalInspection) -> Vec<String> {
     let files = (!inspection.losses.is_empty() || inspection.git_state.is_empty())
@@ -443,7 +428,7 @@ fn losses_refused(inspection: &RemovalInspection) -> String {
 fn remove(settings: &Settings, args: WorktreeRemoveArgs, interaction: &mut dyn Interaction) -> i32 {
     let context = Some(settings.cwd.as_path());
     let path = worktrees::absolute(&settings.cwd, &args.path);
-    let inspection = worktrees::inspect_removal(&GIT, &FILES, &path, context);
+    let inspection = worktrees::inspect_removal(&GIT, &FILES, &path, context, None);
     if !inspection.blockers.is_empty() {
         print_blockers(&inspection.blockers);
         return 1;

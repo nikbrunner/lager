@@ -2685,7 +2685,7 @@ fn the_removal_service_refuses_unaccepted_losses_blockers_and_outdated_inspectio
     fs::write(hotfix.join("draft"), "draft\n").unwrap();
     let branches = fixture.branches();
 
-    let inspection = inspect_removal(&NativeGit, &Filesystem, &hotfix, None);
+    let inspection = inspect_removal(&NativeGit, &Filesystem, &hotfix, None, None);
     assert_eq!(inspection.path, hotfix);
     assert_eq!(
         inspection.primary.as_deref(),
@@ -2708,7 +2708,7 @@ fn the_removal_service_refuses_unaccepted_losses_blockers_and_outdated_inspectio
     );
 
     git(&fixture.primary, &["worktree", "lock", text(&hotfix)]);
-    let locked = inspect_removal(&NativeGit, &Filesystem, &hotfix, None);
+    let locked = inspect_removal(&NativeGit, &Filesystem, &hotfix, None, None);
     assert_eq!(locked.blockers.len(), 1);
     assert!(!locked.force_helps());
     assert_eq!(
@@ -2759,7 +2759,7 @@ fn the_removal_service_checks_submodule_directories_and_autostashes_again_before
     }
     let fixture = with_submodule();
     let docs = fixture.linked("docs", &["-b", "docs"]);
-    let confirmed = inspect_removal(&NativeGit, &Filesystem, &docs, None);
+    let confirmed = inspect_removal(&NativeGit, &Filesystem, &docs, None, None);
     assert_eq!(confirmed.blockers, []);
     assert!(confirmed.losses.is_empty());
     let notes = docs.join("vendor/theme/notes.txt");
@@ -2773,7 +2773,7 @@ fn the_removal_service_checks_submodule_directories_and_autostashes_again_before
             remove(&NativeGit, &Filesystem, &confirmed, true, None),
             Err(RemoveError::Stale)
         );
-        let current = inspect_removal(&NativeGit, &Filesystem, &docs, None);
+        let current = inspect_removal(&NativeGit, &Filesystem, &docs, None, None);
         assert_eq!(current.blockers.len(), 1, "{:?}", current.blockers);
         assert!(!current.force_helps());
         assert_eq!(

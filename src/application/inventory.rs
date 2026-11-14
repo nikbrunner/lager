@@ -330,7 +330,6 @@ pub fn build_inventory(
         );
     }
 
-    drop(observed_paths);
     for checkout in scan.checkouts {
         let observed = checkout.path.clone();
         let stale = matches!(&checkout.branch, ObservationField::Stale(_))
@@ -1614,6 +1613,133 @@ Path("/h/repos/loose") | git@unused.git | /h/repos/loose | Unregistered | Cloned
 Path("/h/repos/pending/one") | /h/repos/pending/one | /h/repos/pending/one | Unregistered | Unknown | pending | Pending | Pending | Some("/h/repos/pending/one") | None | [] | None
 Path("/h/repos/stale/path") | /h/repos/stale/path | /h/repos/stale/path | Unregistered | Unknown | stale observation | Stale("target changed during observation") | Stale("target changed during observation") | Some("/h/repos/stale/path") | None | ["Target changed before its Git observation completed"] | None
 Pattern("github.com/team/*") | github.com/team/* | /h/repos/team | Pattern | Pattern | git@github.com:team/*.git | NotApplicable | NotApplicable | None | Some("github.com/team/*") | ["excludes skip"] | None
+"##
+        );
+    }
+
+    /// Pins the merge where identities collide: duplicate declarations of one identity,
+    /// overlapping wildcards, a declaration matched by several checkouts, swapped checkouts at
+    /// two declared destinations, repeated pending and stale paths, repeated members with mixed
+    /// archived flags and a second catalog merged into the first.
+    #[test]
+    fn colliding_identities_merge_the_same_way_every_time() {
+        let home = PathBuf::from("/h");
+        let at = |relative: &str| home.join("repos").join(relative);
+        let config = config(&[
+            ("github.com/org/a", &[]),
+            ("https://github.com/org/a", &[]),
+            ("github.com/org/b", &[]),
+            ("github.com/org/c", &[]),
+            ("github.com/org/e", &[]),
+            ("github.com/org/*", &["c"]),
+            ("github.com/org/*", &["z"]),
+            ("github.com/team/*", &["skip"]),
+        ]);
+        let mut stale = checkout(at("z/a3"), "github.com/org/a");
+        stale.changes = ObservationField::Stale("moved".to_owned());
+        let scan = LocalScan {
+            checkouts: vec![
+                checkout(at("org/a"), "github.com/org/a"),
+                checkout(at("x/a1"), "github.com/org/a"),
+                checkout(at("y/a2"), "github.com/org/a"),
+                stale,
+                checkout(at("org/b"), "github.com/org/c"),
+                checkout(at("org/c"), "github.com/org/b"),
+                checkout(at("org/m1"), "github.com/org/m1"),
+                checkout(at("o/occ"), "github.com/other/occ"),
+            ],
+            pending_paths: vec![at("org/a"), at("p/one"), at("p/one"), at("x/a1")],
+            stale_paths: vec![at("s/one"), at("s/one"), at("p/one")],
+            complete: false,
+            ..Default::default()
+        };
+        let filesystem = FakeFilesystem(vec![at("org/b"), at("org/c"), at("o/occ")]);
+        let mut report =
+            build_inventory(&filesystem, &config, Path::new("/c.toml"), &home, scan).unwrap();
+        let mut seen = String::new();
+        for (members, include_archived) in [
+            (
+                vec![
+                    summary("github.com/org/m1", false),
+                    summary("github.com/org/m1", true),
+                    summary("github.com/org/m2", true),
+                    summary("github.com/org/m2", false),
+                    summary("github.com/org/z", false),
+                    summary("github.com/org/c", false),
+                    summary("github.com/team/skip", false),
+                    summary("github.com/team/t1", true),
+                    summary("github.com/other/occ", false),
+                    summary("github.com/other/free", false),
+                ],
+                false,
+            ),
+            (
+                vec![
+                    summary("github.com/org/m2", false),
+                    summary("github.com/team/t1", true),
+                    summary("github.com/team/t2", true),
+                    summary("github.com/other/free", true),
+                    summary("github.com/org/e", false),
+                ],
+                true,
+            ),
+        ] {
+            add_remote_catalog(
+                &mut report,
+                &filesystem,
+                &config,
+                &home,
+                members,
+                include_archived,
+            )
+            .unwrap();
+            seen.push_str(&render(&report));
+            seen.push_str("--\n");
+        }
+        assert_eq!(
+            seen,
+            r##"Declaration { identity: "github.com/org/a", destination: "/h/repos/org/a" } | github.com/org/a | /h/repos/org/a | Explicit | Cloned | git@github.com/org/a.git | Known("main") | Clean | Some("/h/repos/org/a") | Some("https://github.com/org/a") | ["covered by github.com/org/*", "covered by github.com/org/*"] | None
+Declaration { identity: "github.com/org/b", destination: "/h/repos/org/b" } | github.com/org/b | /h/repos/org/b | Explicit | Conflict | git@github.com:org/b.git | Pending | Pending | None | Some("github.com/org/b") | ["covered by github.com/org/*", "covered by github.com/org/*", "configured destination contains a different checkout"] | None
+Declaration { identity: "github.com/org/c", destination: "/h/repos/org/c" } | github.com/org/c | /h/repos/org/c | Explicit | Conflict | git@github.com:org/c.git | Pending | Pending | None | Some("github.com/org/c") | ["excluded by github.com/org/*", "covered by github.com/org/*", "configured destination contains a different checkout"] | Some(false)
+Declaration { identity: "github.com/org/e", destination: "/h/repos/org/e" } | github.com/org/e | /h/repos/org/e | Explicit | Missing | git@github.com:org/e.git | Pending | Pending | None | Some("github.com/org/e") | ["covered by github.com/org/*", "covered by github.com/org/*"] | None
+Declaration { identity: "github.com/org/m2", destination: "/h/repos/org/m2" } | github.com/org/m2 | /h/repos/org/m2 | Wildcard { pattern: "github.com/org/*" } | RemoteOnly | git@github.com:org/m2.git | NotApplicable | NotApplicable | None | None | ["covered by github.com/org/*", "covered by github.com/org/*"] | Some(false)
+Declaration { identity: "github.com/org/z", destination: "/h/repos/org/z" } | github.com/org/z | /h/repos/org/z | Wildcard { pattern: "github.com/org/*" } | RemoteOnly | git@github.com:org/z.git | NotApplicable | NotApplicable | None | None | ["covered by github.com/org/*", "excluded by github.com/org/*"] | Some(false)
+Declaration { identity: "github.com/other/free", destination: "/h/repos/other/free" } | github.com/other/free | /h/repos/other/free | Unregistered | RemoteOnly | git@github.com:other/free.git | NotApplicable | NotApplicable | None | None | [] | Some(false)
+Declaration { identity: "github.com/team/skip", destination: "/h/repos/team/skip" } | github.com/team/skip | /h/repos/team/skip | Excluded { pattern: "github.com/team/*" } | RemoteOnly | git@github.com:team/skip.git | NotApplicable | NotApplicable | None | None | ["excluded by github.com/team/*"] | Some(false)
+Checkout { identity: "github.com/org/a", path: "/h/repos/x/a1" } | github.com/org/a | /h/repos/x/a1 | Explicit | Cloned | git@github.com/org/a.git | Known("main") | Clean | Some("/h/repos/x/a1") | Some("github.com/org/a") | ["misplaced checkout; found: /h/repos/x/a1; configured: /h/repos/org/a", "covered by github.com/org/*", "covered by github.com/org/*"] | None
+Checkout { identity: "github.com/org/a", path: "/h/repos/y/a2" } | github.com/org/a | /h/repos/y/a2 | Explicit | Cloned | git@github.com/org/a.git | Known("main") | Clean | Some("/h/repos/y/a2") | Some("github.com/org/a") | ["misplaced checkout; found: /h/repos/y/a2; configured: /h/repos/org/a", "covered by github.com/org/*", "covered by github.com/org/*"] | None
+Checkout { identity: "github.com/org/a", path: "/h/repos/z/a3" } | github.com/org/a | /h/repos/z/a3 | Explicit | Unknown | git@github.com/org/a.git | Known("main") | Stale("moved") | Some("/h/repos/z/a3") | Some("github.com/org/a") | ["misplaced checkout; found: /h/repos/z/a3; configured: /h/repos/org/a", "covered by github.com/org/*", "covered by github.com/org/*"] | None
+Checkout { identity: "github.com/org/b", path: "/h/repos/org/c" } | github.com/org/b | /h/repos/org/c | Explicit | Cloned | git@github.com/org/b.git | Known("main") | Clean | Some("/h/repos/org/c") | Some("github.com/org/b") | ["misplaced checkout; found: /h/repos/org/c; configured: /h/repos/org/b", "covered by github.com/org/*", "covered by github.com/org/*"] | None
+Checkout { identity: "github.com/org/c", path: "/h/repos/org/b" } | github.com/org/c | /h/repos/org/b | Explicit | Cloned | git@github.com/org/c.git | Known("main") | Clean | Some("/h/repos/org/b") | Some("github.com/org/c") | ["misplaced checkout; found: /h/repos/org/b; configured: /h/repos/org/c", "excluded by github.com/org/*", "covered by github.com/org/*"] | Some(false)
+Checkout { identity: "github.com/org/m1", path: "/h/repos/org/m1" } | github.com/org/m1 | /h/repos/org/m1 | Wildcard { pattern: "github.com/org/*" } | Cloned | git@github.com/org/m1.git | Known("main") | Clean | Some("/h/repos/org/m1") | None | ["covered by github.com/org/*", "covered by github.com/org/*"] | Some(true)
+Checkout { identity: "github.com/other/occ", path: "/h/repos/o/occ" } | github.com/other/occ | /h/repos/o/occ | Unregistered | Cloned | git@github.com/other/occ.git | Known("main") | Clean | Some("/h/repos/o/occ") | None | [] | Some(false)
+Path("/h/repos/p/one") | /h/repos/p/one | /h/repos/p/one | Unregistered | Unknown | stale observation | Stale("target changed during observation") | Stale("target changed during observation") | Some("/h/repos/p/one") | None | ["Target changed before its Git observation completed"] | None
+Path("/h/repos/s/one") | /h/repos/s/one | /h/repos/s/one | Unregistered | Unknown | stale observation | Stale("target changed during observation") | Stale("target changed during observation") | Some("/h/repos/s/one") | None | ["Target changed before its Git observation completed"] | None
+Pattern("github.com/org/*") | github.com/org/* | /h/repos/org | Pattern | Pattern | git@github.com:org/*.git | NotApplicable | NotApplicable | None | Some("github.com/org/*") | ["excludes z"] | None
+Pattern("github.com/team/*") | github.com/team/* | /h/repos/team | Pattern | Pattern | git@github.com:team/*.git | NotApplicable | NotApplicable | None | Some("github.com/team/*") | ["excludes skip"] | None
+--
+Declaration { identity: "github.com/org/a", destination: "/h/repos/org/a" } | github.com/org/a | /h/repos/org/a | Explicit | Cloned | git@github.com/org/a.git | Known("main") | Clean | Some("/h/repos/org/a") | Some("https://github.com/org/a") | ["covered by github.com/org/*", "covered by github.com/org/*"] | None
+Declaration { identity: "github.com/org/b", destination: "/h/repos/org/b" } | github.com/org/b | /h/repos/org/b | Explicit | Conflict | git@github.com:org/b.git | Pending | Pending | None | Some("github.com/org/b") | ["covered by github.com/org/*", "covered by github.com/org/*", "configured destination contains a different checkout"] | None
+Declaration { identity: "github.com/org/c", destination: "/h/repos/org/c" } | github.com/org/c | /h/repos/org/c | Explicit | Conflict | git@github.com:org/c.git | Pending | Pending | None | Some("github.com/org/c") | ["excluded by github.com/org/*", "covered by github.com/org/*", "configured destination contains a different checkout"] | Some(false)
+Declaration { identity: "github.com/org/e", destination: "/h/repos/org/e" } | github.com/org/e | /h/repos/org/e | Explicit | Missing | git@github.com:org/e.git | Pending | Pending | None | Some("github.com/org/e") | ["covered by github.com/org/*", "covered by github.com/org/*"] | Some(false)
+Declaration { identity: "github.com/org/m2", destination: "/h/repos/org/m2" } | github.com/org/m2 | /h/repos/org/m2 | Wildcard { pattern: "github.com/org/*" } | RemoteOnly | git@github.com:org/m2.git | NotApplicable | NotApplicable | None | None | ["covered by github.com/org/*", "covered by github.com/org/*"] | Some(false)
+Declaration { identity: "github.com/org/z", destination: "/h/repos/org/z" } | github.com/org/z | /h/repos/org/z | Wildcard { pattern: "github.com/org/*" } | RemoteOnly | git@github.com:org/z.git | NotApplicable | NotApplicable | None | None | ["covered by github.com/org/*", "excluded by github.com/org/*"] | Some(false)
+Declaration { identity: "github.com/other/free", destination: "/h/repos/other/free" } | github.com/other/free | /h/repos/other/free | Unregistered | RemoteOnly | git@github.com:other/free.git | NotApplicable | NotApplicable | None | None | [] | Some(true)
+Declaration { identity: "github.com/team/skip", destination: "/h/repos/team/skip" } | github.com/team/skip | /h/repos/team/skip | Excluded { pattern: "github.com/team/*" } | RemoteOnly | git@github.com:team/skip.git | NotApplicable | NotApplicable | None | None | ["excluded by github.com/team/*"] | Some(false)
+Declaration { identity: "github.com/team/t1", destination: "/h/repos/team/t1" } | github.com/team/t1 | /h/repos/team/t1 | Wildcard { pattern: "github.com/team/*" } | RemoteOnly | git@github.com:team/t1.git | NotApplicable | NotApplicable | None | None | ["covered by github.com/team/*"] | Some(true)
+Declaration { identity: "github.com/team/t2", destination: "/h/repos/team/t2" } | github.com/team/t2 | /h/repos/team/t2 | Wildcard { pattern: "github.com/team/*" } | RemoteOnly | git@github.com:team/t2.git | NotApplicable | NotApplicable | None | None | ["covered by github.com/team/*"] | Some(true)
+Checkout { identity: "github.com/org/a", path: "/h/repos/x/a1" } | github.com/org/a | /h/repos/x/a1 | Explicit | Cloned | git@github.com/org/a.git | Known("main") | Clean | Some("/h/repos/x/a1") | Some("github.com/org/a") | ["misplaced checkout; found: /h/repos/x/a1; configured: /h/repos/org/a", "covered by github.com/org/*", "covered by github.com/org/*"] | None
+Checkout { identity: "github.com/org/a", path: "/h/repos/y/a2" } | github.com/org/a | /h/repos/y/a2 | Explicit | Cloned | git@github.com/org/a.git | Known("main") | Clean | Some("/h/repos/y/a2") | Some("github.com/org/a") | ["misplaced checkout; found: /h/repos/y/a2; configured: /h/repos/org/a", "covered by github.com/org/*", "covered by github.com/org/*"] | None
+Checkout { identity: "github.com/org/a", path: "/h/repos/z/a3" } | github.com/org/a | /h/repos/z/a3 | Explicit | Unknown | git@github.com/org/a.git | Known("main") | Stale("moved") | Some("/h/repos/z/a3") | Some("github.com/org/a") | ["misplaced checkout; found: /h/repos/z/a3; configured: /h/repos/org/a", "covered by github.com/org/*", "covered by github.com/org/*"] | None
+Checkout { identity: "github.com/org/b", path: "/h/repos/org/c" } | github.com/org/b | /h/repos/org/c | Explicit | Cloned | git@github.com/org/b.git | Known("main") | Clean | Some("/h/repos/org/c") | Some("github.com/org/b") | ["misplaced checkout; found: /h/repos/org/c; configured: /h/repos/org/b", "covered by github.com/org/*", "covered by github.com/org/*"] | None
+Checkout { identity: "github.com/org/c", path: "/h/repos/org/b" } | github.com/org/c | /h/repos/org/b | Explicit | Cloned | git@github.com/org/c.git | Known("main") | Clean | Some("/h/repos/org/b") | Some("github.com/org/c") | ["misplaced checkout; found: /h/repos/org/b; configured: /h/repos/org/c", "excluded by github.com/org/*", "covered by github.com/org/*"] | Some(false)
+Checkout { identity: "github.com/org/m1", path: "/h/repos/org/m1" } | github.com/org/m1 | /h/repos/org/m1 | Wildcard { pattern: "github.com/org/*" } | Cloned | git@github.com/org/m1.git | Known("main") | Clean | Some("/h/repos/org/m1") | None | ["covered by github.com/org/*", "covered by github.com/org/*"] | Some(true)
+Checkout { identity: "github.com/other/occ", path: "/h/repos/o/occ" } | github.com/other/occ | /h/repos/o/occ | Unregistered | Cloned | git@github.com/other/occ.git | Known("main") | Clean | Some("/h/repos/o/occ") | None | [] | Some(false)
+Path("/h/repos/p/one") | /h/repos/p/one | /h/repos/p/one | Unregistered | Unknown | stale observation | Stale("target changed during observation") | Stale("target changed during observation") | Some("/h/repos/p/one") | None | ["Target changed before its Git observation completed"] | None
+Path("/h/repos/s/one") | /h/repos/s/one | /h/repos/s/one | Unregistered | Unknown | stale observation | Stale("target changed during observation") | Stale("target changed during observation") | Some("/h/repos/s/one") | None | ["Target changed before its Git observation completed"] | None
+Pattern("github.com/org/*") | github.com/org/* | /h/repos/org | Pattern | Pattern | git@github.com:org/*.git | NotApplicable | NotApplicable | None | Some("github.com/org/*") | ["excludes z"] | None
+Pattern("github.com/team/*") | github.com/team/* | /h/repos/team | Pattern | Pattern | git@github.com:team/*.git | NotApplicable | NotApplicable | None | Some("github.com/team/*") | ["excludes skip"] | None
+--
 "##
         );
     }

@@ -12,16 +12,16 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use super::keys::{Action, Bindings, Mode};
 use super::{
     InventorySession, POPUP, Selection, TerminalSession, View, WIDE_POPUP, abbreviate, bar,
-    choice_line, dim, discard_input, edit_text, field_lines, first_key_hint, focus, handoff_line,
-    home_relative, model, popup_body_width, popup_regions, popup_scroll_limit, rows_hint, tint,
-    wait_for_enter, warn,
+    choice_line, dim, discard_input, edit_text, exact_field_lines, field_lines, first_key_hint,
+    focus, handoff_line, home_relative, model, popup_body_width, popup_regions, popup_scroll_limit,
+    rows_hint, tint, wait_for_enter, warn,
 };
 use crate::application::ports::Desktop;
 use crate::application::worktrees::{
     self, AddPlan, Blocker, Placement, RemovalInspection, RemoveError, Repository, WorktreeRecord,
     short_id,
 };
-use crate::cli::worktree::{branch_label, in_the_worktree, kept_label, removal_losses};
+use crate::cli::worktree::{branch_label, kept_label, removal_losses};
 use crate::domain::config::resolve_worktree_root;
 use crate::infrastructure::config::load_worktrees;
 use crate::infrastructure::desktop::NativeDesktop;
@@ -318,6 +318,7 @@ pub(super) fn key(
                         &FILES,
                         &record.path,
                         Some(&popup.repository.primary),
+                        Some("in the worktree: git"),
                     );
                     popup.stage = if inspection.blockers.is_empty() {
                         selection.preview_fresh = true;
@@ -881,7 +882,7 @@ fn blocked_body(
     blockers: &[Blocker],
     width: u16,
 ) -> Paragraph<'static> {
-    let mut lines = field_lines("path", &popup.shown(path), Style::default(), width);
+    let mut lines = exact_field_lines("path", &popup.shown(path), Style::default(), width);
     lines.push(Line::default());
     for blocker in blockers {
         lines.push(Line::styled(
@@ -947,13 +948,18 @@ fn sheet(popup: &Popup, bindings: &Bindings, area: Rect) -> Option<Sheet> {
                 Some(start) => format!("{} · new, at {}", escape(&plan.branch), short_id(start)),
                 None => format!("{} · existing", escape(&plan.branch)),
             };
-            let mut required = field_lines(
+            let mut required = exact_field_lines(
                 "path",
                 &popup.shown(&plan.destination),
                 Style::default(),
                 width,
             );
-            required.extend(field_lines("branch", &branch, Style::default(), width));
+            required.extend(exact_field_lines(
+                "branch",
+                &branch,
+                Style::default(),
+                width,
+            ));
             Some(Sheet {
                 title: "Add worktree / plan".to_owned(),
                 required,
@@ -991,22 +997,21 @@ fn sheet(popup: &Popup, bindings: &Bindings, area: Rect) -> Option<Sheet> {
             let lossy = inspection.lossy();
             // The losses, the exact path in full and the kept branch all have to be in view.
             let mut required = Vec::new();
-            let path = escape(inspection.path.display());
             for (index, loss) in removal_losses(inspection).iter().enumerate() {
                 required.extend(field_lines(
                     if index == 0 { "losses" } else { "" },
-                    &in_the_worktree(loss, &path),
+                    loss,
                     if lossy { warn() } else { focus() },
                     width,
                 ));
             }
-            required.extend(field_lines(
+            required.extend(exact_field_lines(
                 "path",
                 &popup.shown(&inspection.path),
                 Style::default(),
                 width,
             ));
-            required.extend(field_lines(
+            required.extend(exact_field_lines(
                 "branch",
                 &escape(kept_label(inspection)),
                 Style::default(),

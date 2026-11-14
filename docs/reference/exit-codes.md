@@ -16,7 +16,7 @@ fails to load automatically do not count as failures. A
 cancelled confirmation and a cancelled batch do not count either, including
 cancelling from the quit prompt of a running batch; blocked and failed batch
 targets do. Non-TTY
-use, invalid flags and unavailable remote discovery exit `2` before raw mode;
+use and invalid flags exit `2` before raw mode;
 fatal startup/configuration errors exit `1`. In Unix binary inventory sessions,
 Ctrl-C or SIGINT exits `130`, SIGTERM `143` and SIGHUP `129` (128 plus the
 signal number). The terminal is restored first; the local scan and the provider

@@ -363,20 +363,13 @@ pub fn inspect_removal(destination: &Path, expected_url: &str) -> Result<Vec<Str
         }
     }
 
-    let mut warnings = proof(&requested, destination, &git_dir, None)?;
+    let (mut warnings, unpushed) = proof(&requested, destination, &git_dir, None)?;
     let branch = git_output(destination, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
     if branch.is_err() {
         warnings.push("detached HEAD".to_owned());
     }
     // The ref warning already names a branch whose commits no remote holds.
-    let named = branch.is_ok_and(|branch| {
-        let branch = format!("branch {}", branch.trim());
-        warnings.iter().any(|warning| {
-            warning
-                .strip_prefix("commits not on any remote: ")
-                .is_some_and(|refs| refs.split(", ").any(|name| name == branch))
-        })
-    });
+    let named = branch.is_ok_and(|branch| unpushed.contains(&format!("branch {}", branch.trim())));
     if git_output(destination, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
         warnings.push("unsafe branch tip".to_owned());
     }
@@ -396,15 +389,15 @@ pub fn inspect_removal(destination: &Path, expected_url: &str) -> Result<Vec<Str
     Ok(warnings)
 }
 
-/// What removing `work_tree` and its Git directory would lose, as warnings. `root` is the
-/// checkout being removed. `submodule` is the path of a submodule below it: its warnings
+/// What removing `work_tree` and its Git directory would lose, as warnings, and the refs the
+/// ref warning names. `root` is the checkout being removed. `submodule` is the path of a submodule below it: its warnings
 /// carry that path, and its HEAD counts as a ref, since Git checks submodules out detached.
 fn proof(
     root: &Path,
     work_tree: &Path,
     git_dir: &Path,
     submodule: Option<&str>,
-) -> Result<Vec<String>, String> {
+) -> Result<(Vec<String>, Vec<String>), String> {
     // Commits recorded for a submodule show whatever `ignore` says; its own files are the
     // submodule's to prove.
     let state = local_state(work_tree, &["--ignore-submodules=dirty"])?;
@@ -465,7 +458,7 @@ fn proof(
                         proof(root, &tree, &directory, Some(&shown))
                     });
                 match found {
-                    Ok(found) => inner.extend(found),
+                    Ok((found, _)) => inner.extend(found),
                     Err(error) => {
                         inner.push(format!("submodule state is unknown: {shown}: {error}"))
                     }
@@ -502,7 +495,7 @@ fn proof(
         }
     }
     warnings.extend(inner);
-    Ok(warnings)
+    Ok((warnings, unpushed.refs))
 }
 
 /// Collects, below `directory`, the submodule repositories that no proved submodule
@@ -639,6 +632,32 @@ struct UnpushedRefs {
     refs: Vec<String>,
 }
 
+/// Orders names with runs of digits by value, so `feature-2` comes before `feature-10`.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let digits = |text: &[u8]| text.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    let (mut a, mut b) = (a.as_bytes(), b.as_bytes());
+    while let (Some(&x), Some(&y)) = (a.first(), b.first()) {
+        if x.is_ascii_digit() && y.is_ascii_digit() {
+            let (left, right) = (digits(a), digits(b));
+            let trim = |run: &[u8]| run.iter().take_while(|byte| **byte == b'0').count();
+            let (left_run, right_run) = (&a[trim(&a[..left])..left], &b[trim(&b[..right])..right]);
+            match left_run
+                .len()
+                .cmp(&right_run.len())
+                .then_with(|| left_run.cmp(right_run))
+            {
+                std::cmp::Ordering::Equal => (a, b) = (&a[left..], &b[right..]),
+                order => return order,
+            }
+        } else if x == y {
+            (a, b) = (&a[1..], &b[1..]);
+        } else {
+            return x.cmp(&y);
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
 /// How many refs one warning names before it counts the rest.
 const NAMED_REFS: usize = 8;
 
@@ -675,7 +694,12 @@ fn unpushed_refs(destination: &Path, head: bool) -> Result<UnpushedRefs, String>
     {
         unpushed.refs.push("HEAD".to_owned());
     }
-    for line in refs.lines() {
+    let mut lines = refs.lines().collect::<Vec<_>>();
+    lines.sort_by(|a, b| {
+        let (left, right) = (a.split(' ').next(), b.split(' ').next());
+        natural_cmp(left.unwrap_or_default(), right.unwrap_or_default()).then_with(|| a.cmp(b))
+    });
+    for line in lines {
         let mut fields = line.split(' ');
         let (Some(name), Some(kind), Some(id)) = (fields.next(), fields.next(), fields.next())
         else {
@@ -1152,6 +1176,15 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn natural_order_compares_digit_runs_by_value_past_leading_zeros() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        assert_eq!(super::natural_cmp("v01", "v1"), Equal);
+        assert_eq!(super::natural_cmp("v01", "v2"), Less);
+        assert_eq!(super::natural_cmp("v010", "v9"), Greater);
+        assert_eq!(super::natural_cmp("v00", "v0a"), Less);
+    }
+
+    #[test]
     fn reports_local_state_warnings_without_network_access() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
@@ -1235,6 +1268,9 @@ mod tests {
         run_git(&clone, &["add", "commit.txt"]);
         run_git(&clone, &["commit", "-qm", "ahead"]);
         let ahead = super::inspect_removal(&clone, origin.trim()).unwrap();
+        let (_, named) = super::proof(&clone, &clone, &clone.join(".git"), None).unwrap();
+        assert_eq!(named.len(), 1);
+        assert!(named[0].starts_with("branch "), "{named:?}");
         // The ref warning names the branch, so the ahead count does not repeat it.
         assert!(
             ahead

@@ -4,7 +4,7 @@ This page records the [PRD §6.2](../prd/1.0.0.md#62-responsiveness-and-verifica
 
 ## Results
 
-Measured 2026-11-14 on an Apple M5 Pro (18 cores, 48 GB), macOS 26.4.1 (25E253), Python 3.14.7, release build of the working tree at `c47eb9f` plus the linear inventory rebuild. The machine was in ordinary use: load average 5.3 at the end of the run. One run of the script covers every row, delayed-provider rows included.
+Measured 2026-11-14 on an Apple M5 Pro (18 cores, 48 GB), macOS 26.4.1 (25E253), Python 3.14.7, release build of commit `4c94544`. The machine was in ordinary use: load average 5.3 at the end of the run. One run of the script covers every row, delayed-provider rows included.
 
 | Condition | Samples | 100 repos p95 | 1,000 repos p95 | Target | Result |
 | --- | --- | --- | --- | --- | --- |
@@ -18,7 +18,7 @@ Measured 2026-11-14 on an Apple M5 Pro (18 cores, 48 GB), macOS 26.4.1 (25E253),
 | Row navigation during delayed provider | 100 keys | 0.6 ms | 3.6 ms | ≤50 ms | pass |
 | `lager ls`, whole process | 20 runs | 827.6 ms | 8,913.7 ms | none | recorded |
 
-Medians at 1,000 repositories: 5.4 ms for search and 14.6 ms for navigation during a refresh, 3.9 ms and 3.5 ms while only the provider loads. Input still slows while local observations arrive, not while a provider loads. The slowest cold first frame at 100 repositories was 377.9 ms, a single outlier among values near 10 ms; the nearest-rank p95 is 12.0 ms.
+Medians at 1,000 repositories: 5.4 ms for search and 14.6 ms for navigation during a refresh, 3.9 ms and 3.5 ms while only the provider loads. Input slows while local observations arrive, not while a provider loads. The slowest cold first frame at 100 repositories was 377.9 ms, a single outlier among values near 10 ms; the nearest-rank p95 is 12.0 ms.
 
 `lager ls` exits `1` on both fixtures because the unreadable checkouts are scan problems. It finishes the scan and every Git observation before printing, so its time tracks source completion.
 

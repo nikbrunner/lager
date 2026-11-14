@@ -1,10 +1,10 @@
 # Repository-management acceptance checklist
 
-For the read-only TUI, use the [inventory acceptance walkthrough](docs/how-to/verify-inventory.md).
+For the inventory TUI, use the [inventory acceptance walkthrough](docs/how-to/verify-inventory.md).
 
 ## Test context
 
-- Build: repository-hardening implementation. Record `lager --version` with
+- Build: the binary under test. Record `lager --version` with
   the acceptance results.
 - Surface: CLI, its terminal prompts and picker, and the inventory TUI for worktrees and remote discovery; no browser.
 - Persona: ordinary local user, not root. Use only disposable repositories.
@@ -13,7 +13,7 @@ For the read-only TUI, use the [inventory acceptance walkthrough](docs/how-to/ve
   terminal-safe human fields, config/provider acceptance evidence, worktree
   commands and the Worktrees popup, and remote discovery in the inventory.
 - Local evidence: formatting, warning-denying Clippy, the locked all-target suite
-  (462 tests), and the release build passed on macOS ARM64.
+  (516 tests), and the release build passed on macOS ARM64.
 - Boundary: native OS/shell signal and job-control behavior is unchanged.
   Custom signal forwarding and universal signal-driven terminal restoration are
   deferred; this checklist does not claim those guarantees.
@@ -223,8 +223,8 @@ auth/pagination tests passed. No real provider credentials were supplied or save
 ## Sign-off
 
 - Decision: local automated gates passed; **pending** human acceptance and Linux validation.
-- Known limitations: broader process/signal supervision is deferred. No 1.0,
-  inventory, standalone worktree, or TUI completion claim.
+- Known limitations: broader process/signal supervision is deferred. This
+  checklist claims no completion until the human run and Linux validation pass.
 - Tester/date: [fill in].
 - Preserve this sandbox while reporting defects. It contains disposable data;
   delete it manually only after confirming the printed path and finishing review.
