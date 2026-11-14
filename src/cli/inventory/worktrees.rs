@@ -571,13 +571,13 @@ pub(super) fn run(
         remaining.iter().for_each(|line| handoff_line(line));
         // The terminal stays with the shell: an interrupted child ends the session.
         if cancelled || interrupted().is_some() {
-            session.worker.cancel_and_join();
+            session.worker.cancel();
             return Some(interrupted().unwrap_or(130));
         }
         discard_input();
         handoff_line("Enter returns to the inventory. Ctrl-C exits 130.");
         if let Some(code) = wait_for_enter(interrupted) {
-            session.worker.cancel_and_join();
+            session.worker.cancel();
             return Some(code);
         }
         session.message = Some(format!("{what}: {message} · {}", remaining.join(" · ")));

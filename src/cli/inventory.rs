@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -34,7 +34,8 @@ use crate::infrastructure::desktop::NativeDesktop;
 use crate::infrastructure::filesystem::Filesystem;
 use crate::infrastructure::git::NativeGit;
 use crate::infrastructure::inventory::{
-    LocalInventoryFilesystem, ScanContext, ScanEvent, ScanHandle, start_local_scan_with_context,
+    CANCELLATION_BOUND, LocalInventoryFilesystem, ScanContext, ScanEvent, ScanHandle,
+    start_local_scan_with_context,
 };
 use crate::infrastructure::providers::ConfiguredProviders;
 use crate::infrastructure::shell::{Shell, ShellError};
@@ -108,8 +109,9 @@ pub fn run(config_path: &Path, args: InventoryArgs, interrupted: impl Fn() -> Op
         }
     };
     let code = terminal.run(&mut session, &interrupted);
-    // The terminal is restored before the session waits for provider requests to end.
+    // The terminal is restored before the session waits for background work to end.
     drop(terminal);
+    session.stop_background();
     code
 }
 
@@ -121,6 +123,10 @@ struct InventorySession {
     scan: LocalScan,
     worker: ScanHandle,
     generation: u64,
+    /// The configuration revision the running scan started from.
+    scan_revision: String,
+    /// The configuration revision the last automatic reload tried.
+    reload_attempt: String,
     complete: bool,
     problems: SessionProblems,
     marks: Marks,
@@ -150,9 +156,10 @@ impl InventorySession {
         home: PathBuf,
         root: PathBuf,
     ) -> Self {
+        let scan_revision = LocalInventoryFilesystem.config_revision(&config_path);
         let worker = start_local_scan_with_context(ScanContext {
             generation: 1,
-            config_revision: LocalInventoryFilesystem.config_revision(&config_path),
+            config_revision: scan_revision.clone(),
             root: root.clone(),
         });
         let remote = RemoteDiscovery::new(
@@ -171,6 +178,8 @@ impl InventorySession {
             scan: LocalScan::default(),
             worker,
             generation: 1,
+            scan_revision,
+            reload_attempt: String::new(),
             complete: false,
             problems: SessionProblems::default(),
             marks: Marks::default(),
@@ -309,6 +318,56 @@ impl InventorySession {
         }
     }
 
+    /// A configuration changed on disk drops every later event of the running scan, so the scan
+    /// is restarted with it, once per revision. It waits for the normal view, so bindings never
+    /// change under an open dialog, and for a batch, which refreshes after its own writes. A
+    /// revision that fails to load is a notice, not a session problem: an editor's half-written
+    /// save is retried on its next save.
+    fn reload_changed_config(&mut self, idle: bool) {
+        if self.complete || self.running() || !idle {
+            return;
+        }
+        let revision = LocalInventoryFilesystem.config_revision(&self.config_path);
+        if revision == self.scan_revision || revision == self.reload_attempt {
+            return;
+        }
+        self.notice = Some(match self.refresh() {
+            Ok(()) => match self.notice.take() {
+                Some(warning) => format!("Config changed on disk · reloaded · {warning}"),
+                None => "Config changed on disk · reloaded".to_owned(),
+            },
+            Err((error, _)) => format!(
+                "Config changed on disk but did not load: {} · previous configuration stays · R retries",
+                reload_reason(&error, &self.config_path)
+            ),
+        });
+    }
+
+    /// Ends the local scan and the provider requests after the terminal is restored. Both count
+    /// down one cancellation bound; what still runs after it is left behind.
+    fn stop_background(&mut self) {
+        let deadline = Instant::now() + CANCELLATION_BOUND;
+        self.worker.cancel();
+        self.remote.disable();
+        // Work that ends within moments of the cancel is waited for without a word.
+        let quiet = Instant::now() + Duration::from_millis(100);
+        while self.busy() && Instant::now() < quiet {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if self.busy() {
+            eprintln!(
+                "lager: waiting up to {} s for background work to stop…",
+                CANCELLATION_BOUND.as_secs()
+            );
+        }
+        self.worker.finish_by(deadline);
+        self.remote.shutdown_by(deadline);
+    }
+
+    fn busy(&mut self) -> bool {
+        !self.worker.finished() || self.remote.busy()
+    }
+
     fn reject_changed_target(&mut self, path: PathBuf) {
         self.scan.pending_paths.retain(|pending| pending != &path);
         self.scan.checkouts.retain(|checkout| checkout.path != path);
@@ -320,6 +379,8 @@ impl InventorySession {
     /// Installs the configuration and bindings together, or neither. The error names what
     /// stays active.
     fn refresh(&mut self) -> Result<(), (String, &'static str)> {
+        // A revision tried here, automatically or by `R`, is not reloaded automatically again.
+        self.reload_attempt = LocalInventoryFilesystem.config_revision(&self.config_path);
         let kept = |error: String| (error, "configuration stays");
         let (config, overrides, warnings) =
             load_inventory(&self.config_path).map_err(|error| kept(error.to_string()))?;
@@ -327,8 +388,9 @@ impl InventorySession {
         let root = config
             .resolve_root(&self.home)
             .map_err(|error| kept(error.to_string()))?;
-        // Do not install a new config while the old worker can still emit against it.
-        self.worker.cancel_and_join();
+        // The old worker's events carry its generation and are dropped from here on; it is
+        // not waited for, so a scan blocked in a filesystem call cannot hold the screen.
+        self.worker.cancel();
         self.receive_events();
         self.generation += 1;
         self.remote
@@ -339,11 +401,16 @@ impl InventorySession {
         self.cached_report = None;
         self.root = root.clone();
         self.scan = stale_scan(&self.scan);
-        self.worker = start_local_scan_with_context(ScanContext {
-            generation: self.generation,
-            config_revision: LocalInventoryFilesystem.config_revision(&self.config_path),
-            root,
-        });
+        self.scan_revision = LocalInventoryFilesystem.config_revision(&self.config_path);
+        std::mem::replace(
+            &mut self.worker,
+            start_local_scan_with_context(ScanContext {
+                generation: self.generation,
+                config_revision: self.scan_revision.clone(),
+                root,
+            }),
+        )
+        .detach();
         self.complete = false;
         Ok(())
     }
@@ -569,6 +636,22 @@ impl EnsureReporter for HandoffBanner<'_> {
     }
 }
 
+/// The first line of a configuration load error without the config path, short enough that the
+/// reload notice keeps its tail at 132 columns.
+fn reload_reason(error: &str, config_path: &Path) -> String {
+    let error = error.lines().next().unwrap_or_default();
+    let path = format!(" {}", config_path.display());
+    let reason = error.replacen(&path, "", 1);
+    let reason = reason
+        .split_once("config: ")
+        .map_or(reason.as_str(), |(_, rest)| rest);
+    let reason = escape(model::problem_reason(reason));
+    match reason.char_indices().nth(40) {
+        Some((end, _)) => format!("{}…", &reason[..end]),
+        None => reason,
+    }
+}
+
 fn warning_notice(warnings: Vec<String>) -> Option<String> {
     (!warnings.is_empty()).then(|| format!("warning: {}", warnings.join(" · ")))
 }
@@ -747,10 +830,11 @@ impl TerminalSession {
         let mut queued = false;
         loop {
             if let Some(code) = interrupted() {
-                session.worker.cancel_and_join();
+                session.worker.cancel();
                 return code;
             }
             session.receive_events();
+            session.reload_changed_config(selection.view() == View::Normal && !selection.quit);
             // The batch waits while the user decides whether to cancel it.
             let deciding = selection.quit;
             if !deciding && session.batch_needs_terminal() {
@@ -761,7 +845,7 @@ impl TerminalSession {
                     ran |= session.step_batch();
                     // The terminal stays with the shell: a cancelled child ends the session.
                     if session.batch_cancelled() || interrupted().is_some() {
-                        session.worker.cancel_and_join();
+                        session.worker.cancel();
                         eprintln!("\nlager: batch interrupted; completed changes remain");
                         return interrupted().unwrap_or(130);
                     }
@@ -774,7 +858,7 @@ impl TerminalSession {
                     discard_input();
                     handoff_line("Enter returns to the inventory. Ctrl-C exits 130.");
                     if let Some(code) = wait_for_enter(interrupted) {
-                        session.worker.cancel_and_join();
+                        session.worker.cancel();
                         return code;
                     }
                 }
@@ -822,7 +906,8 @@ impl TerminalSession {
             }
             if let Err(error) = self.draw_report(&report, &visible_rows, session, &mut selection) {
                 eprintln!("lager: terminal render failed: {}", escape(error));
-                return 1;
+                // A closed terminal fails the draw around the moment its SIGHUP lands.
+                return interrupted().unwrap_or(1);
             }
             // crossterm's tty source reports nothing for a zero timeout, even with keys queued.
             let ready = if held.is_some() {
@@ -835,7 +920,7 @@ impl TerminalSession {
                 }))
             };
             if let Some(code) = interrupted() {
-                session.worker.cancel_and_join();
+                session.worker.cancel();
                 return code;
             }
             typed = matches!(ready, Ok(true));
@@ -848,7 +933,7 @@ impl TerminalSession {
                     Ok(Event::Key(mut key)) if key.kind == KeyEventKind::Press => {
                         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL
                         {
-                            session.worker.cancel_and_join();
+                            session.worker.cancel();
                             return 130;
                         }
                         session.message = None;
@@ -2423,6 +2508,9 @@ fn provider_text(
     match (&provider.phase, fetched) {
         (_, Some(fetched)) if !enabled => format!("off{separator}{fetched}"),
         (_, None) if !enabled => "not fetched".to_owned(),
+        (_, _) if provider.config_changed => {
+            format!("{candidates} cached (stale) · config changed")
+        }
         (ProviderPhase::Idle, _) => format!("not fetched{stale}"),
         (ProviderPhase::Loading { .. }, Some(_)) => format!("refreshing{stale}"),
         (ProviderPhase::Loading { since }, None) => {
@@ -4530,7 +4618,7 @@ fn refresh(session: &mut InventorySession) {
 }
 
 fn quit(session: &mut InventorySession) -> i32 {
-    session.worker.cancel_and_join();
+    session.worker.cancel();
     session.receive_events();
     session.problems.exit_code()
 }
@@ -5639,6 +5727,8 @@ mod tests {
             scan: LocalScan::default(),
             worker: ScanHandle::for_test(receiver),
             generation: 1,
+            scan_revision: String::new(),
+            reload_attempt: String::new(),
             complete: false,
             problems: Default::default(),
             marks: Default::default(),

@@ -10,20 +10,24 @@
 For `tui`, normal-mode `q`/Esc or popup Ctrl-Q perform a normal
 quit: `1` if discovery, observation or another operational failure occurred in
 the session, including
-failures followed by successful refresh; otherwise `0`. Informational exclusions
-and deliberate background-work cancellation do not count as failures. A
+failures followed by successful refresh; otherwise `0`. Informational exclusions,
+deliberate background-work cancellation and a configuration changed on disk that
+fails to load automatically do not count as failures. A
 cancelled confirmation and a cancelled batch do not count either, including
 cancelling from the quit prompt of a running batch; blocked and failed batch
 targets do. Non-TTY
 use, invalid flags and unavailable remote discovery exit `2` before raw mode;
 fatal startup/configuration errors exit `1`. In Unix binary inventory sessions,
-Ctrl-C or SIGINT exits `130`; SIGTERM exits `143`. Workers are cancelled and the
-terminal is restored before returning.
+Ctrl-C or SIGINT exits `130`, SIGTERM `143` and SIGHUP `129` (128 plus the
+signal number). The terminal is restored first; the local scan and the provider
+requests then share one 2-second budget to end, and work still running after it,
+such as a scan held in a blocking filesystem call, is left behind. Every exit
+route does the same. SIGQUIT and SIGTSTP keep their default actions.
 While a clone or hook owns the terminal, Ctrl-C interrupts it and the batch, and
 a child that reports an interruption or exits `130` does the same: the session
 exits `130` without returning to the inventory, and completed targets keep their
-checkouts and registrations. SIGTERM during that time takes effect when the
-child returns; the session then exits `143`.
+checkouts and registrations. SIGTERM or SIGHUP during that time takes effect when
+the child returns; the session then exits `143` or `129`.
 
 For `worktree`, `1` covers a repository that cannot be found, a refused
 destination or branch, a blocked removal, local losses without `--force`, a

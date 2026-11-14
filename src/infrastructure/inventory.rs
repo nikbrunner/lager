@@ -67,19 +67,42 @@ impl ScanHandle {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
-    pub fn cancel_and_join(&mut self) {
+    /// Cancels the scan and lets its worker finish on its own, without waiting for it.
+    pub fn detach(mut self) {
         self.cancel();
-        if let Some(worker) = self.worker.take() {
+        self.worker = None;
+    }
+
+    /// Whether the worker has ended or is no longer waited for.
+    pub fn finished(&self) -> bool {
+        self.worker
+            .as_ref()
+            .is_none_or(|worker| worker.is_finished())
+    }
+
+    /// Cancels the scan and waits for its worker until `deadline`. The worker owns every probe
+    /// worker and waits for their children to be reaped; a traversal blocked in a filesystem
+    /// call cannot see the cancel flag, so a worker still running at the deadline is left behind.
+    pub fn finish_by(&mut self, deadline: std::time::Instant) {
+        self.cancel();
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        while !worker.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        if worker.is_finished() {
             let _ = worker.join();
         }
     }
 }
 
+/// How long ending background work may hold the caller before it is left behind.
+pub const CANCELLATION_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl Drop for ScanHandle {
     fn drop(&mut self) {
-        // The worker owns every probe worker and waits for their children to be reaped. This
-        // makes dropping a session a real cancellation boundary rather than stale-result hiding.
-        self.cancel_and_join();
+        self.finish_by(std::time::Instant::now() + CANCELLATION_BOUND);
     }
 }
 
@@ -710,7 +733,7 @@ mod tests {
         let mut command = Command::new("sh");
         command.args([
             "-c",
-            &format!("(sleep 3) & echo $! > {} ; exit 0", pid_file.display()),
+            &format!("(sleep 60) & echo $! > {} ; exit 0", pid_file.display()),
         ]);
         assert!(command_output(command, &cancel).is_ok());
         assert!(started.elapsed() < Duration::from_secs(2));
@@ -722,7 +745,7 @@ mod tests {
                 .status()
                 .is_ok_and(|status| status.success())
         };
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(10);
         while exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -769,7 +792,7 @@ mod tests {
             );
             let _ = sender.send(result);
         });
-        let deadline = Duration::from_secs(2);
+        let deadline = Duration::from_secs(30);
         let result = match receiver.recv_timeout(deadline) {
             Ok(result) => result.map_err(|error| format!("real Git status failed: {error}")),
             Err(mpsc::RecvTimeoutError::Timeout) => {

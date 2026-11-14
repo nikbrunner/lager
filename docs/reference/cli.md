@@ -396,11 +396,18 @@ The Remote discovery menu lists the providers and these entries:
 
 An answer to a request that was dropped by disabling, a refresh or the archive
 preference is ignored. `R` reloads the configuration and rescans the disk; it
-merges the cached answers into the new rows and asks no provider.
+merges the cached answers into the new rows and asks no provider. A provider
+whose settings or wildcards changed reads `N cached (stale) · config changed`
+until remote discovery fetches again. A configuration saved during a scan is
+reloaded once per saved revision as soon as no dialog, menu or input is open
+(`Config changed on disk · reloaded`). A save that does not load keeps the
+previous configuration with `Config changed on disk but did not load: <reason> ·
+previous configuration stays · R retries`, and the next save is tried again.
 
-On Unix, Ctrl-C or SIGINT interrupts binary inventory with exit `130`; SIGTERM
-exits `143`. Inventory cancels its workers and restores the terminal before
-returning. This signal policy is scoped to the binary inventory invocation;
+On Unix, Ctrl-C or SIGINT interrupts binary inventory with exit `130`, SIGTERM
+with `143` and SIGHUP with `129`. Inventory restores the terminal first, then
+gives its background work one shared 2-second budget to end; when that wait
+starts, stderr shows `lager: waiting up to 2 s for background work to stop…`. This signal policy is scoped to the binary inventory invocation;
 `lager::cli::run()` retains the embedding process's signal policy.
 
 Use the [isolated inventory walkthrough](../how-to/verify-inventory.md) for

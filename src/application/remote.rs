@@ -51,6 +51,8 @@ pub struct ProviderState {
     /// The last successful answer of this session. It outlives failures, refreshes and
     /// disabling remote discovery.
     pub cached: Option<ProviderCache>,
+    /// A reloaded configuration changed what this provider's last request was built from.
+    pub config_changed: bool,
     pending: Option<Pending>,
 }
 
@@ -80,6 +82,14 @@ pub fn wildcards(config: &Config) -> Vec<RepositoryRef> {
         .iter()
         .filter_map(|declaration| RepositoryRef::parse(&declaration.url).ok())
         .filter(RepositoryRef::is_wildcard)
+        .collect()
+}
+
+fn host_wildcards(wildcards: &[RepositoryRef], host: &str) -> Vec<RepositoryRef> {
+    wildcards
+        .iter()
+        .filter(|wildcard| wildcard.host.eq_ignore_ascii_case(host))
+        .cloned()
         .collect()
 }
 
@@ -119,8 +129,20 @@ impl<S: ProviderSource> RemoteDiscovery<S> {
     }
 
     /// Takes the providers of a reloaded configuration without a request. Answers of providers
-    /// that are still configured stay.
+    /// that are still configured stay. A provider whose settings or wildcards changed drops its
+    /// running request, and its cached answer turns stale.
     pub fn reconfigure(&mut self, source: S, wildcards: Vec<RepositoryRef>) {
+        for (host, provider) in &mut self.providers {
+            if source.settings(host) != self.source.settings(host)
+                || host_wildcards(&wildcards, host) != host_wildcards(&self.wildcards, host)
+            {
+                if let Some(pending) = provider.pending.take() {
+                    pending.cancelled.store(true, Ordering::Relaxed);
+                }
+                provider.phase = ProviderPhase::Idle;
+                provider.config_changed = true;
+            }
+        }
         self.source = Arc::new(source);
         self.install(wildcards);
     }
@@ -139,6 +161,7 @@ impl<S: ProviderSource> RemoteDiscovery<S> {
             self.providers.entry(host).or_insert(ProviderState {
                 phase: ProviderPhase::Idle,
                 cached: None,
+                config_changed: false,
                 pending: None,
             });
         }
@@ -251,18 +274,14 @@ impl<S: ProviderSource> RemoteDiscovery<S> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let since = Instant::now();
         provider.phase = ProviderPhase::Loading { since };
+        provider.config_changed = false;
         provider.pending = Some(Pending {
             request,
             cancelled: Arc::clone(&cancelled),
         });
         let source = Arc::clone(&self.source);
         let sender = self.sender.clone();
-        let wildcards = self
-            .wildcards
-            .iter()
-            .filter(|wildcard| wildcard.host.eq_ignore_ascii_case(host))
-            .cloned()
-            .collect::<Vec<_>>();
+        let wildcards = host_wildcards(&self.wildcards, host);
         let include_archived = self.include_archived;
         let host = host.to_owned();
         self.running += 1;
@@ -349,10 +368,23 @@ impl<S: ProviderSource> RemoteDiscovery<S> {
         true
     }
 
+    /// Whether a request thread has not answered yet, current or not.
+    pub fn busy(&mut self) -> bool {
+        while self.running > 0 && self.receiver.try_recv().is_ok() {
+            self.running -= 1;
+        }
+        self.running > 0
+    }
+
     /// Cancels every request and waits for the request threads, at most the cancellation bound.
     pub fn shutdown(&mut self) {
+        self.shutdown_by(Instant::now() + self.bounds.cancellation);
+    }
+
+    /// Cancels every request and waits for the request threads until `deadline`. Threads that
+    /// have not answered by then are no longer waited for.
+    pub fn shutdown_by(&mut self, deadline: Instant) {
         self.disable();
-        let deadline = Instant::now() + self.bounds.cancellation;
         while self.running > 0 {
             let left = deadline.saturating_duration_since(Instant::now());
             if self.receiver.recv_timeout(left).is_err() {
@@ -360,6 +392,7 @@ impl<S: ProviderSource> RemoteDiscovery<S> {
             }
             self.running -= 1;
         }
+        self.running = 0;
     }
 }
 
@@ -386,6 +419,7 @@ mod tests {
         answers: Mutex<BTreeMap<usize, ProviderAnswer>>,
         released: Condvar,
         cancellations: Mutex<Vec<usize>>,
+        settings: String,
     }
 
     #[derive(Clone)]
@@ -453,6 +487,10 @@ mod tests {
     impl ProviderSource for Stub {
         fn hosts(&self) -> Vec<String> {
             self.0.hosts.clone()
+        }
+
+        fn settings(&self, _host: &str) -> String {
+            self.0.settings.clone()
         }
 
         fn fetch(
@@ -803,5 +841,30 @@ mod tests {
         assert_eq!(identities(&remote), ["b.example/org/two"]);
         assert_eq!(remote.providers()["c.example"].phase, ProviderPhase::Idle);
         assert!(next.requests().is_empty() && stub.requests().len() == 2);
+    }
+
+    #[test]
+    fn a_reloaded_configuration_turns_an_answer_stale_when_its_provider_settings_changed() {
+        let settled = |settings: &str| {
+            Stub(Arc::new(Gated {
+                hosts: vec!["a.example".to_owned()],
+                settings: settings.to_owned(),
+                ..Gated::default()
+            }))
+        };
+        let stub = settled("api one");
+        let mut remote = discovery(&stub);
+        remote.enable();
+        stub.wait_for_requests(1);
+        stub.answer(0, Ok(vec![member("a.example/org/one")]));
+        settle(&mut remote, &["a.example"]);
+
+        remote.reconfigure(settled("api one"), Vec::new());
+        assert_eq!(remote.providers()["a.example"].phase, ProviderPhase::Ready);
+        remote.reconfigure(settled("api two"), Vec::new());
+        let provider = &remote.providers()["a.example"];
+        assert_eq!(provider.phase, ProviderPhase::Idle);
+        assert!(provider.stale() && provider.config_changed);
+        assert_eq!(identities(&remote), ["a.example/org/one"]);
     }
 }

@@ -25,7 +25,7 @@ impl InventorySignals {
         #[cfg(unix)]
         {
             INTERRUPTED.store(0, Ordering::Relaxed);
-            for signal in [libc::SIGINT, libc::SIGTERM] {
+            for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
                 // SAFETY: both actions are initialized C structs. The handler only records a
                 // lock-free atomic; cancellation and terminal restoration run on the main thread.
                 unsafe {

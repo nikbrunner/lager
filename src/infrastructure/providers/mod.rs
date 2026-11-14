@@ -114,6 +114,15 @@ impl ProviderSource for ConfiguredProviders {
         self.adapters.keys().cloned().collect()
     }
 
+    fn settings(&self, host: &str) -> String {
+        match self.adapter(host) {
+            Ok(Adapter::Github(adapter)) => format!("{:?}", adapter.config),
+            Ok(Adapter::BitbucketCloud(adapter)) => format!("{:?}", adapter.config),
+            Ok(Adapter::BitbucketDataCenter(adapter)) => format!("{:?}", adapter.config),
+            Err(_) => String::new(),
+        }
+    }
+
     fn fetch(
         &self,
         host: &str,

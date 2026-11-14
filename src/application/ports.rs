@@ -244,6 +244,12 @@ pub trait ProviderSource: Send + Sync + 'static {
     /// The configured providers, by host.
     fn hosts(&self) -> Vec<String>;
 
+    /// What a request to `host` is built from besides its wildcards; a change makes earlier
+    /// answers stale.
+    fn settings(&self, _host: &str) -> String {
+        String::new()
+    }
+
     /// The provider's whole catalog and the members of `wildcards`, which all name `host`.
     /// Blocks until the provider answered; `cancelled` ends the request early where the
     /// provider can be interrupted.

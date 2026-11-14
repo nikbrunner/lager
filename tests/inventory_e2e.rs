@@ -4384,6 +4384,7 @@ fn inventory_copy_value_sends_the_full_original_value_to_the_clipboard() {
         &["pbcopy", "wl-copy", "xclip", "xsel", "clip"],
         &format!("exec cat > {}", shell_word(&copied)),
     );
+    warm_clipboard_stub(&tools);
 
     let mut values = Vec::new();
     run_inventory_pty_with_exit(
@@ -9119,6 +9120,20 @@ fn checkout_tree(
     files
 }
 
+/// macOS assesses an executable the first time it runs, and under suite load a freshly written
+/// script waits seconds for that. Running the clipboard stub once first keeps that wait out of
+/// the product's 2 s clipboard bound.
+#[cfg(unix)]
+fn warm_clipboard_stub(tools: &std::path::Path) {
+    if cfg!(target_os = "macos") {
+        let status = Command::new(tools.join("pbcopy"))
+            .stdin(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+}
+
 #[cfg(unix)]
 fn desktop_stubs(directory: &std::path::Path, names: &[&str], body: &str) {
     fs::create_dir_all(directory).unwrap();
@@ -9857,6 +9872,7 @@ fn inventory_worktree_popup_lists_every_working_tree_and_copies_the_selected_pat
         &["pbcopy", "wl-copy", "xclip", "xsel", "clip"],
         &format!("exec cat > {}", shell_word(&copied)),
     );
+    warm_clipboard_stub(&tools);
 
     let mut values = Vec::new();
     run_inventory_pty_actions_with_hook(
@@ -12100,5 +12116,391 @@ fn inventory_remote_keeps_a_provider_catalog_when_one_of_its_wildcards_fails() {
     assert_eq!(
         (fixture.gh_requests(), fixture.bitbucket.requests()),
         (4, 2)
+    );
+}
+
+/// A `.git/config` that is a FIFO holds the scan's traversal in `open`, as an unresponsive
+/// network mount under the root does.
+#[cfg(unix)]
+fn blocked_scan_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::ffi::OsStrExt;
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    let git = home.join("repos/stalled/.git");
+    fs::create_dir_all(&git).unwrap();
+    let fifo = std::ffi::CString::new(git.join("config").as_os_str().as_bytes()).unwrap();
+    // SAFETY: the path is a valid NUL-terminated string.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    (temp, home, config)
+}
+
+/// Reads the PTY until the alternate screen is left, and returns how long that took.
+#[cfg(unix)]
+fn time_until_screen_left(terminal: &mut fs::File, since: Instant) -> Duration {
+    let mut bytes = Vec::new();
+    while !String::from_utf8_lossy(&bytes).contains("\x1b[?1049l")
+        && since.elapsed() < Duration::from_secs(10)
+    {
+        read_pty(terminal, &mut bytes);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    since.elapsed()
+}
+
+/// Exits through `key` or `signal` while the scan is blocked: the terminal is restored at once
+/// and the process ends within the cancellation bound.
+#[cfg(unix)]
+fn exit_while_the_scan_is_blocked(key: &[u8], signal: Option<i32>, code: i32) {
+    use std::os::fd::AsRawFd;
+    let (_temp, home, config) = blocked_scan_fixture();
+    let mut asked = None;
+    let mut restored = Duration::ZERO;
+    run_inventory_pty_with_exit_observing(
+        support::lager(&home, &config).arg("tui"),
+        &[(vec!["Scanning local repositories"], Vec::new())],
+        24,
+        132,
+        code,
+        |_, terminal, _| {
+            let since = Instant::now();
+            asked = Some(since);
+            terminal.write_all(key).unwrap();
+            if let Some(signal) = signal {
+                // SAFETY: the PTY descriptor is live; the foreground PID belongs to this fixture.
+                unsafe {
+                    let foreground = libc::tcgetpgrp(terminal.as_raw_fd());
+                    assert!(foreground > 0);
+                    assert_eq!(libc::kill(foreground, signal), 0);
+                }
+            }
+            restored = time_until_screen_left(terminal, since);
+        },
+    );
+    let exited = asked.unwrap().elapsed();
+    assert!(
+        restored < Duration::from_secs(1),
+        "the terminal was restored after {restored:?}"
+    );
+    // The 2 s cancellation bound, plus scheduling slack on a loaded machine.
+    assert!(
+        exited < Duration::from_millis(3000),
+        "exited after {exited:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_quit_while_the_scan_is_blocked_restores_the_terminal_within_the_bound() {
+    exit_while_the_scan_is_blocked(b"q", None, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_ctrl_c_while_the_scan_is_blocked_restores_the_terminal_within_the_bound() {
+    exit_while_the_scan_is_blocked(b"\x03", None, 130);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_sigint_while_the_scan_is_blocked_restores_the_terminal_within_the_bound() {
+    exit_while_the_scan_is_blocked(b"", Some(libc::SIGINT), 130);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_sigterm_while_the_scan_is_blocked_restores_the_terminal_within_the_bound() {
+    exit_while_the_scan_is_blocked(b"", Some(libc::SIGTERM), 143);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_refresh_keeps_drawing_while_the_previous_scan_is_blocked() {
+    let (_temp, home, config) = blocked_scan_fixture();
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (vec!["Scanning local repositories"], b"R?".to_vec()),
+            (vec!["Keyboard / effective bindings"], b"\x03".to_vec()),
+        ],
+        24,
+        132,
+        130,
+        |_| {},
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_sighup_restores_the_terminal_and_exits_129() {
+    use std::os::fd::AsRawFd;
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    let transcript = run_inventory_pty_with_exit_observing(
+        support::lager(&home, &config).arg("tui"),
+        &[(vec!["Local + declarations"], Vec::new())],
+        24,
+        132,
+        129,
+        |_, terminal, _| {
+            // SAFETY: the PTY descriptor is live; the foreground PID belongs to this fixture.
+            unsafe {
+                let foreground = libc::tcgetpgrp(terminal.as_raw_fd());
+                assert!(foreground > 0);
+                assert_eq!(libc::kill(foreground, libc::SIGHUP), 0);
+            }
+        },
+    );
+    assert!(transcript.contains("\x1b[?1049l"));
+    assert!(transcript.contains("\x1b[?25h"));
+    // Nothing was left running, so nothing is waited for.
+    assert!(!transcript.contains("waiting up to"), "{transcript}");
+}
+
+/// A checkout `slow` whose `git status` writes `started` into the returned state directory and
+/// then waits while `slow` exists there.
+#[cfg(unix)]
+fn slow_probe_fixture() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    let tools = temp.path().join("tools");
+    let state = temp.path().join("state");
+    fs::create_dir_all(&tools).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::write(state.join("slow"), "").unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    init_repo(
+        &home.join("repos/slow"),
+        "git@github.com:org/slow.git",
+        true,
+    );
+    let state_word = shell_word(&state);
+    fs::write(
+        tools.join("git"),
+        format!(
+            "#!/bin/sh\ncase \"$2:$3\" in */slow:status) : > {state_word}/started; while [ -e {state_word}/slow ]; do /bin/sleep 0.05; done ;; esac\nexec {} \"$@\"\n",
+            shell_word(&support::real_tool("git"))
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    (temp, home, config, tools, state)
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_config_touched_during_a_scan_still_reaches_a_complete_scan() {
+    let (_temp, home, config, tools, state) = slow_probe_fixture();
+    run_inventory_pty_actions_with_hook(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
+        &[
+            (vec!["slow", "pending"], Vec::new()),
+            (
+                vec![
+                    "Local + declarations",
+                    "clean",
+                    "Config changed on disk · reloaded",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        24,
+        132,
+        |action| {
+            if action == 0 {
+                // The write lands while the first probe is provably running.
+                wait_for_file(&state.join("started"));
+                // A registration from another shell, an editor save or a dotfile sync.
+                fs::write(&config, "root = \"repos\"\n# touched\n").unwrap();
+                fs::remove_file(state.join("slow")).unwrap();
+            }
+        },
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_half_saved_config_during_a_scan_is_a_notice_and_the_repaired_save_completes() {
+    let (_temp, home, config, tools, state) = slow_probe_fixture();
+    run_inventory_pty_actions_with_hook(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
+        &[
+            (vec!["slow", "pending"], Vec::new()),
+            (
+                vec![
+                    "Config changed on disk but did not load:",
+                    "· previous configuration stays · R retries",
+                    "absent: problem",
+                ],
+                Vec::new(),
+            ),
+            (
+                vec![
+                    "Local + declarations",
+                    "clean",
+                    "Config changed on disk · reloaded",
+                    "absent: problem",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        24,
+        132,
+        |action| match action {
+            0 => {
+                wait_for_file(&state.join("started"));
+                fs::write(&config, "root = [\n").unwrap();
+            }
+            1 => {
+                fs::remove_file(state.join("slow")).unwrap();
+                fs::write(&config, "root = \"repos\"\n# repaired\n").unwrap();
+            }
+            _ => {}
+        },
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_config_reload_waits_until_an_open_confirmation_closes() {
+    let (_temp, home, config, tools, state) = slow_probe_fixture();
+    tracked_repo(&home.join("repos/ok"), "git@github.com:org/ok.git");
+    run_inventory_pty_actions_with_hook(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
+        &[
+            (vec!["ok", "clean", "pending"], b"k".to_vec()),
+            (vec!["selected: ok", "pending"], b"r".to_vec()),
+            (vec!["CONFIRM", "pair: Esc cancel"], b"\x1b".to_vec()),
+            (
+                vec!["NORMAL ·", "Config changed on disk · reloaded"],
+                b"q".to_vec(),
+            ),
+        ],
+        24,
+        132,
+        |action| {
+            if action == 2 {
+                wait_for_file(&state.join("started"));
+                let mut text = fs::read_to_string(&config).unwrap();
+                text.push_str("[inventory.keys.confirmation]\ncancel = [\"x\"]\n");
+                fs::write(&config, text).unwrap();
+                // Several passes of the event loop run while the dialog is open.
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        },
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_exit_shares_one_bound_between_a_blocked_scan_and_a_stuck_provider() {
+    use std::os::unix::ffi::OsStrExt;
+    let fixture = RemoteFixture::new();
+    fixture.bitbucket.hold();
+    let git = fixture.root.join("stalled/.git");
+    fs::create_dir_all(&git).unwrap();
+    let fifo = std::ffi::CString::new(git.join("config").as_os_str().as_bytes()).unwrap();
+    // SAFETY: the path is a valid NUL-terminated string.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+    let mut asked = None;
+    let transcript = run_inventory_pty_with_exit_observing(
+        &mut fixture.command(&["tui", "--remote"]),
+        &[(
+            vec!["Scanning local repositories", "bitbucket.org: loading"],
+            b"q".to_vec(),
+        )],
+        32,
+        132,
+        0,
+        |_, _, _| asked = Some(Instant::now()),
+    );
+    let exited = asked.unwrap().elapsed();
+    // One 2 s budget for both waits, plus load headroom; two budgets in a row take 4 s.
+    assert!(
+        exited < Duration::from_millis(3000),
+        "exited after {exited:?}"
+    );
+    assert!(
+        transcript.contains("lager: waiting up to 2 s for background work to stop…"),
+        "{transcript}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_refresh_drops_a_provider_answer_fetched_with_the_previous_wildcards() {
+    let fixture = RemoteFixture::new();
+    fixture.hold_gh();
+    let pids = fixture.state.join("gh.pids");
+    let mut screen = String::new();
+    run_inventory_pty_with_exit_observing(
+        &mut fixture.command(&["tui", "--remote"]),
+        &[
+            (
+                vec!["bitbucket.org: ready", "github.com: loading"],
+                b"R".to_vec(),
+            ),
+            // Checked while the old request is still held: `R` alone invalidates it.
+            (
+                vec![
+                    "NORMAL · 4 rows",
+                    "github.com: 0 cached (stale) · config changed",
+                ],
+                b"j".to_vec(),
+            ),
+            (
+                vec!["github.com: 0 cached (stale) · config changed"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        0,
+        |action, _, frame| match action {
+            0 => {
+                // The request is running with the previous wildcards when `R` arrives.
+                wait_for_file(&pids);
+                let config = REMOTE_CONFIG
+                    .replace("{BASE}", &fixture.bitbucket.base)
+                    .replace(
+                        "[[repositories]]\nurl = \"github.com/org/*\"\nexclude = [\"skip\"]\n",
+                        "[[repositories]]\nurl = \"github.com/org/added\"\n",
+                    );
+                assert!(!config.contains("org/*"));
+                fs::write(&fixture.config, config).unwrap();
+            }
+            1 => {
+                fixture.release_gh();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while fs::read_to_string(&pids)
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .filter_map(|pid| pid.parse().ok())
+                    // SAFETY: probing for existence sends no signal.
+                    .any(|pid: i32| unsafe { libc::kill(pid, 0) } == 0)
+                {
+                    assert!(Instant::now() < deadline, "gh did not end");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                // The request thread hands any answer over right after `gh` ends.
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            _ => screen = screen_text(frame, 32, 132),
+        },
+    );
+    assert!(
+        !screen.contains("github.com: ready"),
+        "an answer for the previous wildcards was accepted:\n{screen}"
     );
 }
