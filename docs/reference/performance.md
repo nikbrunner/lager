@@ -4,21 +4,21 @@ This page records the [PRD §6.2](../prd/1.0.0.md#62-responsiveness-and-verifica
 
 ## Results
 
-Measured 2026-11-13 on an Apple M5 Pro (18 cores, 48 GB), macOS 26.4.1 (25E253), Python 3.14.7, release build of the working tree at `0e8fb94` plus the task 11 changes. The machine was in ordinary use: load averages between 3.3 and 5.1. The delayed-provider rows come from a second run with `--provider-only`.
+Measured 2026-11-14 on an Apple M5 Pro (18 cores, 48 GB), macOS 26.4.1 (25E253), Python 3.14.7, release build of the working tree at `c47eb9f` plus the linear inventory rebuild. The machine was in ordinary use: load average 5.3 at the end of the run. One run of the script covers every row, delayed-provider rows included.
 
 | Condition | Samples | 100 repos p95 | 1,000 repos p95 | Target | Result |
 | --- | --- | --- | --- | --- | --- |
-| First usable frame, cold | 20 runs | 9.8 ms | 29.7 ms | ≤250 ms | pass |
-| First usable frame, warm | 20 runs | 10.5 ms | 29.3 ms | ≤250 ms | pass |
-| Source completion, cold | 20 runs | 940.6 ms | 8,853.4 ms | none | recorded |
-| Source completion, warm | 20 runs | 942.9 ms | 8,878.0 ms | none | recorded |
-| Search key during local refresh | 100 keys | 0.9 ms | 94.3 ms | ≤50 ms | 100 pass, 1,000 miss |
-| Search key during delayed provider | 100 keys | 0.7 ms | 3.8 ms | ≤50 ms | pass |
-| Row navigation during local refresh | 100 keys | 3.1 ms | 96.3 ms | ≤50 ms | 100 pass, 1,000 miss |
-| Row navigation during delayed provider | 100 keys | 0.6 ms | 3.7 ms | ≤50 ms | pass |
-| `lager ls`, whole process | 20 runs | 902.1 ms | 8,710.5 ms | none | recorded |
+| First usable frame, cold | 20 runs | 12.0 ms | 28.0 ms | ≤250 ms | pass |
+| First usable frame, warm | 20 runs | 10.5 ms | 27.5 ms | ≤250 ms | pass |
+| Source completion, cold | 20 runs | 855.7 ms | 7,987.3 ms | none | recorded |
+| Source completion, warm | 20 runs | 853.6 ms | 7,957.4 ms | none | recorded |
+| Search key during local refresh | 100 keys | 0.9 ms | 16.9 ms | ≤50 ms | pass |
+| Search key during delayed provider | 100 keys | 0.6 ms | 4.7 ms | ≤50 ms | pass |
+| Row navigation during local refresh | 100 keys | 2.4 ms | 22.7 ms | ≤50 ms | pass |
+| Row navigation during delayed provider | 100 keys | 0.6 ms | 3.6 ms | ≤50 ms | pass |
+| `lager ls`, whole process | 20 runs | 827.6 ms | 8,913.7 ms | none | recorded |
 
-Medians at 1,000 repositories: 90.0 ms for search and 90.3 ms for navigation during a refresh, 3.6 ms and 3.4 ms while only the provider loads. Input slows while local observations arrive, not while a provider loads. The slowest cold first frame at 100 repositories was 364.2 ms, a single outlier among values near 10 ms; the nearest-rank p95 is 9.8 ms.
+Medians at 1,000 repositories: 5.4 ms for search and 14.6 ms for navigation during a refresh, 3.9 ms and 3.5 ms while only the provider loads. Input still slows while local observations arrive, not while a provider loads. The slowest cold first frame at 100 repositories was 377.9 ms, a single outlier among values near 10 ms; the nearest-rank p95 is 12.0 ms.
 
 `lager ls` exits `1` on both fixtures because the unreadable checkouts are scan problems. It finishes the scan and every Git observation before printing, so its time tracks source completion.
 

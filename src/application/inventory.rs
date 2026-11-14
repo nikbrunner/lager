@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -194,9 +194,20 @@ pub fn build_inventory(
 ) -> Result<InventoryReport, String> {
     let (concrete, wildcards, explicit_identities) = declarations(config, home)?;
     let mut rows_by_key = BTreeMap::new();
+    let identities: Vec<String> = concrete
+        .iter()
+        .map(|declaration| declaration.reference.identity())
+        .collect();
+    let mut declared_by_identity: HashMap<&str, Vec<&ConcreteDeclaration<'_>>> = HashMap::new();
+    for (declaration, identity) in concrete.iter().zip(&identities) {
+        declared_by_identity
+            .entry(identity)
+            .or_default()
+            .push(declaration);
+    }
 
-    for declaration in &concrete {
-        let identity = declaration.reference.identity();
+    for (declaration, identity) in concrete.iter().zip(&identities) {
+        let identity = identity.clone();
         let (_, relationships) = registration_for(&identity, &wildcards, &explicit_identities);
         let key = declaration_key(&identity, &declaration.destination);
         rows_by_key.insert(
@@ -261,12 +272,13 @@ pub fn build_inventory(
         );
     }
 
+    let observed_paths: HashSet<&Path> = scan
+        .checkouts
+        .iter()
+        .map(|checkout| checkout.path.as_path())
+        .collect();
     for pending in &scan.pending_paths {
-        if scan
-            .checkouts
-            .iter()
-            .any(|checkout| checkout.path == *pending)
-        {
+        if observed_paths.contains(pending.as_path()) {
             continue;
         }
         let key = RowKey::Path(pending.clone());
@@ -318,14 +330,18 @@ pub fn build_inventory(
         );
     }
 
+    drop(observed_paths);
     for checkout in scan.checkouts {
         let observed = checkout.path.clone();
         let stale = matches!(&checkout.branch, ObservationField::Stale(_))
             || matches!(&checkout.changes, ObservationField::Stale(_));
         if let Some(identity) = checkout.identity.clone() {
-            let exact = concrete.iter().find(|declaration| {
-                declaration.reference.identity() == identity && declaration.destination == observed
-            });
+            let matching_declarations = declared_by_identity
+                .get(identity.as_str())
+                .map_or(&[][..], Vec::as_slice);
+            let exact = matching_declarations
+                .iter()
+                .find(|declaration| declaration.destination == observed);
             if let Some(declaration) = exact {
                 let key = declaration_key(&identity, &declaration.destination);
                 if let Some(row) = rows_by_key.get_mut(&key) {
@@ -342,10 +358,6 @@ pub fn build_inventory(
                 continue;
             }
 
-            let matching_declarations: Vec<_> = concrete
-                .iter()
-                .filter(|declaration| declaration.reference.identity() == identity)
-                .collect();
             let (registration, relationships) =
                 registration_for(&identity, &wildcards, &explicit_identities);
             let wildcard_destination = wildcards
@@ -445,13 +457,22 @@ pub fn build_inventory(
     }
 
     // A real checkout at another declared destination is a conflict, not a missing clone target.
-    for declaration in &concrete {
-        let key = declaration_key(&declaration.reference.identity(), &declaration.destination);
-        let has_conflicting_checkout = rows_by_key.values().any(|row| {
-            row.observed_path.as_ref() == Some(&declaration.destination)
-                && row.checkout == CheckoutState::Cloned
-                && matches!(&row.key, RowKey::Checkout { identity, .. } if *identity != declaration.reference.identity())
-        });
+    let mut cloned_checkouts: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    for row in rows_by_key.values() {
+        if let (RowKey::Checkout { identity, .. }, Some(path), CheckoutState::Cloned) =
+            (&row.key, &row.observed_path, &row.checkout)
+        {
+            cloned_checkouts
+                .entry(path.clone())
+                .or_default()
+                .push(identity.clone());
+        }
+    }
+    for (declaration, identity) in concrete.iter().zip(&identities) {
+        let key = declaration_key(identity, &declaration.destination);
+        let has_conflicting_checkout = cloned_checkouts
+            .get(&declaration.destination)
+            .is_some_and(|found| found.iter().any(|other| other != identity));
         if let Some(row) = rows_by_key.get_mut(&key)
             && has_conflicting_checkout
         {
@@ -600,15 +621,28 @@ fn merge_members(
     candidates: bool,
 ) -> Vec<RowKey> {
     let mut added = Vec::new();
+    let mut rows_by_identity: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut cloned_paths: HashSet<PathBuf> = HashSet::new();
+    for (index, row) in report.rows.iter().enumerate() {
+        if let Some(identity) = row_identity(row) {
+            rows_by_identity
+                .entry(identity.to_owned())
+                .or_default()
+                .push(index);
+        }
+        if row.checkout == CheckoutState::Cloned
+            && let Some(path) = &row.observed_path
+        {
+            cloned_paths.insert(path.clone());
+        }
+    }
     members.sort_by_key(|member| member.reference.identity());
     for member in members {
         let identity = member.reference.identity();
         let mut known = false;
-        for row in &mut report.rows {
-            if row_identity(row) == Some(identity.as_str()) {
-                row.archived = Some(member.archived);
-                known = true;
-            }
+        for &index in rows_by_identity.get(&identity).into_iter().flatten() {
+            report.rows[index].archived = Some(member.archived);
+            known = true;
         }
         if known || member.archived && !include_archived {
             continue;
@@ -618,10 +652,7 @@ fn merge_members(
             continue;
         }
         let destination = configured_destination(config, &member.reference, root);
-        let occupied = report.rows.iter().any(|row| {
-            row.observed_path.as_ref() == Some(&destination)
-                && row.checkout == CheckoutState::Cloned
-        });
+        let occupied = cloned_paths.contains(&destination);
         let checkout = match filesystem.destination_state(&destination) {
             CheckoutState::Missing => CheckoutState::RemoteOnly,
             _ if occupied => CheckoutState::Conflict,
@@ -629,6 +660,10 @@ fn merge_members(
         };
         let key = declaration_key(&identity, &destination);
         added.push(key.clone());
+        rows_by_identity
+            .entry(identity.clone())
+            .or_default()
+            .push(report.rows.len());
         report.rows.push(InventoryRow {
             key,
             repository: identity,
@@ -1453,5 +1488,133 @@ mod tests {
         assert!(!marks.toggle(&other));
         assert_eq!(marks.clear(), 1);
         assert!(marks.is_empty());
+    }
+
+    struct FakeFilesystem(Vec<PathBuf>);
+
+    impl InventoryFilesystem for FakeFilesystem {
+        fn destination_state(&self, destination: &Path) -> CheckoutState {
+            if self.0.iter().any(|path| path == destination) {
+                CheckoutState::Cloned
+            } else {
+                CheckoutState::Missing
+            }
+        }
+
+        fn config_revision(&self, _: &Path) -> String {
+            "rev".to_owned()
+        }
+    }
+
+    fn summary(url: &str, archived: bool) -> RepositorySummary {
+        RepositorySummary {
+            reference: RepositoryRef::parse(url).unwrap(),
+            archived,
+        }
+    }
+
+    fn render(report: &InventoryReport) -> String {
+        report
+            .rows
+            .iter()
+            .map(|row| {
+                format!(
+                    "{:?} | {} | {} | {:?} | {:?} | {} | {:?} | {:?} | {:?} | {:?} | {:?} | {:?}\n",
+                    row.key,
+                    row.repository,
+                    row.path,
+                    row.registration,
+                    row.checkout,
+                    row.origin,
+                    row.branch,
+                    row.changes,
+                    row.observed_path,
+                    row.declaration,
+                    row.warnings,
+                    row.archived,
+                )
+            })
+            .collect()
+    }
+
+    /// Pins the whole merge on a mixed fixture: declarations, a conflict, a misplaced checkout,
+    /// pending and stale paths, and provider members with candidates, archived flags and an
+    /// occupied destination.
+    #[test]
+    fn mixed_inventory_with_remote_rows_is_pinned() {
+        let home = PathBuf::from("/h");
+        let at = |relative: &str| home.join("repos").join(relative);
+        let config = config(&[
+            ("github.com/org/a", &[]),
+            ("github.com/org/b", &[]),
+            ("github.com/org/c", &[]),
+            ("github.com/org/d", &[]),
+            ("github.com/team/*", &["skip"]),
+        ]);
+        let mut stale = checkout(at("other/stale"), "github.com/other/stale");
+        stale.branch = ObservationField::Stale("moved".to_owned());
+        let scan = LocalScan {
+            checkouts: vec![
+                checkout(at("org/a"), "github.com/org/a"),
+                checkout(at("org/c"), "github.com/org/x"),
+                checkout(PathBuf::from("/h/elsewhere/d"), "github.com/org/d"),
+                checkout(at("other/u"), "github.com/other/u"),
+                checkout(at("zzz/occ"), "github.com/org/y"),
+                checkout(at("team/m1"), "github.com/team/m1"),
+                stale,
+                LocalCheckout {
+                    identity: None,
+                    ..checkout(at("loose"), "unused")
+                },
+            ],
+            pending_paths: vec![at("org/a"), at("pending/one")],
+            stale_paths: vec![at("stale/path")],
+            complete: false,
+            ..Default::default()
+        };
+        let filesystem = FakeFilesystem(vec![at("org/c"), at("zzz/occ")]);
+        let mut report =
+            build_inventory(&filesystem, &config, Path::new("/c.toml"), &home, scan).unwrap();
+        add_remote_catalog(
+            &mut report,
+            &filesystem,
+            &config,
+            &home,
+            vec![
+                summary("github.com/org/a", true),
+                summary("github.com/other/u", false),
+                summary("github.com/team/m1", false),
+                summary("github.com/team/m2", false),
+                summary("github.com/team/m2", true),
+                summary("github.com/team/skip", false),
+                summary("github.com/team/old", true),
+                summary("github.com/other/new", false),
+                summary("github.com/zzz/occ", false),
+            ],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            render(&report),
+            r##"Declaration { identity: "github.com/org/a", destination: "/h/repos/org/a" } | github.com/org/a | /h/repos/org/a | Explicit | Cloned | git@github.com/org/a.git | Known("main") | Clean | Some("/h/repos/org/a") | Some("github.com/org/a") | [] | Some(true)
+Declaration { identity: "github.com/org/b", destination: "/h/repos/org/b" } | github.com/org/b | /h/repos/org/b | Explicit | Missing | git@github.com:org/b.git | Pending | Pending | None | Some("github.com/org/b") | [] | None
+Declaration { identity: "github.com/org/c", destination: "/h/repos/org/c" } | github.com/org/c | /h/repos/org/c | Explicit | Conflict | git@github.com:org/c.git | Pending | Pending | None | Some("github.com/org/c") | ["configured destination contains a different checkout"] | None
+Declaration { identity: "github.com/org/d", destination: "/h/repos/org/d" } | github.com/org/d | /h/repos/org/d | Explicit | Missing | git@github.com:org/d.git | Pending | Pending | None | Some("github.com/org/d") | [] | None
+Declaration { identity: "github.com/other/new", destination: "/h/repos/other/new" } | github.com/other/new | /h/repos/other/new | Unregistered | RemoteOnly | git@github.com:other/new.git | NotApplicable | NotApplicable | None | None | [] | Some(false)
+Declaration { identity: "github.com/team/m2", destination: "/h/repos/team/m2" } | github.com/team/m2 | /h/repos/team/m2 | Wildcard { pattern: "github.com/team/*" } | RemoteOnly | git@github.com:team/m2.git | NotApplicable | NotApplicable | None | None | ["covered by github.com/team/*"] | Some(true)
+Declaration { identity: "github.com/team/skip", destination: "/h/repos/team/skip" } | github.com/team/skip | /h/repos/team/skip | Excluded { pattern: "github.com/team/*" } | RemoteOnly | git@github.com:team/skip.git | NotApplicable | NotApplicable | None | None | ["excluded by github.com/team/*"] | Some(false)
+Declaration { identity: "github.com/zzz/occ", destination: "/h/repos/zzz/occ" } | github.com/zzz/occ | /h/repos/zzz/occ | Unregistered | Conflict | git@github.com:zzz/occ.git | NotApplicable | NotApplicable | None | None | [] | Some(false)
+Checkout { identity: "github.com/org/d", path: "/h/elsewhere/d" } | github.com/org/d | /h/elsewhere/d | Explicit | Cloned | git@github.com/org/d.git | Known("main") | Clean | Some("/h/elsewhere/d") | Some("github.com/org/d") | ["misplaced checkout; found: /h/elsewhere/d; configured: /h/repos/org/d"] | None
+Checkout { identity: "github.com/org/x", path: "/h/repos/org/c" } | github.com/org/x | /h/repos/org/c | Unregistered | Cloned | git@github.com/org/x.git | Known("main") | Clean | Some("/h/repos/org/c") | None | [] | None
+Checkout { identity: "github.com/org/y", path: "/h/repos/zzz/occ" } | github.com/org/y | /h/repos/zzz/occ | Unregistered | Cloned | git@github.com/org/y.git | Known("main") | Clean | Some("/h/repos/zzz/occ") | None | [] | None
+Checkout { identity: "github.com/other/stale", path: "/h/repos/other/stale" } | github.com/other/stale | /h/repos/other/stale | Unregistered | Unknown | git@github.com/other/stale.git | Stale("moved") | Clean | Some("/h/repos/other/stale") | None | [] | None
+Checkout { identity: "github.com/other/u", path: "/h/repos/other/u" } | github.com/other/u | /h/repos/other/u | Unregistered | Cloned | git@github.com/other/u.git | Known("main") | Clean | Some("/h/repos/other/u") | None | [] | Some(false)
+Checkout { identity: "github.com/team/m1", path: "/h/repos/team/m1" } | github.com/team/m1 | /h/repos/team/m1 | Wildcard { pattern: "github.com/team/*" } | Cloned | git@github.com/team/m1.git | Known("main") | Clean | Some("/h/repos/team/m1") | None | ["covered by github.com/team/*"] | Some(false)
+Path("/h/repos/loose") | git@unused.git | /h/repos/loose | Unregistered | Cloned | git@unused.git | Known("main") | Clean | Some("/h/repos/loose") | None | ["Identity is the exact path"] | None
+Path("/h/repos/pending/one") | /h/repos/pending/one | /h/repos/pending/one | Unregistered | Unknown | pending | Pending | Pending | Some("/h/repos/pending/one") | None | [] | None
+Path("/h/repos/stale/path") | /h/repos/stale/path | /h/repos/stale/path | Unregistered | Unknown | stale observation | Stale("target changed during observation") | Stale("target changed during observation") | Some("/h/repos/stale/path") | None | ["Target changed before its Git observation completed"] | None
+Pattern("github.com/team/*") | github.com/team/* | /h/repos/team | Pattern | Pattern | git@github.com:team/*.git | NotApplicable | NotApplicable | None | Some("github.com/team/*") | ["excludes skip"] | None
+"##
+        );
     }
 }
