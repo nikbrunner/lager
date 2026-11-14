@@ -21,7 +21,7 @@ use crate::application::worktrees::{
     self, AddPlan, Blocker, Placement, RemovalInspection, RemoveError, Repository, WorktreeRecord,
     short_id,
 };
-use crate::cli::worktree::{branch_label, kept_label, losses_label};
+use crate::cli::worktree::{branch_label, in_the_worktree, kept_label, removal_losses};
 use crate::domain::config::resolve_worktree_root;
 use crate::infrastructure::config::load_worktrees;
 use crate::infrastructure::desktop::NativeDesktop;
@@ -155,6 +155,22 @@ impl Popup {
                     ),
                     Some(Err(_)) => states.push("changes unknown".to_owned()),
                     None => {}
+                }
+                // Named Git state is a loss too, so such a row is never called clean.
+                match worktrees::named_state_of(&GIT, &FILES, &record) {
+                    Some(Ok(named)) if !named.is_empty() => {
+                        states.retain(|state| state != "clean");
+                        states.push(format!(
+                            "{} Git state{}",
+                            named.len(),
+                            if named.len() == 1 { "" } else { "s" }
+                        ));
+                    }
+                    Some(Err(_)) => {
+                        states.retain(|state| state != "clean");
+                        states.push("Git state unknown".to_owned());
+                    }
+                    _ => {}
                 }
                 let state = states.join(" · ");
                 (record, state)
@@ -491,7 +507,7 @@ pub(super) fn run(
                 &GIT,
                 &FILES,
                 &inspection,
-                !inspection.losses.is_empty(),
+                inspection.lossy(),
                 Some(&popup.repository.primary),
             );
             handed_over = matches!(result, Ok(()) | Err(RemoveError::Failed(_)));
@@ -511,8 +527,14 @@ pub(super) fn run(
                     None
                 }
                 Err(RemoveError::Losses) => {
-                    session.message =
-                        Some("local changes would be lost; nothing removed".to_owned());
+                    session.message = Some(format!(
+                        "{} would be lost; nothing removed",
+                        if inspection.git_state.is_empty() {
+                            "local changes"
+                        } else {
+                            "the listed state"
+                        }
+                    ));
                     None
                 }
                 Err(RemoveError::Blocked(blockers)) => {
@@ -966,14 +988,18 @@ fn sheet(popup: &Popup, bindings: &Bindings, area: Rect) -> Option<Sheet> {
             })
         }
         Stage::Confirm { inspection, remove } => {
-            let lossy = !inspection.losses.is_empty();
+            let lossy = inspection.lossy();
             // The losses, the exact path in full and the kept branch all have to be in view.
-            let mut required = field_lines(
-                "losses",
-                &losses_label(&inspection.losses),
-                if lossy { warn() } else { focus() },
-                width,
-            );
+            let mut required = Vec::new();
+            let path = escape(inspection.path.display());
+            for (index, loss) in removal_losses(inspection).iter().enumerate() {
+                required.extend(field_lines(
+                    if index == 0 { "losses" } else { "" },
+                    &in_the_worktree(loss, &path),
+                    if lossy { warn() } else { focus() },
+                    width,
+                ));
+            }
             required.extend(field_lines(
                 "path",
                 &popup.shown(&inspection.path),

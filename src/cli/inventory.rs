@@ -1078,21 +1078,25 @@ impl TerminalSession {
                             Some(Action::Cancel | Action::Accept) if view == View::Problems => {
                                 selection.problems = false;
                             }
-                            Some(Action::Acknowledge) if view == View::Preview => {
-                                if let Some(batch) = selection.preview.as_mut()
-                                    && acknowledgment(batch).is_some()
-                                {
-                                    batch.acknowledged = !batch.acknowledged;
-                                }
-                            }
-                            Some(Action::Accept)
+                            Some(acting @ (Action::Acknowledge | Action::Accept))
                                 if view == View::Preview
                                     && selection.preview.as_ref().is_some_and(|batch| {
-                                        selection.preview_focus
-                                            < usize::from(acknowledgment(batch).is_some())
+                                        acknowledgment(batch).is_some()
+                                            && (acting == Action::Acknowledge
+                                                || selection.preview_focus == 0)
                                     }) =>
                             {
-                                if let Some(batch) = selection.preview.as_mut() {
+                                // Accepting a loss the user has not seen does nothing.
+                                let limit = self.preview_scroll_limit(&selection, session);
+                                if selection.preview_seen < limit {
+                                    session.message = Some(format!(
+                                        "Scroll through every loss before accepting · {}",
+                                        session
+                                            .bindings
+                                            .keys(Mode::Confirmation, Action::PageDown)
+                                            .join("/")
+                                    ));
+                                } else if let Some(batch) = selection.preview.as_mut() {
                                     batch.acknowledged = !batch.acknowledged;
                                 }
                             }
@@ -1141,15 +1145,20 @@ impl TerminalSession {
                                     (selection.preview_focus + 1).min(last)
                                 };
                             }
+                            // A page is the visible list, so paging shows every line.
                             Some(Action::PageUp) if view == View::Preview => {
+                                let page = self.preview_page(&selection, session);
                                 selection.preview_scroll =
-                                    selection.preview_scroll.saturating_sub(10);
+                                    selection.preview_scroll.saturating_sub(page);
                             }
                             Some(Action::PageDown) if view == View::Preview => {
+                                let page = self.preview_page(&selection, session);
                                 selection.preview_scroll = selection
                                     .preview_scroll
-                                    .saturating_add(10)
+                                    .saturating_add(page)
                                     .min(self.preview_scroll_limit(&selection, session));
+                                selection.preview_seen =
+                                    selection.preview_seen.max(selection.preview_scroll);
                             }
                             Some(Action::Accept)
                                 if view == View::Batch
@@ -1365,14 +1374,28 @@ impl TerminalSession {
 
     fn preview_scroll_limit(&self, selection: &Selection, session: &InventorySession) -> u16 {
         selection.preview.as_ref().map_or(0, |batch| {
-            let lines = preview_lines(batch, &session.home);
+            let width = popup_body_width(self.area(), WIDE_POPUP);
+            let lines = preview_lines(batch, &session.home, width);
             let choices = preview_choices(batch, selection.preview_focus, &session.bindings);
-            let (_, list, _) = preview_regions(self.area(), &lines, choices.len() as u16);
+            let (_, list, _, _) = preview_regions(self.area(), &lines, choices.len() as u16);
             Paragraph::new(lines)
                 .wrap(Wrap { trim: false })
                 .line_count(list.width)
                 .saturating_sub(usize::from(list.height.max(1)))
                 .min(usize::from(u16::MAX)) as u16
+        })
+    }
+
+    /// The rows of the preview list in view.
+    fn preview_page(&self, selection: &Selection, session: &InventorySession) -> u16 {
+        selection.preview.as_ref().map_or(1, |batch| {
+            let width = popup_body_width(self.area(), WIDE_POPUP);
+            let lines = preview_lines(batch, &session.home, width);
+            let choices = preview_choices(batch, selection.preview_focus, &session.bindings);
+            preview_regions(self.area(), &lines, choices.len() as u16)
+                .1
+                .height
+                .max(1)
         })
     }
 
@@ -1696,11 +1719,18 @@ impl TerminalSession {
                     }
                     View::Preview => {
                         if let Some(batch) = &shown.preview {
-                            let lines = preview_lines(batch, home);
+                            let lines =
+                                preview_lines(batch, home, popup_body_width(area, WIDE_POPUP));
                             let choice_lines =
                                 preview_choices(batch, shown.preview_focus, bindings);
-                            let ([popup, title, _, footer], list, choices) =
+                            let ([popup, title, _, footer], list, more, choices) =
                                 preview_regions(area, &lines, choice_lines.len() as u16);
+                            let below = Paragraph::new(lines.clone())
+                                .wrap(Wrap { trim: false })
+                                .line_count(list.width)
+                                .saturating_sub(
+                                    usize::from(shown.preview_scroll) + usize::from(list.height),
+                                );
                             let pages = paired_keys(
                                 &bindings.keys(Mode::Confirmation, Action::PageUp),
                                 &bindings.keys(Mode::Confirmation, Action::PageDown),
@@ -1729,6 +1759,23 @@ impl TerminalSession {
                                     .scroll((shown.preview_scroll, 0)),
                                 list,
                             );
+                            if let Some(more) = more.filter(|_| below > 0) {
+                                let page_down =
+                                    bindings.keys(Mode::Confirmation, Action::PageDown).join("/");
+                                frame.render_widget(
+                                    Paragraph::new(format!(
+                                        "… {below} more line{} · {page_down}{}",
+                                        if below == 1 { "" } else { "s" },
+                                        if acknowledges {
+                                            " · Space works once every loss is shown"
+                                        } else {
+                                            ""
+                                        }
+                                    ))
+                                    .style(warn()),
+                                    more,
+                                );
+                            }
                             frame.render_widget(Paragraph::new(choice_lines), choices);
                             let hint = |action, label| {
                                 first_key_hint(bindings, Mode::Confirmation, action, label)
@@ -1738,11 +1785,12 @@ impl TerminalSession {
                             let scroll = format!("{pages} scroll");
                             let (choose, cancel) =
                                 (hint(Action::Accept, "choose"), hint(Action::Cancel, "cancel"));
-                            // A narrow popup cuts the end of the line: the exit routes of a
-                            // removal confirmation come before the scroll hint.
+                            // A narrow popup cuts the end of the line: in a removal
+                            // confirmation scrolling comes first, since every loss has to be
+                            // seen, then the exit routes; focus also shows in the key bar.
                             let hints = if acknowledges {
                                 let acknowledge = hint(Action::Acknowledge, "acknowledge");
-                                [focus_hint, acknowledge, choose, cancel, scroll]
+                                [scroll, acknowledge, choose, cancel, focus_hint]
                             } else {
                                 [focus_hint, scroll, choose, cancel, String::new()]
                             };
@@ -3993,6 +4041,7 @@ fn activate_menu_entry(
                 selection.preview_fresh = true;
                 selection.preview_focus = 0;
                 selection.preview_scroll = 0;
+                selection.preview_seen = 0;
             }
             None
         }
@@ -4186,6 +4235,7 @@ fn confirm_removal(
     // Cancel is the default; the acknowledgment sits above it.
     selection.preview_focus = usize::from(acknowledgment(&batch).is_some());
     selection.preview_scroll = 0;
+    selection.preview_seen = 0;
     selection.preview_fresh = true;
     selection.preview = Some(batch);
 }
@@ -4674,7 +4724,7 @@ fn quit_widget(batch: &Batch, cancel: bool, width: u16) -> Paragraph<'static> {
 
 /// Every frozen target before the batch runs: its exact path and identity, and whether it is
 /// eligible, a no-op or blocked, with the reason.
-fn preview_lines(batch: &Batch, home: &Path) -> Vec<Line<'static>> {
+fn preview_lines(batch: &Batch, home: &Path, width: u16) -> Vec<Line<'static>> {
     let hidden = batch.targets.iter().filter(|target| target.hidden).count();
     let mut summary = format!(
         "{} exact {}",
@@ -4725,22 +4775,36 @@ fn preview_lines(batch: &Batch, home: &Path) -> Vec<Line<'static>> {
                 .map_or_else(|| "no identity".to_owned(), escape),
         ];
         detail.extend(reason.map(escape));
-        if batch.action.removes() {
+        let lossy = batch.action.removes()
+            && target.blocked.is_none()
+            && target.found
+            && !target.removal.losses.is_empty();
+        if batch.action.removes() && !lossy {
             detail.push(if target.blocked.is_some() {
                 "force cannot waive this".to_owned()
             } else if !target.found {
                 "known missing · absence is rechecked first".to_owned()
-            } else if target.removal.losses.is_empty() {
-                "clean".to_owned()
             } else {
-                escape(target.removal.losses.join(", "))
+                "clean".to_owned()
             });
         }
-        lines.extend([
-            Line::default(),
-            Line::from(heading),
-            Line::styled(detail.join(" · "), dim()),
-        ]);
+        lines.extend([Line::default(), Line::from(heading)]);
+        if lossy {
+            // The losses to acknowledge come first, one per line; the identity follows.
+            let identity = detail.remove(1);
+            lines.push(Line::styled(detail.join(" · "), dim()));
+            // A loss that wraps continues under its text, so each bullet reads as one block.
+            for loss in &target.removal.losses {
+                let chunks = column_chunks(&escape(loss), usize::from(width).saturating_sub(4));
+                lines.extend(chunks.into_iter().enumerate().map(|(index, chunk)| {
+                    let bullet = if index == 0 { "  - " } else { "    " };
+                    Line::styled(format!("{bullet}{chunk}"), warn())
+                }));
+            }
+            lines.push(Line::styled(identity, dim()));
+        } else {
+            lines.push(Line::styled(detail.join(" · "), dim()));
+        }
         lines.extend(target.removal.occupies.iter().map(|identity| {
             Line::styled(
                 format!(
@@ -4873,8 +4937,16 @@ fn preview_choices(batch: &Batch, focus: usize, bindings: &Bindings) -> Vec<Line
     lines
 }
 
-/// The preview popup's regions, its scrolling target list, and the choices pinned below it.
-fn preview_regions(area: Rect, list: &[Line<'static>], choices: u16) -> ([Rect; 4], Rect, Rect) {
+/// The preview popup's regions, its scrolling target list, the row below that list that
+/// tells how much is left when it does not fit, and the choices pinned below it.
+fn preview_regions(
+    area: Rect,
+    list: &[Line<'static>],
+    choices: u16,
+) -> ([Rect; 4], Rect, Option<Rect>, Rect) {
+    let rows = Paragraph::new(list.to_vec())
+        .wrap(Wrap { trim: false })
+        .line_count(popup_body_width(area, WIDE_POPUP));
     let mut sizing = list.to_vec();
     sizing.extend(std::iter::repeat_n(
         Line::default(),
@@ -4891,7 +4963,12 @@ fn preview_regions(area: Rect, list: &[Line<'static>], choices: u16) -> ([Rect; 
         Constraint::Length(choices),
     ])
     .areas(regions[2]);
-    (regions, list, choices)
+    if rows > usize::from(list.height) && list.height > 1 {
+        let [list, more] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(list);
+        return (regions, list, Some(more), choices);
+    }
+    (regions, list, None, choices)
 }
 
 /// Local wall-clock time of day, or UTC where the platform offers no local time zone.
@@ -4993,6 +5070,8 @@ struct Selection {
     /// The focused preview choice, counted from the top one.
     preview_focus: usize,
     preview_scroll: u16,
+    /// The furthest the preview list has been scrolled; acknowledging needs all of it seen.
+    preview_seen: u16,
     add: Option<AddForm>,
     /// The open Worktrees popup; it keeps the repository it was opened on.
     worktrees: Option<worktrees::Popup>,

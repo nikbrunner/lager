@@ -1,5 +1,6 @@
 pub mod batch;
 pub mod configuration;
+pub(crate) mod git_dir;
 pub mod inventory;
 pub mod ports;
 pub mod registry;

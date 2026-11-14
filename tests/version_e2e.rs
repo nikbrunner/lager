@@ -36,6 +36,7 @@ fn overlay_current_sources(source: &Path, destination: &Path) {
         "Cargo.lock",
         "build.rs",
         "src/application/batch.rs",
+        "src/application/git_dir.rs",
         "src/application/inventory.rs",
         "src/application/mod.rs",
         "src/application/ports.rs",

@@ -106,7 +106,39 @@ impl crate::application::ports::WorktreeFilesystem for Filesystem {
         std::fs::create_dir_all(path).map_err(|error| error.to_string())
     }
 
+    fn entries(&self, directory: &Path) -> Result<Vec<String>, String> {
+        entry_names(directory)
+    }
+
+    fn holds(&self, path: &Path) -> Option<bool> {
+        holds(path)
+    }
+
     fn identity(&self, path: &Path) -> Result<String, String> {
         RemovalFilesystem::directory_identity(self, path).map_err(|error| error.to_string())
+    }
+}
+
+/// The names directly inside `directory`.
+pub(crate) fn entry_names(directory: &Path) -> Result<Vec<String>, String> {
+    std::fs::read_dir(directory)
+        .and_then(|entries| {
+            entries
+                .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
+                .collect()
+        })
+        .map_err(|error| format!("cannot read {}: {error}", directory.display()))
+}
+
+/// `None` when nothing is at `path`, otherwise whether it holds anything: false only for an
+/// empty file or an empty directory, true when it cannot be read.
+pub(crate) fn holds(path: &Path) -> Option<bool> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Ok(metadata) if metadata.is_file() => Some(metadata.len() > 0),
+        Ok(metadata) if metadata.is_dir() => {
+            Some(std::fs::read_dir(path).map_or(true, |mut entries| entries.next().is_some()))
+        }
+        _ => Some(true),
     }
 }

@@ -19,6 +19,19 @@ pub enum InteractionError {
 
 pub trait Interaction {
     fn confirm(&mut self, message: &str, default: bool) -> Result<bool, InteractionError>;
+    /// Tells the user what a command is about to do without asking.
+    fn notice(&mut self, _message: &str) {}
+    /// Asks `question` below `heading` and one line per item.
+    fn confirm_list(
+        &mut self,
+        heading: &str,
+        items: &[String],
+        question: &str,
+        default: bool,
+    ) -> Result<bool, InteractionError> {
+        let items: String = items.iter().map(|item| format!("\n  - {item}")).collect();
+        self.confirm(&format!("{heading}{items}\n{question}"), default)
+    }
     fn input(
         &mut self,
         message: &str,
@@ -306,6 +319,11 @@ impl WorktreeLosses {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorktreeState {
     pub losses: WorktreeLosses,
+    /// Present files Git hides from its status, already counted in `losses.modified`.
+    pub hidden: usize,
+    /// Whether status shows changes in the index, and in the work tree.
+    pub staged: bool,
+    pub unstaged: bool,
     /// Untracked or ignored directories that hold a Git repository of their own.
     pub nested_repositories: Vec<String>,
 }
@@ -345,6 +363,8 @@ pub trait WorktreeGit {
     fn local_state(&self, worktree: &Path) -> Result<WorktreeState, String>;
     /// Submodule paths that hold a repository in this working tree.
     fn populated_submodules(&self, worktree: &Path) -> Result<Vec<String>, String>;
+    /// The refs only this worktree sees: `refs/worktree`, `refs/bisect`, `refs/rewritten`.
+    fn worktree_refs(&self, worktree: &Path) -> Result<Vec<String>, String>;
     /// A shared branch, tag or remote ref whose commit has `commit` as an ancestor.
     fn protecting_ref(&self, repository: &Path, commit: &str) -> Result<Option<String>, String>;
     /// Commits on `branch` that no remote ref holds; `None` without remote refs.
@@ -371,6 +391,11 @@ pub trait WorktreeFilesystem {
     fn kind(&self, path: &Path) -> Result<PathKind, String>;
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, String>;
     fn create_dir_all(&self, path: &Path) -> Result<(), String>;
+    /// The names directly inside `directory`.
+    fn entries(&self, directory: &Path) -> Result<Vec<String>, String>;
+    /// `None` when nothing is at `path`, otherwise whether it holds anything: false only
+    /// for an empty file or an empty directory, true when it cannot be read.
+    fn holds(&self, path: &Path) -> Option<bool>;
     /// What tells this directory from another one put at the same path later.
     fn identity(&self, path: &Path) -> Result<String, String>;
 }

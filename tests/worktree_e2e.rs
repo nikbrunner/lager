@@ -1291,7 +1291,7 @@ fn summary(path: &Path, branch: &str, losses: &str) -> String {
 }
 
 const LOSSES_REFUSED: &str =
-    "error: local changes would be lost; rerun with --force to accept the listed losses\n";
+    "error: local changes would be lost; rerun with --force to accept these losses\n";
 
 #[test]
 fn remove_deletes_a_clean_worktree_keeps_its_branch_and_counts_unpushed_commits() {
@@ -1814,7 +1814,8 @@ fn remove_names_the_shared_ref_that_holds_the_commit_of_a_head_outside_refs_head
     git(&bisect, &["symbolic-ref", "HEAD", "refs/worktree/keep"]);
     let branches = fixture.branches();
 
-    let output = fixture.worktree(&["remove", text(&bisect), "--yes"]);
+    // The ref only this worktree sees goes with it, so it is a named loss.
+    let output = fixture.worktree(&["remove", text(&bisect), "--yes", "--force"]);
 
     assert_exit(&output, 0);
     let kept = format!("detached {} · kept by refs/heads/main", short(&head));
@@ -1822,7 +1823,7 @@ fn remove_names_the_shared_ref_that_holds_the_commit_of_a_head_outside_refs_head
         stdout(&output),
         format!(
             "{}Removed worktree {} · {kept}\n",
-            summary(&bisect, &kept, "none"),
+            summary(&bisect, &kept, "per-worktree ref refs/worktree/keep"),
             bisect.display()
         )
     );
@@ -1836,7 +1837,7 @@ fn remove_blocks_when_git_cannot_prove_reachability_submodule_or_local_state() {
     let cases = [
         (
             "for-each-ref",
-            "cannot prove that detached HEAD {head} is kept by a branch, tag or remote ref: boom\nhint: keep the commit first: git -C {path} branch keep-bisect",
+            "cannot prove that detached HEAD {head} is kept by a branch, tag or remote ref: boom\nhint: keep the commit first: git -C {path} branch keep-bisect\nerror: blocked: cannot read the refs of this worktree: boom",
         ),
         (
             "ls-files",

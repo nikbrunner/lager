@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::application::git_dir;
 use crate::application::ports::{
     ConfigStore, EnsureEvent, EnsureReporter, GitClient, GitRemoval, GitState, HookRunner,
     Interaction, InteractionError, ProviderCatalog, RemovalFilesystem,
@@ -409,12 +410,17 @@ where
         Err(error) => return removal_failed(input, &error),
     };
     if !warnings.is_empty() && !force {
-        let prompt = format!(
-            "Unsafe local state at {} ({}). Force removal?",
-            destination.display(),
-            warnings.join(", ")
-        );
-        match interaction.confirm(&prompt, false) {
+        if !interactive {
+            return removal_failed(
+                input,
+                &format!(
+                    "unsafe local state: {}; rerun with --force to accept these losses",
+                    warnings.join("; ")
+                ),
+            );
+        }
+        let heading = format!("Unsafe local state at {}:", destination.display());
+        match interaction.confirm_list(&heading, &warnings, "Force removal?", false) {
             Ok(true) => {}
             Ok(false) => return removal_skipped(input),
             Err(InteractionError::Cancelled) => return removal_failed(input, "cancelled"),
@@ -441,6 +447,17 @@ where
     };
     if !force && final_warnings != warnings {
         return removal_failed(input, "local state changed before deletion");
+    }
+    if force && !final_warnings.is_empty() {
+        // The hints name commands that stop applying once the checkout is gone.
+        let lost = final_warnings
+            .iter()
+            .map(|warning| git_dir::without_hint(warning))
+            .collect::<Vec<_>>();
+        interaction.notice(&format!(
+            "{input}: removing with --force; this is lost: {}",
+            lost.join("; ")
+        ));
     }
     if let Err(error) = filesystem.remove_dir_all(&unsafe_path) {
         return removal_failed(input, &error.to_string());

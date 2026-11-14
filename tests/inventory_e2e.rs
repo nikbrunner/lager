@@ -7549,7 +7549,8 @@ fn inventory_removal_confirmation_lists_clean_loss_and_blocked_targets_and_cance
                     "dependent worktree metadata",
                     "force cannot waive this",
                     "LOSS ACKNOWLEDGMENT REQUIRED draft",
-                    "~/repos/org/draft · github.com/org/draft · unstaged changes, untracked files",
+                    "  - unstaged changes",
+                    "  - untracked files",
                     "BLOCKED local (hidden by filter)",
                     "~/repos/scratch/local · no identity · no supported origin observed",
                     "[ ] Also remove draft and accept its listed losses",
@@ -7590,6 +7591,249 @@ fn inventory_removal_confirmation_lists_clean_loss_and_blocked_targets_and_cance
     );
     assert_eq!(fs::read_to_string(&config).unwrap(), original);
     assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_removal_names_state_it_cannot_prove_safe_as_a_loss() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    let planted = root.join("org/planted");
+    tracked_repo(&planted, "git@github.com:org/planted.git");
+    fs::create_dir(planted.join(".git/toolstate")).unwrap();
+    fs::write(planted.join(".git/toolstate/session"), "state\n").unwrap();
+    run_git(&planted, &["switch", "-qc", "feature"]);
+    run_git(&planted, &["commit", "-q", "--allow-empty", "-m", "local"]);
+    run_git(&planted, &["switch", "-q", "main"]);
+    let tree = checkout_tree(&root);
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"r".to_vec()),
+            (
+                vec![
+                    "CONFIRM",
+                    "LOSS ACKNOWLEDGMENT REQUIRED planted",
+                    "commits not on any remote: branch feature",
+                    "unknown entries in .git: toolstate",
+                    "[ ] Also remove planted and accept its listed losses",
+                    "Remove 0 checkouts",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Remove only cancelled · nothing changed"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+/// A checkout with more named losses than an 80×24 confirmation shows at once.
+#[cfg(unix)]
+fn overflowing_losses(root: &std::path::Path) -> std::path::PathBuf {
+    let planted = root.join("org/planted");
+    tracked_repo(&planted, "git@github.com:org/planted.git");
+    for number in 0..11 {
+        run_git(&planted, &["branch", &format!("feature-{number}")]);
+    }
+    run_git(&planted, &["commit", "-q", "--allow-empty", "-m", "local"]);
+    for number in 0..11 {
+        run_git(&planted, &["branch", "-qf", &format!("feature-{number}")]);
+    }
+    fs::write(planted.join("scratch"), "untracked\n").unwrap();
+    for name in ["alpha", "beta", "gamma", "delta"] {
+        let nested = planted.join(name);
+        fs::create_dir_all(&nested).unwrap();
+        run_git(&nested, &["init", "-q"]);
+    }
+    fs::create_dir(planted.join(".git/toolstate")).unwrap();
+    fs::write(planted.join(".git/toolstate/state"), "x\n").unwrap();
+    planted
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_removal_confirmation_at_80_by_24_shows_every_loss_before_it_arms() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    overflowing_losses(&root);
+    let tree = checkout_tree(&root);
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"r".to_vec()),
+            (
+                vec![
+                    "CONFIRM",
+                    "LOSS ACKNOWLEDGMENT REQUIRED planted",
+                    "  - untracked files",
+                    "more lines · PageDown",
+                    "PageUp/PageDown scroll · Space acknowledge · Enter choose · Esc cancel",
+                    "absent: unknown entries in .git: toolstate",
+                ],
+                b" ".to_vec(),
+            ),
+            // Space does nothing while losses are still below the fold.
+            (
+                vec![
+                    "[ ] Also remove planted and accept its listed losses",
+                    "Remove 0 checkouts",
+                    "more lines · PageDown · Space works once every loss is shown",
+                ],
+                b"\x1b[6~\x1b[6~\x1b[6~\x1b[6~".to_vec(),
+            ),
+            (
+                vec![
+                    "  - unknown entries in .git: toolstate",
+                    "absent: more lines · PageDown",
+                ],
+                b" ".to_vec(),
+            ),
+            (
+                vec![
+                    "[x] Also remove planted and accept its listed losses",
+                    "Remove 1 checkout",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Remove only cancelled · nothing changed"],
+                b"q".to_vec(),
+            ),
+        ],
+        24,
+        80,
+    );
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn remove_in_a_terminal_lists_one_warning_per_line() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::write(
+        &config,
+        "root = \"repos\"\n\n[[repositories]]\nurl = \"git@github.com:org/planted.git\"\n",
+    )
+    .unwrap();
+    let planted = root.join("org/planted");
+    tracked_repo(&planted, "git@github.com:org/planted.git");
+    fs::write(planted.join("scratch"), "untracked\n").unwrap();
+    fs::create_dir(planted.join(".git/toolstate")).unwrap();
+    fs::write(planted.join(".git/toolstate/state"), "x\n").unwrap();
+    let tree = checkout_tree(&root);
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).args([
+            "remove",
+            "github.com/org/planted",
+            "--keep-registered",
+        ]),
+        &[(
+            vec![
+                "Unsafe local state at",
+                "- untracked files",
+                "- unknown entries in .git: toolstate",
+                "Force removal?",
+            ],
+            b"\r".to_vec(),
+        )],
+        24,
+        80,
+    );
+    assert_eq!(checkout_tree(&root), tree);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_confirmation_at_80_by_24_fits_file_losses_and_a_hint() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    let hot = linked_worktree(&core, "hot", &["-b", "hot"]);
+    run_git(&hot, &["switch", "-qc", "theirs"]);
+    fs::write(hot.join("README"), "theirs\n").unwrap();
+    run_git(&hot, &["commit", "-qam", "theirs"]);
+    let patch = temp.path().join("theirs.patch");
+    fs::write(
+        &patch,
+        format!(
+            "{}\n",
+            git_stdout(&hot, &["format-patch", "--stdout", "-1"])
+        ),
+    )
+    .unwrap();
+    run_git(&hot, &["switch", "-q", "hot"]);
+    fs::write(hot.join("README"), "ours\n").unwrap();
+    run_git(&hot, &["commit", "-qam", "ours"]);
+    let am = std::process::Command::new("git")
+        .current_dir(&hot)
+        .args(["am", patch.to_str().unwrap()])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .unwrap();
+    assert!(!am.status.success(), "git am did not stop");
+    fs::write(hot.join("notes"), "untracked\n").unwrap();
+    fs::write(hot.join("draft"), "untracked\n").unwrap();
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"w".to_vec()),
+            (vec!["Worktrees / core", "Git state"], b"jr".to_vec()),
+            (
+                vec![
+                    "Remove worktree / hot",
+                    "2 untracked files",
+                    "stopped git am (in the worktree: git am --continue or",
+                    "git am --abort)",
+                    "pair: Cancel default",
+                    "Accept these losses and remove this worktree",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["Worktrees / core"], b"\x1b".to_vec()),
+            (vec!["NORMAL · 1 row", "absent: Worktrees /"], b"q".to_vec()),
+        ],
+        24,
+        80,
+    );
+    assert!(hot.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_never_calls_a_worktree_with_named_state_clean() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    linked_worktree(&core, "hot", &["-b", "hot"]);
+    fs::write(core.join(".git/worktrees/hot/planted"), "state\n").unwrap();
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"w".to_vec()),
+            (vec!["Worktrees / core", "1 Git state"], b"\x1b".to_vec()),
+            (vec!["NORMAL · 1 row", "absent: Worktrees /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+    );
 }
 
 #[cfg(unix)]
@@ -7692,7 +7936,9 @@ fn inventory_acknowledged_losses_are_removed_while_a_blocker_and_a_new_loss_stay
                     "BLOCKED core",
                     "LOSS ACKNOWLEDGMENT REQUIRED draft",
                     "LOSS ACKNOWLEDGMENT REQUIRED shifty",
-                    "~/repos/org/shifty · github.com/org/shifty · untracked files",
+                    "~/repos/org/shifty",
+                    "  - untracked files",
+                    "github.com/org/shifty",
                     "[ ] Also remove 2 checkouts and accept their listed losses",
                     "Remove 0 checkouts",
                 ],

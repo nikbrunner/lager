@@ -313,11 +313,11 @@ fn dependency_arriving_after_initial_inspection_blocks_final_removal() {
     fs::create_dir(&bin).unwrap();
     let started = fixture.temp.path().join("started");
     let release = fixture.temp.path().join("release");
-    // submodule status is the last Git call in the initial inspection, after
+    // The upstream lookup is the last Git call in the initial inspection, after
     // the dependency check. Markers coordinate the mutation, not timing.
     script(
         &bin.join("git"),
-        "#!/bin/sh\nif [ \"$3\" = submodule ] && [ ! -e \"$STARTED\" ]; then\n  printf ready > \"$STARTED\"\n  while [ ! -e \"$RELEASE\" ]; do :; done\nfi\nexec \"$REAL_GIT\" \"$@\"\n",
+        "#!/bin/sh\nif [ \"$4\" = --abbrev-ref ] && [ ! -e \"$STARTED\" ]; then\n  printf ready > \"$STARTED\"\n  while [ ! -e \"$RELEASE\" ]; do :; done\nfi\nexec \"$REAL_GIT\" \"$@\"\n",
     );
     let before = fs::read(&fixture.config).unwrap();
     let mut child = support::lager_with_path(&fixture.home, &fixture.config, Some(&bin))

@@ -17,7 +17,7 @@ Lager also rejects a primary checkout whose Git common directory contains depend
 
 These checks run during initial inspection and again before deletion. Lager does not prune, repair, or remove dependent worktrees for you. Resolve their state with Git before retrying; `--unregister` leaves the declaration unchanged when removal is blocked. Other eligible repositories in the same batch can still be removed.
 
-Tracked or untracked changes, ignored files, stashes, dirty submodules, detached state, and unpushed commits are warnings. `--force` accepts these warnings only. It never bypasses the root boundary, symlink rejection, repository-shape checks, dependent worktree checks, or origin matching.
+Lager removes a checkout without `--force` only when it can show that nothing is lost; every part it cannot show is a named warning, such as changed, untracked or ignored files, stashes, commits not on any remote, state in an initialized submodule, or a stopped operation in the Git directory. [What `remove` proves](../reference/cli.md#what-remove-proves) lists every warning. `--force` accepts these warnings only. It never bypasses the root boundary, symlink rejection, repository-shape checks, dependent worktree checks, or origin matching.
 
 A removal confirmation defaults to no. After a successful removal, the unregister prompt defaults to yes. Outside a terminal, pass `--yes` and exactly one of `--unregister` or `--keep-registered`.
 

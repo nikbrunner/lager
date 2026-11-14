@@ -5,6 +5,7 @@
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
+use crate::application::git_dir;
 use crate::application::ports::{
     PathKind, WorktreeCommandError, WorktreeFault, WorktreeFilesystem, WorktreeGit, WorktreeLosses,
 };
@@ -142,6 +143,47 @@ pub fn local_changes<G: WorktreeGit>(
     record: &WorktreeRecord,
 ) -> Option<Result<WorktreeLosses, String>> {
     (!record.prunable).then(|| git.local_state(&record.path).map(|state| state.losses))
+}
+
+/// What removing a listed linked worktree deletes from its Git directory, by name; `None`
+/// for the primary checkout and a prunable entry.
+pub fn named_state_of<G: WorktreeGit, F: WorktreeFilesystem>(
+    git: &G,
+    filesystem: &F,
+    record: &WorktreeRecord,
+) -> Option<Result<Vec<String>, String>> {
+    (!record.is_primary && !record.prunable).then(|| {
+        let location = git.locate(&record.path)?;
+        let shown = record.path.display().to_string();
+        named_state(git, filesystem, &record.path, &location.git_dir, &shown)
+    })
+}
+
+/// The state in the linked Git directory `git_dir` of the worktree at `path` that its
+/// removal deletes: entries beyond normal use, and the refs only this worktree sees.
+fn named_state<G: WorktreeGit, F: WorktreeFilesystem>(
+    git: &G,
+    filesystem: &F,
+    path: &Path,
+    git_dir: &Path,
+    shown: &str,
+) -> Result<Vec<String>, String> {
+    let entries = filesystem.entries(git_dir)?;
+    let mut state = git_dir::losses(
+        &entries,
+        true,
+        &git_dir.display().to_string(),
+        &format!("git -C {shown}"),
+        |below| filesystem.holds(&git_dir.join(below)),
+    );
+    let refs = git
+        .worktree_refs(path)
+        .map_err(|error| format!("cannot read the refs of this worktree: {error}"))?;
+    state.extend(
+        refs.into_iter()
+            .map(|name| format!("per-worktree ref {name}")),
+    );
+    Ok(state)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -458,15 +500,22 @@ pub struct RemovalInspection {
     /// Commits on the branch that no remote ref holds.
     pub unpushed: Option<usize>,
     pub losses: WorktreeLosses,
+    /// State in the worktree's Git directory that the removal deletes, by name.
+    pub git_state: Vec<String>,
     pub blockers: Vec<Blocker>,
     /// Identity of the worktree directory, its Git directory and the common directory.
     ownership: String,
 }
 
 impl RemovalInspection {
+    /// True when the removal deletes local state.
+    pub fn lossy(&self) -> bool {
+        !self.losses.is_empty() || !self.git_state.is_empty()
+    }
+
     /// True when the only obstacle is local state that `--force` accepts.
     pub fn force_helps(&self) -> bool {
-        self.blockers.is_empty() && !self.losses.is_empty()
+        self.blockers.is_empty() && self.lossy()
     }
 }
 
@@ -665,6 +714,17 @@ fn inspect<G: WorktreeGit, F: WorktreeFilesystem>(
             ));
         }
     }
+    // The canonical path, so a second inspection from the confirmed path names the same.
+    match named_state(
+        git,
+        filesystem,
+        &path,
+        &location.git_dir,
+        &path.display().to_string(),
+    ) {
+        Ok(state) => inspection.git_state = state,
+        Err(error) => blockers.push(plain(error)),
+    }
     match git.local_state(&path) {
         Ok(state) => {
             inspection.losses = state.losses;
@@ -761,7 +821,7 @@ pub fn remove<G: WorktreeGit, F: WorktreeFilesystem>(
     if !current.blockers.is_empty() {
         return Err(RemoveError::Blocked(current.blockers));
     }
-    let lossy = !current.losses.is_empty();
+    let lossy = current.lossy();
     if lossy && !accept_losses {
         return Err(RemoveError::Losses);
     }

@@ -8,6 +8,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use rustix::fd::OwnedFd;
 use rustix::fs::{AtFlags, Dir, Mode, OFlags, mkdirat, openat, unlinkat};
 
+use crate::application::git_dir;
 use crate::application::ports::{
     GitClient, GitRemoval, GitState, WorktreeCommandError, WorktreeEntry, WorktreeFault,
     WorktreeGit, WorktreeLocation, WorktreeState,
@@ -362,45 +363,20 @@ pub fn inspect_removal(destination: &Path, expected_url: &str) -> Result<Vec<Str
         }
     }
 
-    let mut warnings = Vec::new();
-    let status = git_output(
-        destination,
-        &[
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--ignored=matching",
-        ],
-    )?;
-    if status.lines().any(|line| line.starts_with("!!")) {
-        warnings.push("ignored files".to_owned());
-    }
-    if status.lines().any(|line| {
-        let bytes = line.as_bytes();
-        !line.starts_with("!!") && bytes.len() >= 2 && bytes[0] != b' ' && bytes[0] != b'?'
-    }) {
-        warnings.push("staged changes".to_owned());
-    }
-    if status.lines().any(|line| {
-        let bytes = line.as_bytes();
-        !line.starts_with("!!") && bytes.len() >= 2 && bytes[1] != b' ' && bytes[1] != b'?'
-    }) {
-        warnings.push("unstaged changes".to_owned());
-    }
-    if status.lines().any(|line| line.starts_with("??")) {
-        warnings.push("untracked files".to_owned());
-    }
-    if git_output(
-        destination,
-        &["rev-parse", "--verify", "--quiet", "refs/stash"],
-    )
-    .is_ok()
-    {
-        warnings.push("stashes".to_owned());
-    }
-    if git_output(destination, &["symbolic-ref", "--quiet", "--short", "HEAD"]).is_err() {
+    let mut warnings = proof(&requested, destination, &git_dir, None)?;
+    let branch = git_output(destination, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    if branch.is_err() {
         warnings.push("detached HEAD".to_owned());
     }
+    // The ref warning already names a branch whose commits no remote holds.
+    let named = branch.is_ok_and(|branch| {
+        let branch = format!("branch {}", branch.trim());
+        warnings.iter().any(|warning| {
+            warning
+                .strip_prefix("commits not on any remote: ")
+                .is_some_and(|refs| refs.split(", ").any(|name| name == branch))
+        })
+    });
     if git_output(destination, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
         warnings.push("unsafe branch tip".to_owned());
     }
@@ -413,18 +389,332 @@ pub fn inspect_removal(destination: &Path, expected_url: &str) -> Result<Vec<Str
         warnings.push("no upstream".to_owned());
     } else {
         let ahead = git_output(destination, &["rev-list", "--count", "@{u}..HEAD"])?;
-        if ahead.trim().parse::<u64>().unwrap_or(1) > 0 {
+        if !named && ahead.trim().parse::<u64>().unwrap_or(1) > 0 {
             warnings.push("local commits absent from the remote-tracking ref".to_owned());
         }
     }
-    let submodules = git_output(destination, &["submodule", "status", "--recursive"])?;
-    if submodules
-        .lines()
-        .any(|line| matches!(line.chars().next(), Some('+') | Some('-') | Some('U')))
-    {
-        warnings.push("dirty submodules".to_owned());
-    }
     Ok(warnings)
+}
+
+/// What removing `work_tree` and its Git directory would lose, as warnings. `root` is the
+/// checkout being removed. `submodule` is the path of a submodule below it: its warnings
+/// carry that path, and its HEAD counts as a ref, since Git checks submodules out detached.
+fn proof(
+    root: &Path,
+    work_tree: &Path,
+    git_dir: &Path,
+    submodule: Option<&str>,
+) -> Result<Vec<String>, String> {
+    // Commits recorded for a submodule show whatever `ignore` says; its own files are the
+    // submodule's to prove.
+    let state = local_state(work_tree, &["--ignore-submodules=dirty"])?;
+    let mut warnings = Vec::new();
+    for (lost, warning) in [
+        (state.losses.ignored, "ignored files"),
+        (state.staged, "staged changes"),
+        (state.unstaged, "unstaged changes"),
+        (state.losses.untracked > 0, "untracked files"),
+    ] {
+        if lost {
+            warnings.push(warning.to_owned());
+        }
+    }
+    let unpushed = unpushed_refs(work_tree, submodule.is_some())?;
+    if unpushed.stashes {
+        warnings.push("stashes".to_owned());
+    }
+    if !unpushed.refs.is_empty() {
+        warnings.push(format!(
+            "commits not on any remote: {}",
+            unpushed.refs.join(", ")
+        ));
+    }
+    if state.hidden > 0 {
+        warnings.push(
+            "tracked files hidden from git status (skip-worktree or assume-unchanged)".to_owned(),
+        );
+    }
+    let mut nested = state.nested_repositories;
+    nested.sort();
+    warnings.extend(
+        nested
+            .into_iter()
+            .map(|repository| format!("nested repository {repository}")),
+    );
+    let entries = super::filesystem::entry_names(git_dir)?;
+    let place = git_dir
+        .strip_prefix(root)
+        .unwrap_or(git_dir)
+        .display()
+        .to_string();
+    let git = submodule.map_or("git".to_owned(), |path| format!("git -C {path}"));
+    // Each initialized submodule is proved like the checkout; its warnings name it.
+    let mut inner = Vec::new();
+    let mut proved = Vec::new();
+    match NativeGit.populated_submodules(work_tree) {
+        Ok(populated) => {
+            for path in populated {
+                let shown = submodule.map_or(path.clone(), |parent| format!("{parent}/{path}"));
+                let tree = work_tree.join(&path);
+                let found = captured_text(git_at(&tree).args(["rev-parse", "--absolute-git-dir"]))
+                    .and_then(|directory| {
+                        std::fs::canonicalize(directory).map_err(|error| error.to_string())
+                    })
+                    .and_then(|directory| {
+                        proved.push(directory.clone());
+                        proof(root, &tree, &directory, Some(&shown))
+                    });
+                match found {
+                    Ok(found) => inner.extend(found),
+                    Err(error) => {
+                        inner.push(format!("submodule state is unknown: {shown}: {error}"))
+                    }
+                }
+            }
+        }
+        Err(error) => warnings.push(format!("submodule state is unknown: {error}")),
+    }
+    if entries.iter().any(|entry| entry == "modules") {
+        let mut unproved = Vec::new();
+        match unproved_modules(
+            &git_dir.join("modules"),
+            Path::new(""),
+            &proved,
+            &mut unproved,
+        ) {
+            Ok(()) if !unproved.is_empty() => {
+                unproved.sort();
+                warnings.push(format!(
+                    "submodule repositories in {place}/modules: {}",
+                    unproved.join(", ")
+                ));
+            }
+            Ok(()) => {}
+            Err(error) => warnings.push(format!("submodule state is unknown: {error}")),
+        }
+    }
+    warnings.extend(git_dir::losses(&entries, false, &place, &git, |path| {
+        super::filesystem::holds(&git_dir.join(path))
+    }));
+    if let Some(path) = submodule {
+        for warning in &mut warnings {
+            *warning = format!("submodule {path}: {warning}");
+        }
+    }
+    warnings.extend(inner);
+    Ok(warnings)
+}
+
+/// Collects, below `directory`, the submodule repositories that no proved submodule
+/// claims, and every other entry that holds something.
+fn unproved_modules(
+    directory: &Path,
+    name: &Path,
+    proved: &[std::path::PathBuf],
+    unproved: &mut Vec<String>,
+) -> Result<(), String> {
+    for entry in super::filesystem::entry_names(directory)? {
+        let path = directory.join(&entry);
+        let name = name.join(&entry);
+        if proved.contains(&path) || super::filesystem::holds(&path) == Some(false) {
+            continue;
+        }
+        // A symlink is named, never followed.
+        let directory = std::fs::symlink_metadata(&path).is_ok_and(|entry| entry.is_dir());
+        if !directory || path.join("HEAD").exists() {
+            unproved.push(name.display().to_string());
+        } else {
+            unproved_modules(&path, &name, proved, unproved)?;
+        }
+    }
+    Ok(())
+}
+
+/// Reads `git status` once, with `extra` status arguments, plus the files status hides.
+fn local_state(worktree: &Path, extra: &[&str]) -> Result<WorktreeState, String> {
+    let output = captured(
+        git_at(worktree)
+            .args([
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--ignored=matching",
+            ])
+            .args(extra),
+    )?;
+    let mut state = WorktreeState::default();
+    // Every directory below the root that holds a tracked or untracked path.
+    let mut directories = std::collections::BTreeSet::new();
+    let mut holds = |path: &[u8]| {
+        let mut directory = Path::new(OsStr::from_bytes(path)).parent();
+        while let Some(parent) = directory.filter(|parent| !parent.as_os_str().is_empty()) {
+            if !directories.insert(parent.to_path_buf()) {
+                break;
+            }
+            directory = parent.parent();
+        }
+    };
+    let mut fields = output
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
+    while let Some(field) = fields.next() {
+        let (Some(code), Some(path)) = (field.get(..2), field.get(3..)) else {
+            return Err("unexpected Git status output".to_owned());
+        };
+        let directory = path
+            .strip_suffix(b"/")
+            .map(|path| Path::new(OsStr::from_bytes(path)));
+        match (code, directory) {
+            // With every untracked file listed, a directory entry is an embedded repository.
+            (b"??", Some(directory)) => state
+                .nested_repositories
+                .push(directory.display().to_string()),
+            (b"??", None) => {
+                holds(path);
+                state.losses.untracked += 1;
+            }
+            (b"!!", directory) => {
+                state.losses.ignored = true;
+                // Only the ignored directory itself: its contents are ignored-file loss.
+                if let Some(directory) = directory
+                    && std::fs::symlink_metadata(worktree.join(directory).join(".git")).is_ok()
+                {
+                    state
+                        .nested_repositories
+                        .push(directory.display().to_string());
+                }
+            }
+            _ => {
+                state.losses.modified += 1;
+                state.staged |= code[0] != b' ';
+                state.unstaged |= code[1] != b' ';
+                // A rename or copy carries its source path as a second field.
+                if code.contains(&b'R') || code.contains(&b'C') {
+                    fields.next();
+                }
+            }
+        }
+    }
+    // Status skips files marked skip-worktree (`S`) or assume-unchanged (lower case),
+    // edited or not; a present one counts as modified.
+    let hidden = captured(git_at(worktree).args(["ls-files", "-v", "-z"]))?;
+    for entry in hidden.split(|byte| *byte == 0) {
+        let (Some(tag), Some(path)) = (entry.first(), entry.get(2..)) else {
+            continue;
+        };
+        holds(path);
+        if (*tag == b'S' || tag.is_ascii_lowercase())
+            && std::fs::symlink_metadata(worktree.join(OsStr::from_bytes(path))).is_ok()
+        {
+            state.losses.modified += 1;
+            state.hidden += 1;
+        }
+    }
+    // Status names a repository only where the directory is untracked or ignored; one
+    // beside tracked files, or one Git does not accept, shows as a `.git` entry alone.
+    for directory in directories {
+        match std::fs::symlink_metadata(worktree.join(&directory).join(".git")) {
+            Ok(_) => {
+                let name = directory.display().to_string();
+                if !state.nested_repositories.contains(&name) {
+                    state.nested_repositories.push(name);
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            Err(error) => return Err(format!("{}: {error}", directory.display())),
+        }
+    }
+    Ok(state)
+}
+
+struct UnpushedRefs {
+    stashes: bool,
+    /// Local refs whose commit no remote-tracking ref reaches, as `branch x`, `tag y` or the
+    /// full name of any other ref.
+    refs: Vec<String>,
+}
+
+/// How many refs one warning names before it counts the rest.
+const NAMED_REFS: usize = 8;
+
+/// With `head`, a commit only HEAD names counts as well, as `HEAD`.
+fn unpushed_refs(destination: &Path, head: bool) -> Result<UnpushedRefs, String> {
+    // Replacement refs and a grafts file rewrite ancestry, so the proof reads the real objects.
+    let real = || {
+        let mut command = git_at(destination);
+        command
+            .env("GIT_GRAFT_FILE", "/dev/null")
+            .arg("--no-replace-objects");
+        command
+    };
+    let refs = captured_text(real().args([
+        "for-each-ref",
+        "--format=%(refname) %(objecttype) %(objectname) %(*objecttype) %(*objectname)",
+    ]))?;
+    let local: std::collections::HashSet<String> =
+        captured_text(real().args(["rev-list", "--all", "--not", "--remotes"]))?
+            .lines()
+            .map(str::to_owned)
+            .collect();
+    let mut unpushed = UnpushedRefs {
+        stashes: false,
+        refs: Vec::new(),
+    };
+    if head
+        && local.contains(&captured_text(real().args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "HEAD^{commit}",
+        ]))?)
+    {
+        unpushed.refs.push("HEAD".to_owned());
+    }
+    for line in refs.lines() {
+        let mut fields = line.split(' ');
+        let (Some(name), Some(kind), Some(id)) = (fields.next(), fields.next(), fields.next())
+        else {
+            return Err("unexpected Git ref output".to_owned());
+        };
+        // `git maintenance` keeps copies of remote refs here; they prove nothing.
+        if name.starts_with("refs/remotes/") || name.starts_with("refs/prefetch/") {
+            continue;
+        }
+        if name == "refs/stash" {
+            unpushed.stashes = true;
+            continue;
+        }
+        // An annotated tag is judged by the object it names. A ref that names no commit
+        // cannot be shown to be on a remote.
+        let commit = match (kind, fields.next(), fields.next()) {
+            ("commit", _, _) => Some(id),
+            ("tag", Some("commit"), Some(peeled)) => Some(peeled),
+            _ => None,
+        };
+        if commit.is_none_or(|commit| local.contains(commit)) {
+            unpushed.refs.push(
+                match (
+                    name.strip_prefix("refs/heads/"),
+                    name.strip_prefix("refs/tags/"),
+                ) {
+                    (Some(branch), _) => format!("branch {branch}"),
+                    (_, Some(tag)) => format!("tag {tag}"),
+                    _ => name.to_owned(),
+                },
+            );
+        }
+    }
+    if unpushed.refs.len() > NAMED_REFS {
+        let more = unpushed.refs.len() - NAMED_REFS;
+        unpushed.refs.truncate(NAMED_REFS);
+        unpushed.refs.push(format!("{more} more"));
+    }
+    Ok(unpushed)
 }
 
 fn git_output(directory: &Path, args: &[&str]) -> Result<String, String> {
@@ -739,97 +1029,7 @@ impl WorktreeGit for NativeGit {
     }
 
     fn local_state(&self, worktree: &Path) -> Result<WorktreeState, String> {
-        let output = captured(git_at(worktree).args([
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--ignored=matching",
-        ]))?;
-        let mut state = WorktreeState::default();
-        // Every directory below the root that holds a tracked or untracked path.
-        let mut directories = std::collections::BTreeSet::new();
-        let mut holds = |path: &[u8]| {
-            let mut directory = Path::new(OsStr::from_bytes(path)).parent();
-            while let Some(parent) = directory.filter(|parent| !parent.as_os_str().is_empty()) {
-                if !directories.insert(parent.to_path_buf()) {
-                    break;
-                }
-                directory = parent.parent();
-            }
-        };
-        let mut fields = output
-            .split(|byte| *byte == 0)
-            .filter(|field| !field.is_empty());
-        while let Some(field) = fields.next() {
-            let (Some(code), Some(path)) = (field.get(..2), field.get(3..)) else {
-                return Err("unexpected Git status output".to_owned());
-            };
-            let directory = path
-                .strip_suffix(b"/")
-                .map(|path| Path::new(OsStr::from_bytes(path)));
-            match (code, directory) {
-                // With every untracked file listed, a directory entry is an embedded repository.
-                (b"??", Some(directory)) => state
-                    .nested_repositories
-                    .push(directory.display().to_string()),
-                (b"??", None) => {
-                    holds(path);
-                    state.losses.untracked += 1;
-                }
-                (b"!!", directory) => {
-                    state.losses.ignored = true;
-                    // Only the ignored directory itself: its contents are ignored-file loss.
-                    if let Some(directory) = directory
-                        && std::fs::symlink_metadata(worktree.join(directory).join(".git")).is_ok()
-                    {
-                        state
-                            .nested_repositories
-                            .push(directory.display().to_string());
-                    }
-                }
-                _ => {
-                    state.losses.modified += 1;
-                    // A rename or copy carries its source path as a second field.
-                    if code.contains(&b'R') || code.contains(&b'C') {
-                        fields.next();
-                    }
-                }
-            }
-        }
-        // Status skips files marked skip-worktree (`S`) or assume-unchanged (lower case),
-        // edited or not; a present one counts as modified.
-        let hidden = captured(git_at(worktree).args(["ls-files", "-v", "-z"]))?;
-        for entry in hidden.split(|byte| *byte == 0) {
-            let (Some(tag), Some(path)) = (entry.first(), entry.get(2..)) else {
-                continue;
-            };
-            holds(path);
-            if (*tag == b'S' || tag.is_ascii_lowercase())
-                && std::fs::symlink_metadata(worktree.join(OsStr::from_bytes(path))).is_ok()
-            {
-                state.losses.modified += 1;
-            }
-        }
-        // Status names a repository only where the directory is untracked or ignored; one
-        // beside tracked files, or one Git does not accept, shows as a `.git` entry alone.
-        for directory in directories {
-            match std::fs::symlink_metadata(worktree.join(&directory).join(".git")) {
-                Ok(_) => {
-                    let name = directory.display().to_string();
-                    if !state.nested_repositories.contains(&name) {
-                        state.nested_repositories.push(name);
-                    }
-                }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                    ) => {}
-                Err(error) => return Err(format!("{}: {error}", directory.display())),
-            }
-        }
-        Ok(state)
+        local_state(worktree, &[])
     }
 
     fn populated_submodules(&self, worktree: &Path) -> Result<Vec<String>, String> {
@@ -878,6 +1078,17 @@ impl WorktreeGit for NativeGit {
             }
         }
         Ok(populated)
+    }
+
+    fn worktree_refs(&self, worktree: &Path) -> Result<Vec<String>, String> {
+        let refs = captured_text(git_at(worktree).args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/worktree",
+            "refs/bisect",
+            "refs/rewritten",
+        ]))?;
+        Ok(refs.lines().map(str::to_owned).collect())
     }
 
     fn protecting_ref(&self, repository: &Path, commit: &str) -> Result<Option<String>, String> {
@@ -997,7 +1208,8 @@ mod tests {
         run_git(&clone, &["stash", "push", "-qm", "preserve"]);
         let stashed = super::inspect_removal(&clone, origin.trim()).unwrap();
         assert!(stashed.iter().any(|warning| warning == "stashes"));
-        assert!(stashed.iter().any(|warning| warning == "dirty submodules"));
+        // A submodule that was never initialized holds nothing to lose.
+        assert!(!stashed.iter().any(|warning| warning.contains("submodule")));
 
         fs::write(clone.join("README"), "staged\n").unwrap();
         run_git(&clone, &["add", "README"]);
@@ -1023,8 +1235,14 @@ mod tests {
         run_git(&clone, &["add", "commit.txt"]);
         run_git(&clone, &["commit", "-qm", "ahead"]);
         let ahead = super::inspect_removal(&clone, origin.trim()).unwrap();
+        // The ref warning names the branch, so the ahead count does not repeat it.
         assert!(
             ahead
+                .iter()
+                .any(|warning| warning.starts_with("commits not on any remote: branch "))
+        );
+        assert!(
+            !ahead
                 .iter()
                 .any(|warning| warning.contains("absent from the remote-tracking ref"))
         );

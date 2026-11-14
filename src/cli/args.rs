@@ -63,7 +63,7 @@ pub enum WorktreeCommand {
     Add(WorktreeAddArgs),
     #[command(
         about = "Remove one linked worktree through git worktree remove; its branch stays",
-        after_help = "--force accepts the listed modified, untracked and ignored files only; ownership, lock, primary-checkout, detached-commit and submodule checks remain active."
+        after_help = "--force accepts the listed losses only (modified, untracked and ignored files and named Git state); ownership, lock, primary-checkout, detached-commit and submodule checks remain active."
     )]
     Remove(WorktreeRemoveArgs),
 }
@@ -120,10 +120,7 @@ pub struct WorktreeRemoveArgs {
     pub path: PathBuf,
     #[arg(long, help = "Confirm removal without an interactive prompt")]
     pub yes: bool,
-    #[arg(
-        long,
-        help = "Accept the listed local file losses; safety checks still apply"
-    )]
+    #[arg(long, help = "Accept the listed losses; safety checks still apply")]
     pub force: bool,
 }
 

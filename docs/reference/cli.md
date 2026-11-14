@@ -79,6 +79,30 @@ Equivalent repeated references are no-ops after the first change. Retrying the
 same batch is safe. `add` and `ensure` retain per-target behavior; they are not
 all-or-nothing clone batches.
 
+## What `remove` proves
+
+`remove` deletes a checkout without `--force` only when it can show that nothing is lost. Each part it cannot show is a warning with a name. In a terminal Lager lists the warnings one per line and asks whether to force the removal; outside a terminal it exits `1` with `lager: REPOSITORY: unsafe local state: WARNING; WARNING; rerun with --force to accept these losses`. With `--force` it prints `lager: REPOSITORY: removing with --force; this is lost: WARNING; WARNING` on stderr before it deletes, without the commands in brackets.
+
+| Warning | What Lager found |
+| --- | --- |
+| `staged changes`, `unstaged changes`, `untracked files`, `ignored files` | `git status` lists them. A submodule checked out at another commit than the recorded one counts whatever `submodule.NAME.ignore` or `diff.ignoreSubmodules` say. |
+| `tracked files hidden from git status (skip-worktree or assume-unchanged)` | A tracked file with one of these marks is present. Git's status skips it, edited or not. |
+| `nested repository PATH` | A directory in the checkout holds a `.git` entry of its own. |
+| `stashes` | The stash holds an entry. |
+| `detached HEAD`, `unsafe branch tip`, `no upstream` | HEAD names no branch, no commit, or a branch without an upstream. |
+| `local commits absent from the remote-tracking ref` | The branch is ahead of its upstream, and the ref warning does not list it already. |
+| `commits not on any remote: branch NAME, tag NAME, REF` | The commit a local branch, tag or other ref names is reachable from no remote-tracking ref as of the last fetch. Refs under `refs/prefetch/` are copies of remote refs and are not listed. A branch whose upstream is another local branch is listed here. So is a tag fetched from the remote whose commit no remote branch holds. A warning with more than eight refs ends with the number of the rest. |
+| `submodule PATH: WARNING` | An initialized submodule fails the same proof as the checkout, nested submodules included. In a submodule the commit HEAD names counts as a ref, listed as `HEAD`, because Git checks submodules out detached. A shallow submodule whose commit is below the tip it fetched reads as `HEAD` not on any remote, since its history does not reach a remote-tracking ref; `--force` accepts it. |
+| `submodule repositories in .git/modules: NAME` | Git keeps a submodule's repository there that no initialized submodule uses, as after `git submodule deinit`. |
+| `submodule state is unknown: REASON` | Git could not answer, or an unpopulated submodule directory holds files that Git does not report. |
+| `stopped rebase (git rebase --continue or git rebase --abort)`, `stopped git am (git am --continue or git am --abort)`, `merge in progress (...)`, `cherry-pick in progress (...)`, `revert in progress (...)`, `unfinished sequence of picks or reverts (...)`, `bisect in progress (git bisect reset)` | The Git directory holds the state of that operation. The commands in brackets finish it or drop it. |
+| `autostash of a stopped rebase`, `autostash of a stopped merge`, `autostash of an interrupted checkout` | Git set local changes aside in the Git directory and has not put them back. |
+| `unknown entries in .git: NAME, NAME` | The Git directory has a top-level entry that Git does not keep there in normal use and that holds something, such as the state of another tool. An empty file or directory is not listed, nor are `CLAUDE_BASE` and `opencode`, which hold only an id a coding agent keeps. |
+
+Two inspections of the same checkout give the same warnings, word for word. The inventory lists them as the losses of a target.
+
+The proof covers what the remote-tracking refs held at the last fetch; Lager does not contact the remote, so a branch deleted there after the last fetch still counts as pushed. Commits that only a reflog reaches, the names of local branches and tags whose commits a remote holds, local configuration, and the files inside `info/`, `logs/`, `hooks/` and `lfs/` (custom hooks, notes in `info/`, LFS objects never uploaded) go with the checkout unnamed: of the Git directory only the top-level entries are read.
+
 ## Offline inventory
 
 `tui` shows declarations and local
@@ -452,7 +476,7 @@ Remove worktree
 
 The confirmation defaults to no. Declining prints `Skipped PATH` and exits `0`; Ctrl-C exits `130`. `--yes` skips the question. Commits on the branch that no remote holds are counted in the summary and never block the removal.
 
-`losses` lists modified files, untracked files and ignored files. A tracked file marked skip-worktree or assume-unchanged counts as modified whether or not it was edited, because Git's status hides it. A repository deeper inside an ignored directory is part of the ignored files. With any of them the command exits `1` unless `--force` is given, and the question then reads "Accept these losses and remove this worktree?". Git receives `--force` only in that case.
+`losses` lists modified files, untracked files and ignored files on one line, then each named state of the worktree on a line of its own. A tracked file marked skip-worktree or assume-unchanged counts as modified whether or not it was edited, because Git's status hides it. A repository deeper inside an ignored directory is part of the ignored files. The Git directory of a linked worktree is read like the one of a checkout in [What `remove` proves](#what-remove-proves): a stopped rebase, `git am`, merge, cherry-pick, revert or bisect is named with the commands that finish or drop it, as `git -C PATH ... --continue or --abort` (the popup, which shows the path, reads `in the worktree: git ...`), and an entry Git does not keep there in normal use is named as `unknown entries in GITDIR: NAME`, with the absolute path of `.git/worktrees/NAME`. Each ref only this worktree sees (`refs/worktree/*`, `refs/bisect/*`, `refs/rewritten/*`) is named as `per-worktree ref REF`, since it goes with the worktree. With any of them the command exits `1` unless `--force` is given, with `error: local changes would be lost; rerun with --force to accept these losses` when the losses are files only and `error: the listed state would be lost; ...` otherwise, and the question reads "Accept these losses and remove this worktree?". Git receives `--force` only in that case.
 
 These block the removal with or without `--force`. Each prints `error: blocked: ...` and, where Git has a command for it, a `hint:` line:
 
@@ -484,7 +508,7 @@ Outside a terminal, Lager never prompts:
 
 - `init` requires `--root`, one root-creation choice, and one GitHub choice.
 - `add` requires exactly one of `--register` or `--no-register`, unless `--post-clone` supplies registration.
-- `remove` requires exactly one of `--unregister` or `--keep-registered`, plus `--yes`.
+- `remove` requires exactly one of `--unregister` or `--keep-registered`, plus `--yes`, and `--force` as well when the checkout has warnings.
 - `tui` requires TTY stdin and stdout; use `status --json` for automation.
 - `worktree remove` requires `--yes`, and `--force` as well when the worktree has local losses.
 

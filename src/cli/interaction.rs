@@ -15,6 +15,29 @@ impl Interaction for TerminalInteraction {
             .map_err(map_interaction_error)
     }
 
+    fn notice(&mut self, message: &str) {
+        eprintln!("lager: {}", escape(message));
+    }
+
+    fn confirm_list(
+        &mut self,
+        heading: &str,
+        items: &[String],
+        question: &str,
+        default: bool,
+    ) -> Result<bool, InteractionError> {
+        require_terminal(io::stdin().is_terminal(), io::stderr().is_terminal())?;
+        // Each part is escaped on its own, so only these line breaks reach the terminal.
+        let items: String = items
+            .iter()
+            .map(|item| format!("\n  - {}", escape(item)))
+            .collect();
+        cliclack::confirm(format!("{}{items}\n{}", escape(heading), escape(question)))
+            .initial_value(default)
+            .interact()
+            .map_err(map_interaction_error)
+    }
+
     fn input(
         &mut self,
         message: &str,

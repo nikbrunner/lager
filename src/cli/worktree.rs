@@ -368,6 +368,31 @@ fn print_blockers(blockers: &[Blocker]) {
     }
 }
 
+/// A loss as the popup shows it, where the path is on screen: its hint without `-C PATH`.
+pub(super) fn in_the_worktree(loss: &str, path: &str) -> String {
+    let Some((state, hint)) = loss.split_once(&format!(" (git -C {path} ")) else {
+        return loss.to_owned();
+    };
+    let hint = hint.strip_suffix(')').unwrap_or(hint);
+    let hint = match hint.split_once(" --continue or --abort") {
+        Some((command, rest)) => {
+            format!("git {command} --continue or git {command} --abort{rest}")
+        }
+        None => format!("git {hint}"),
+    };
+    format!("{state} (in the worktree: {hint})")
+}
+
+/// Everything the removal deletes, one loss per line: the files, then each named state.
+pub(super) fn removal_losses(inspection: &RemovalInspection) -> Vec<String> {
+    let files = (!inspection.losses.is_empty() || inspection.git_state.is_empty())
+        .then(|| losses_label(&inspection.losses));
+    files
+        .into_iter()
+        .chain(inspection.git_state.iter().map(escape))
+        .collect()
+}
+
 pub(super) fn losses_label(losses: &WorktreeLosses) -> String {
     let count = |count: usize, noun: &str| {
         (count > 0).then(|| format!("{count} {noun} file{}", if count == 1 { "" } else { "s" }))
@@ -403,8 +428,17 @@ pub(super) fn kept_label(inspection: &RemovalInspection) -> String {
     }
 }
 
-const LOSSES_REFUSED: &str =
-    "local changes would be lost; rerun with --force to accept the listed losses";
+/// Why the removal stopped: "local changes" only when the losses are files alone.
+fn losses_refused(inspection: &RemovalInspection) -> String {
+    format!(
+        "{} would be lost; rerun with --force to accept these losses",
+        if inspection.git_state.is_empty() {
+            "local changes"
+        } else {
+            "the listed state"
+        }
+    )
+}
 
 fn remove(settings: &Settings, args: WorktreeRemoveArgs, interaction: &mut dyn Interaction) -> i32 {
     let context = Some(settings.cwd.as_path());
@@ -419,16 +453,18 @@ fn remove(settings: &Settings, args: WorktreeRemoveArgs, interaction: &mut dyn I
     for (key, value) in [
         ("path", shown.clone()),
         ("branch", escape(kept_label(&inspection))),
-        ("losses", losses_label(&inspection.losses)),
     ] {
         println!("  {key:<10}{value}");
     }
+    for (index, loss) in removal_losses(&inspection).iter().enumerate() {
+        println!("  {:<10}{loss}", if index == 0 { "losses" } else { "" });
+    }
     if inspection.force_helps() && !args.force {
-        error(LOSSES_REFUSED);
+        error(losses_refused(&inspection));
         return 1;
     }
     if !args.yes {
-        let question = if inspection.losses.is_empty() {
+        let question = if !inspection.lossy() {
             "Remove this worktree?"
         } else {
             "Accept these losses and remove this worktree?"
@@ -467,7 +503,7 @@ fn remove(settings: &Settings, args: WorktreeRemoveArgs, interaction: &mut dyn I
             1
         }
         Err(RemoveError::Losses) => {
-            error(LOSSES_REFUSED);
+            error(losses_refused(&inspection));
             1
         }
         Err(RemoveError::Failed(failure)) => {
