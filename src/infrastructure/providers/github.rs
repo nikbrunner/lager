@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 
 use serde::Deserialize;
 
+use crate::application::ports::{RemoteState, Visibility};
 use crate::domain::config::ProviderConfig;
 use crate::domain::repository::{RepositoryRef, RepositorySummary};
 use crate::infrastructure::inventory::{ProbeError, command_output};
@@ -55,6 +56,13 @@ struct PageInfo {
     has_next_page: bool,
     #[serde(rename = "endCursor")]
     end_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ViewedRepository {
+    #[serde(rename = "isArchived")]
+    is_archived: bool,
+    visibility: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -172,17 +180,94 @@ impl Github {
         command.args(["graphql", "--paginate", "--slurp", "-f"]);
         command.arg(format!("query={query}"));
         command.stdin(Stdio::null());
-        let output = command_output(command, cancelled).map_err(|error| match error {
-            ProbeError::Spawn(std::io::ErrorKind::NotFound, _) => {
-                "GitHub provider requires `gh`; install GitHub CLI and run `gh auth login`"
-                    .to_owned()
-            }
-            ProbeError::Spawn(_, error) => format!("could not start gh: {error}"),
-            ProbeError::Exit { stderr, .. } => stderr,
-            other => other.to_string(),
-        })?;
+        let output = command_output(command, cancelled).map_err(gh_error)?;
         serde_json::from_str(&output)
             .map_err(|error| format!("could not parse gh response: {error}"))
+    }
+
+    /// `gh` with `GH_HOST` naming this provider, which every `gh repo` subcommand honours.
+    /// It stays in lager's process group, so Ctrl-C at the terminal ends it too.
+    fn gh(&self, args: &[&str]) -> Result<String, ProbeError> {
+        let output = Command::new(&self.gh_executable)
+            .args(args)
+            .env("GH_HOST", &self.host)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| ProbeError::Spawn(error.kind(), error.to_string()))?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            Err(ProbeError::Exit {
+                code: output.status.code(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            })
+        }
+    }
+
+    pub fn check(&self) -> Result<(), String> {
+        let host = self.host.as_str();
+        match self.gh(&["auth", "status", "--hostname", host]) {
+            Ok(_) => Ok(()),
+            Err(ProbeError::Exit { stderr, .. }) => Err(format!(
+                "gh auth status failed for {host}: {stderr}; if not logged in, run `gh auth login --hostname {host}`"
+            )),
+            Err(error) => Err(gh_error(error)),
+        }
+    }
+
+    pub fn state(&self, path: &str) -> Result<Option<RemoteState>, String> {
+        let output = match self.gh(&["repo", "view", path, "--json", "isArchived,visibility"]) {
+            Ok(output) => output,
+            Err(ProbeError::Exit { stderr, .. })
+                if stderr.contains("Could not resolve to a Repository") =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(gh_error(error)),
+        };
+        let viewed: ViewedRepository = serde_json::from_str(&output)
+            .map_err(|error| format!("could not parse gh response: {error}"))?;
+        let visibility = match viewed.visibility.to_ascii_lowercase().as_str() {
+            "public" => Visibility::Public,
+            "private" => Visibility::Private,
+            "internal" => Visibility::Internal,
+            other => return Err(format!("gh reported unknown visibility `{other}`")),
+        };
+        Ok(Some(RemoteState {
+            archived: viewed.is_archived,
+            visibility,
+        }))
+    }
+
+    pub fn archive(&self, path: &str, archived: bool) -> Result<(), String> {
+        let verb = if archived { "archive" } else { "unarchive" };
+        self.gh(&["repo", verb, path, "--yes"])
+            .map(drop)
+            .map_err(gh_error)
+    }
+
+    pub fn set_visibility(&self, path: &str, visibility: Visibility) -> Result<(), String> {
+        self.gh(&[
+            "repo",
+            "edit",
+            path,
+            "--visibility",
+            visibility.as_str(),
+            "--accept-visibility-change-consequences",
+        ])
+        .map(drop)
+        .map_err(gh_error)
+    }
+}
+
+fn gh_error(error: ProbeError) -> String {
+    match error {
+        ProbeError::Spawn(std::io::ErrorKind::NotFound, _) => {
+            "GitHub provider requires `gh`; install GitHub CLI and run `gh auth login`".to_owned()
+        }
+        ProbeError::Spawn(_, error) => format!("could not start gh: {error}"),
+        ProbeError::Exit { stderr, .. } => stderr,
+        other => other.to_string(),
     }
 }
 

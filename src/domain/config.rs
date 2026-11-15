@@ -28,6 +28,31 @@ pub struct ProviderConfig {
     pub password_env: Option<String>,
     pub ssh_user: Option<String>,
     pub ssh_port: Option<u16>,
+    /// What lager may change on the provider; empty means read-only.
+    #[serde(default)]
+    pub remote_actions: Vec<RemoteAction>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteAction {
+    Create,
+    Rename,
+    Archive,
+    Visibility,
+    Delete,
+}
+
+impl RemoteAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Rename => "rename",
+            Self::Archive => "archive",
+            Self::Visibility => "visibility",
+            Self::Delete => "delete",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -158,6 +183,19 @@ fn validate_provider(host: &str, provider: &ProviderConfig) -> Result<(), Config
         "bitbucket-cloud" => validate_bitbucket(host, provider, false)?,
         "bitbucket-data-center" => validate_bitbucket(host, provider, true)?,
         other => return semantic(format!("unknown provider preset `{other}` for `{host}`")),
+    }
+    if !provider.remote_actions.is_empty() && provider.preset != "github" {
+        return semantic(format!(
+            "provider `{host}`: remote_actions is only supported for the github preset"
+        ));
+    }
+    for (index, action) in provider.remote_actions.iter().enumerate() {
+        if provider.remote_actions[..index].contains(action) {
+            return semantic(format!(
+                "provider `{host}` lists remote action `{}` twice",
+                action.as_str()
+            ));
+        }
     }
     if provider.ssh_port == Some(0) {
         return semantic(format!("provider `{host}` has invalid ssh_port 0"));
@@ -329,4 +367,43 @@ pub fn resolve_worktree_root(value: &str, home: &Path) -> Result<PathBuf, Config
                 .to_owned(),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn validate(preset: &str, remote_actions: Vec<RemoteAction>) -> Result<(), ConfigError> {
+        let provider = ProviderConfig {
+            preset: preset.to_owned(),
+            api_url: (preset != "github").then(|| "https://git.example.com".to_owned()),
+            remote_actions,
+            ..ProviderConfig::default()
+        };
+        Config {
+            root: "repos".to_owned(),
+            providers: [("git.example.com".to_owned(), provider)].into(),
+            repositories: Vec::new(),
+        }
+        .validate()
+    }
+
+    #[test]
+    fn remote_actions_need_the_github_preset_and_no_duplicates() {
+        use RemoteAction::*;
+        assert!(validate("github", vec![Archive, Visibility]).is_ok());
+        assert!(validate("bitbucket-data-center", Vec::new()).is_ok());
+        let duplicate = validate("github", vec![Archive, Archive]).unwrap_err();
+        assert!(
+            duplicate.to_string().contains("`archive` twice"),
+            "{duplicate}"
+        );
+        let bitbucket = validate("bitbucket-data-center", vec![Create]).unwrap_err();
+        assert!(
+            bitbucket
+                .to_string()
+                .contains("remote_actions is only supported for the github preset"),
+            "{bitbucket}"
+        );
+    }
 }

@@ -5,7 +5,10 @@ pub mod github;
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 
-use crate::application::ports::{ProviderAnswer, ProviderCatalog, ProviderFailure, ProviderSource};
+use crate::application::ports::{
+    ProviderAnswer, ProviderCatalog, ProviderFailure, ProviderSource, RemoteRepositories,
+    RemoteState, Visibility,
+};
 use crate::domain::config::Config;
 use crate::domain::repository::{RepositoryRef, RepositorySummary};
 use bitbucket_cloud::BitbucketCloud;
@@ -49,6 +52,38 @@ impl ConfiguredProviders {
         self.adapters
             .get(&host.to_ascii_lowercase())
             .ok_or_else(|| format!("no configured provider for `{host}`"))
+    }
+
+    /// The GitHub adapter for `host`; remote actions exist for GitHub only.
+    pub fn remote(&self, host: &str) -> Result<&Github, String> {
+        match self.adapter(host)? {
+            Adapter::Github(github) => Ok(github),
+            _ => Err(format!("remote actions are not supported for `{host}`")),
+        }
+    }
+}
+
+impl RemoteRepositories for ConfiguredProviders {
+    fn check(&self, host: &str) -> Result<(), String> {
+        self.remote(host)?.check()
+    }
+
+    fn state(&self, reference: &RepositoryRef) -> Result<Option<RemoteState>, String> {
+        self.remote(&reference.host)?.state(&reference.path)
+    }
+
+    fn archive(&self, reference: &RepositoryRef, archived: bool) -> Result<(), String> {
+        self.remote(&reference.host)?
+            .archive(&reference.path, archived)
+    }
+
+    fn set_visibility(
+        &self,
+        reference: &RepositoryRef,
+        visibility: Visibility,
+    ) -> Result<(), String> {
+        self.remote(&reference.host)?
+            .set_visibility(&reference.path, visibility)
     }
 }
 

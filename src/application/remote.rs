@@ -1,5 +1,6 @@
 //! Remote discovery for the inventory: which providers are loading, ready or failed, what they
-//! last returned, and which response still belongs to a current request.
+//! last returned, and which response still belongs to a current request. Also the actions
+//! lager takes on a provider's repositories, which `remote_actions` must allow.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -7,8 +8,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::application::ports::{ProviderAnswer, ProviderFailure, ProviderSource};
-use crate::domain::config::Config;
+use crate::application::ports::{
+    Interaction, InteractionError, Mutation, ProviderAnswer, ProviderFailure, ProviderSource,
+    RemoteRepositories, RemoteState, Visibility,
+};
+use crate::domain::config::{Config, RemoteAction};
 use crate::domain::repository::{RepositoryRef, RepositorySummary, validate_reference_safety};
 
 /// How long a provider request may run, and how long ending the requests may hold the caller.
@@ -401,6 +405,104 @@ impl<S: ProviderSource> Drop for RemoteDiscovery<S> {
         // An interruptible request, such as a provider CLI, is ended before the process exits.
         self.shutdown();
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionError {
+    /// The user answered no to the prompt.
+    Declined,
+    Cancelled,
+    Failed(String),
+}
+
+impl From<String> for ActionError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+/// Refuses `action` unless the provider for `reference` lists it in `remote_actions`.
+pub fn allowed(
+    config: &Config,
+    reference: &RepositoryRef,
+    action: RemoteAction,
+) -> Result<(), String> {
+    let host = reference.host.to_ascii_lowercase();
+    if config
+        .providers
+        .get(&host)
+        .is_some_and(|provider| provider.remote_actions.contains(&action))
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "`{}` is not enabled for {host}; add it to remote_actions under [providers.\"{host}\"]",
+        action.as_str()
+    ))
+}
+
+/// The checks every action runs before it changes anything on the provider.
+fn prepare(
+    config: &Config,
+    remote: &dyn RemoteRepositories,
+    reference: &RepositoryRef,
+    action: RemoteAction,
+) -> Result<RemoteState, ActionError> {
+    // A leading dash would reach gh as a flag.
+    if reference.is_wildcard()
+        || reference.path.split('/').count() != 2
+        || reference.path.starts_with('-')
+    {
+        return Err(format!("{} needs one repository as owner/name", action.as_str()).into());
+    }
+    allowed(config, reference, action)?;
+    remote.check(&reference.host)?;
+    remote
+        .state(reference)?
+        .ok_or_else(|| format!("not found on {}", reference.host).into())
+}
+
+pub fn archive(
+    config: &Config,
+    remote: &dyn RemoteRepositories,
+    reference: &RepositoryRef,
+    archived: bool,
+) -> Result<Mutation, ActionError> {
+    let state = prepare(config, remote, reference, RemoteAction::Archive)?;
+    if state.archived == archived {
+        return Ok(Mutation::Noop);
+    }
+    remote.archive(reference, archived)?;
+    Ok(Mutation::Changed)
+}
+
+/// Making a repository public exposes its code and history, so it asks first unless `yes`.
+pub fn visibility(
+    config: &Config,
+    remote: &dyn RemoteRepositories,
+    interaction: &mut dyn Interaction,
+    reference: &RepositoryRef,
+    visibility: Visibility,
+    yes: bool,
+) -> Result<Mutation, ActionError> {
+    let state = prepare(config, remote, reference, RemoteAction::Visibility)?;
+    if state.visibility == visibility {
+        return Ok(Mutation::Noop);
+    }
+    if visibility == Visibility::Public && !yes {
+        let question = format!(
+            "Make {} public? Its code and history become visible to everyone.",
+            reference.identity()
+        );
+        match interaction.confirm(&question, false) {
+            Ok(true) => {}
+            Ok(false) => return Err(ActionError::Declined),
+            Err(InteractionError::Cancelled) => return Err(ActionError::Cancelled),
+            Err(InteractionError::Failed(error)) => return Err(ActionError::Failed(error)),
+        }
+    }
+    remote.set_visibility(reference, visibility)?;
+    Ok(Mutation::Changed)
 }
 
 #[cfg(test)]
@@ -866,5 +968,82 @@ mod tests {
         assert_eq!(provider.phase, ProviderPhase::Idle);
         assert!(provider.stale() && provider.config_changed);
         assert_eq!(identities(&remote), ["a.example/org/one"]);
+    }
+
+    struct PublicRemote {
+        changed: Mutex<Vec<Visibility>>,
+    }
+
+    impl RemoteRepositories for PublicRemote {
+        fn check(&self, _host: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn state(&self, _reference: &RepositoryRef) -> Result<Option<RemoteState>, String> {
+            Ok(Some(RemoteState {
+                archived: false,
+                visibility: Visibility::Private,
+            }))
+        }
+        fn archive(&self, _reference: &RepositoryRef, _archived: bool) -> Result<(), String> {
+            unreachable!()
+        }
+        fn set_visibility(
+            &self,
+            _reference: &RepositoryRef,
+            visibility: Visibility,
+        ) -> Result<(), String> {
+            self.changed.lock().unwrap().push(visibility);
+            Ok(())
+        }
+    }
+
+    struct Answer(Result<bool, InteractionError>, usize);
+
+    impl Interaction for Answer {
+        fn confirm(&mut self, _message: &str, default: bool) -> Result<bool, InteractionError> {
+            assert!(!default, "making a repository public defaults to no");
+            self.1 += 1;
+            self.0.clone()
+        }
+        fn input(&mut self, _: &str, _: &str, _: Option<&str>) -> Result<String, InteractionError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn making_public_asks_unless_yes_and_a_no_changes_nothing() {
+        let config: Config = toml_edit::de::from_str(
+            "root = \"repos\"\n[providers.\"github.com\"]\npreset = \"github\"\nremote_actions = [\"visibility\"]\n",
+        )
+        .unwrap();
+        let reference = RepositoryRef::parse("org/demo").unwrap();
+        let remote = PublicRemote {
+            changed: Mutex::new(Vec::new()),
+        };
+        let run = |answer: Result<bool, InteractionError>, yes: bool| {
+            let mut interaction = Answer(answer, 0);
+            let result = visibility(
+                &config,
+                &remote,
+                &mut interaction,
+                &reference,
+                Visibility::Public,
+                yes,
+            );
+            (result, interaction.1)
+        };
+
+        assert_eq!(run(Ok(false), false), (Err(ActionError::Declined), 1));
+        assert_eq!(
+            run(Err(InteractionError::Cancelled), false),
+            (Err(ActionError::Cancelled), 1)
+        );
+        assert!(remote.changed.lock().unwrap().is_empty());
+        assert_eq!(run(Ok(true), false), (Ok(Mutation::Changed), 1));
+        assert_eq!(run(Ok(false), true), (Ok(Mutation::Changed), 0));
+        assert_eq!(
+            *remote.changed.lock().unwrap(),
+            [Visibility::Public, Visibility::Public]
+        );
     }
 }

@@ -574,6 +574,7 @@ fn unknown_key_warnings(document: &DocumentMut) -> Vec<String> {
                             | "password_env"
                             | "ssh_user"
                             | "ssh_port"
+                            | "remote_actions"
                     ) {
                         warnings.push(format!(
                             "unknown provider key `{}.{}`",

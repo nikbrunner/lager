@@ -262,6 +262,44 @@ pub trait ProviderSource: Send + Sync + 'static {
     ) -> ProviderAnswer;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    Public,
+    Private,
+    /// Visible to an enterprise's members; lager never sets it.
+    Internal,
+}
+
+impl Visibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Private => "private",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteState {
+    pub archived: bool,
+    pub visibility: Visibility,
+}
+
+/// Changes to repositories on their provider. Every call blocks until the provider answered.
+pub trait RemoteRepositories {
+    /// Whether the provider's CLI is installed and logged in for `host`; the error names the fix.
+    fn check(&self, host: &str) -> Result<(), String>;
+    /// `None` when the provider has no repository at `reference`.
+    fn state(&self, reference: &RepositoryRef) -> Result<Option<RemoteState>, String>;
+    fn archive(&self, reference: &RepositoryRef, archived: bool) -> Result<(), String>;
+    fn set_visibility(
+        &self,
+        reference: &RepositoryRef,
+        visibility: Visibility,
+    ) -> Result<(), String>;
+}
+
 pub fn config_path(override_path: Option<&Path>) -> PathBuf {
     if let Some(path) = override_path {
         return path.to_path_buf();

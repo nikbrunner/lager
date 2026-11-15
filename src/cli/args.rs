@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args as ClapArgs, Parser, Subcommand};
+use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -38,6 +38,10 @@ pub enum Command {
     Ensure(EnsureArgs),
     #[command(about = "Run configured hooks for explicit repositories")]
     Hook(HookArgs),
+    #[command(about = "Archive a GitHub repository, or unarchive it with --undo")]
+    Archive(ArchiveArgs),
+    #[command(about = "Make a GitHub repository public or private")]
+    Visibility(VisibilityArgs),
     #[command(
         visible_aliases = ["list", "ls"],
         about = "Print the inventory rows as a table or one JSON document"
@@ -257,6 +261,30 @@ pub struct EnsureArgs {
 pub struct HookArgs {
     #[arg(value_name = "REPOSITORY", help = "Explicit repository references")]
     pub repositories: Vec<String>,
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct ArchiveArgs {
+    #[arg(value_name = "REPOSITORY", help = "Repository reference")]
+    pub repository: String,
+    #[arg(long, help = "Unarchive instead")]
+    pub undo: bool,
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct VisibilityArgs {
+    #[arg(value_name = "REPOSITORY", help = "Repository reference")]
+    pub repository: String,
+    #[arg(value_name = "VISIBILITY")]
+    pub value: VisibilityValue,
+    #[arg(long, help = "Make it public without an interactive prompt")]
+    pub yes: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum VisibilityValue {
+    Public,
+    Private,
 }
 
 #[derive(Debug, ClapArgs)]

@@ -1,14 +1,15 @@
 use std::path::{Path, PathBuf};
 
 use super::args::{
-    Args, CloneArgs, Command, EnsureArgs, HookArgs, InitArgs, InventoryArgs, RemoveArgs,
-    RepositoryArgs, UnregisterArgs,
+    ArchiveArgs, Args, CloneArgs, Command, EnsureArgs, HookArgs, InitArgs, InventoryArgs,
+    RemoveArgs, RepositoryArgs, UnregisterArgs, VisibilityArgs, VisibilityValue,
 };
 use super::interaction::{Interaction, InteractionError};
 use crate::application::ports::{
     ConfigStore, EnsureEvent, EnsureReporter, RepositorySelector, SelectionError, ToolInspector,
 };
-use crate::application::{configuration, ports, warehouse};
+use crate::application::remote::ActionError;
+use crate::application::{configuration, ports, remote, warehouse};
 use crate::domain::repository::RepositoryRef;
 use crate::infrastructure::{
     config::{CommandConfigStore, FileConfigStore},
@@ -40,6 +41,8 @@ pub fn run(
         Command::Add(command) => command.repositories.as_slice(),
         Command::Remove(command) => command.repositories.as_slice(),
         Command::Hook(command) => command.repositories.as_slice(),
+        Command::Archive(command) => std::slice::from_ref(&command.repository),
+        Command::Visibility(command) => std::slice::from_ref(&command.repository),
         _ => &[],
     };
     for reference in references {
@@ -60,6 +63,8 @@ pub fn run(
         }
         Command::Ensure(command) => ensure(&config_path, command),
         Command::Hook(command) => hook(&config_path, command, selector),
+        Command::Archive(command) => archive(&config_path, command),
+        Command::Visibility(command) => visibility(&config_path, command, interaction, interactive),
         Command::Status(command) => super::inventory::status::run(&config_path, command),
         Command::Inventory(command) => inventory(&config_path, command),
         Command::Worktree(command) => {
@@ -617,6 +622,107 @@ fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// The configuration, its providers and the parsed reference a remote action works on.
+fn remote_target(
+    path: &Path,
+    repository: &str,
+) -> Result<
+    (
+        crate::domain::config::Config,
+        ConfiguredProviders,
+        RepositoryRef,
+    ),
+    String,
+> {
+    let config = CommandConfigStore::default()
+        .load(path)
+        .map_err(|error| error.to_string())?;
+    let providers = ConfiguredProviders::from_config(&config)?;
+    let reference = RepositoryRef::parse(repository).map_err(|error| error.to_string())?;
+    Ok((config, providers, reference))
+}
+
+/// Prints `<repository>: <outcome>` and returns the exit code.
+fn report_remote(repository: &str, result: Result<&str, ActionError>) -> i32 {
+    match result {
+        Ok(outcome) => {
+            println!("{}: {outcome}", escape(repository));
+            0
+        }
+        Err(ActionError::Declined) => {
+            println!("{}: skipped", escape(repository));
+            0
+        }
+        Err(ActionError::Cancelled) => 130,
+        Err(ActionError::Failed(error)) => {
+            eprintln!(
+                "lager: {}: {}",
+                displayed_reference(repository),
+                escape(error)
+            );
+            1
+        }
+    }
+}
+
+fn archive(path: &Path, args: ArchiveArgs) -> i32 {
+    let (config, providers, reference) = match remote_target(path, &args.repository) {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("lager: {}", escape(error));
+            return 1;
+        }
+    };
+    let result =
+        remote::archive(&config, &providers, &reference, !args.undo).map(|mutation| {
+            match (mutation, args.undo) {
+                (ports::Mutation::Changed, false) => "archived",
+                (ports::Mutation::Noop, false) => "already archived",
+                (ports::Mutation::Changed, true) => "unarchived",
+                (ports::Mutation::Noop, true) => "not archived",
+            }
+        });
+    report_remote(&args.repository, result)
+}
+
+fn visibility(
+    path: &Path,
+    args: VisibilityArgs,
+    interaction: &mut dyn Interaction,
+    interactive: bool,
+) -> i32 {
+    let target = match args.value {
+        VisibilityValue::Public => ports::Visibility::Public,
+        VisibilityValue::Private => ports::Visibility::Private,
+    };
+    if target == ports::Visibility::Public && !interactive && !args.yes {
+        eprintln!("lager: visibility public requires --yes outside a TTY");
+        return 2;
+    }
+    let (config, providers, reference) = match remote_target(path, &args.repository) {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("lager: {}", escape(error));
+            return 1;
+        }
+    };
+    let result = remote::visibility(
+        &config,
+        &providers,
+        interaction,
+        &reference,
+        target,
+        args.yes,
+    )
+    .map(|mutation| match (mutation, target) {
+        (ports::Mutation::Changed, ports::Visibility::Public) => "made public",
+        (ports::Mutation::Noop, ports::Visibility::Public) => "already public",
+        (ports::Mutation::Changed, _) => "made private",
+        (ports::Mutation::Noop, _) => "already private",
+    });
+    report_remote(&args.repository, result)
 }
 
 fn inventory(path: &Path, args: InventoryArgs) -> i32 {
