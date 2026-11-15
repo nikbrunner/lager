@@ -153,17 +153,27 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         let (rows, cols) = (rows as usize, cols as usize);
         let compact = cols < 132;
         // Column starts of the grid at 132 and at 80 columns.
-        let headings = ["repository", "local", "remote", "registration", "status"];
+        let headings = [
+            "repository",
+            "local",
+            "remote",
+            "branch",
+            "status",
+            "registration",
+        ];
+        let narrow_headings = ["repository", "local", "remote", "status", "registration"];
         let starts: &[usize] = if compact {
-            &[2, 25, 43, 54, 68]
+            &[2, 25, 43, 54, 66]
         } else {
-            &[2, 27, 54, 92, 107]
+            &[2, 24, 51, 88, 106, 118]
         };
-        let shown = |wide: [&str; 5], narrow: [&str; 5]| -> Vec<String> {
-            (if compact { narrow } else { wide })
-                .iter()
-                .map(|cell| (*cell).to_owned())
-                .collect()
+        let shown = |wide: [&str; 6], narrow: [&str; 5]| -> Vec<String> {
+            // The cases list registration before the observation cells.
+            if compact {
+                [0, 1, 2, 4, 3].map(|i| narrow[i].to_owned()).to_vec()
+            } else {
+                [0, 1, 2, 4, 5, 3].map(|i| wide[i].to_owned()).to_vec()
+            }
         };
 
         let screen = screen_text(main, rows, cols);
@@ -180,13 +190,21 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         assert_eq!(lines[3], "", "{screen}");
         assert_eq!(
             lines[4].split_whitespace().collect::<Vec<_>>(),
-            headings,
+            if compact {
+                &narrow_headings[..]
+            } else {
+                &headings[..]
+            },
             "{screen}"
         );
-        let heading_starts = headings
-            .iter()
-            .map(|heading| lines[4].find(heading).unwrap())
-            .collect::<Vec<_>>();
+        let heading_starts = (if compact {
+            &narrow_headings[..]
+        } else {
+            &headings[..]
+        })
+        .iter()
+        .map(|heading| lines[4].find(heading).unwrap())
+        .collect::<Vec<_>>();
         assert_eq!(heading_starts, starts, "{screen}");
         assert!(
             !screen.contains(" | ") && !screen.contains('│') && !screen.contains("generation"),
@@ -201,7 +219,8 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
                     "~/repos/org/alpha",
                     "github.com/org/alpha",
                     "explicit",
-                    "main · 1 modified",
+                    "main",
+                    "1 modified",
                 ],
                 ["alpha", "…repos/org/alpha", "—", "explicit", "1 modified"],
             ),
@@ -211,12 +230,20 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
                     "~/repos/archive/alpha",
                     "github.com/org/alpha",
                     "explicit",
-                    "main · clean",
+                    "main",
+                    "clean",
                 ],
                 ["alpha (copy)", "…s/archive/alpha", "—", "explicit", "clean"],
             ),
             (
-                ["beta", "missing", "github.com/org/beta", "explicit", "—"],
+                [
+                    "beta",
+                    "missing",
+                    "github.com/org/beta",
+                    "explicit",
+                    "—",
+                    "—",
+                ],
                 ["beta", "missing", "—", "explicit", "—"],
             ),
             (
@@ -225,7 +252,8 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
                     "~/repos/team/dots",
                     "github.com/team/dots",
                     "wildcard",
-                    "main · clean",
+                    "main",
+                    "clean",
                 ],
                 ["dots", "…repos/team/dots", "—", "wildcard", "clean"],
             ),
@@ -235,7 +263,8 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
                     "…epos/experiments/scratch",
                     "no origin",
                     "unregistered",
-                    "main · clean",
+                    "main",
+                    "clean",
                 ],
                 [
                     "scratch",
@@ -246,7 +275,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
                 ],
             ),
             (
-                ["team/*", "—", "github.com/team/*", "wildcard", "—"],
+                ["team/*", "—", "github.com/team/*", "wildcard", "—", "—"],
                 ["team/*", "—", "—", "wildcard", "—"],
             ),
         ] {
@@ -1737,8 +1766,9 @@ fn inventory_unions_nested_wildcards_with_exclusions_in_each_declaration_order()
             .iter()
             .find(|row| row[0] == "repo" && row[1] == "~/repos/group/sub/repo")
             .expect("nested wildcard checkout row");
-        assert_eq!(row[3], "wildcard");
-        assert_eq!(row[4], "main · clean");
+        assert_eq!(row[3], "main");
+        assert_eq!(row[4], "clean");
+        assert_eq!(row[5], "wildcard");
     }
 }
 
@@ -2164,7 +2194,7 @@ fn inventory_declared_rows_keep_wrong_corrupt_and_unreadable_facts_distinct() {
         .expect("wrong-origin checkout row");
     assert_eq!(wrong_row[0], "other/wrong");
     assert_eq!(wrong_row[1], "~/repos/org/wrong");
-    assert_eq!(wrong_row[3], "unregistered");
+    assert_eq!(wrong_row[5], "unregistered");
     let declared_wrong = rows
         .iter()
         .find(|row| row[2] == "github.com/org/wrong")
@@ -2591,7 +2621,14 @@ exclude = ["skip"]
     );
     let plain = screen_text(&transcript, 80, 220);
 
-    for header in ["repository", "local", "remote", "registration", "status"] {
+    for header in [
+        "repository",
+        "local",
+        "remote",
+        "branch",
+        "status",
+        "registration",
+    ] {
         assert!(plain.contains(header), "missing header {header}:\n{plain}");
     }
     for expected in [
@@ -2602,15 +2639,16 @@ exclude = ["skip"]
         assert!(plain.contains(expected), "missing {expected}:\n{plain}");
     }
     let rows = inventory_rows(&plain);
-    let assert_row = |label: &str, expected: [&str; 5]| {
+    let assert_row = |label: &str, expected: [&str; 6]| {
         assert!(
-            rows.iter().any(|row| row == &expected),
+            rows.iter()
+                .any(|row| { [0, 1, 2, 5, 3, 4].map(|i| row[i].as_str()) == expected }),
             "missing exact {label} row {expected:?}; parsed rows: {rows:?}"
         );
     };
     assert_row(
         "pattern",
-        ["org/*", "—", "github.com/org/*", "wildcard", "—"],
+        ["org/*", "—", "github.com/org/*", "wildcard", "—", "—"],
     );
     assert_row(
         "missing declaration",
@@ -2619,6 +2657,7 @@ exclude = ["skip"]
             "missing",
             "github.com/org/missing",
             "explicit",
+            "—",
             "—",
         ],
     );
@@ -2629,7 +2668,8 @@ exclude = ["skip"]
             "~/repos/org/managed",
             "github.com/org/managed",
             "explicit",
-            "main · clean",
+            "main",
+            "clean",
         ],
     );
     assert_row(
@@ -2639,7 +2679,8 @@ exclude = ["skip"]
             "~/repos/elsewhere/managed",
             "github.com/org/managed",
             "explicit",
-            "main · clean",
+            "main",
+            "clean",
         ],
     );
     assert_row(
@@ -2649,7 +2690,8 @@ exclude = ["skip"]
             "~/repos/org/extra",
             "github.com/org/extra",
             "wildcard",
-            "main · 1 modified",
+            "main",
+            "1 modified",
         ],
     );
     assert_row(
@@ -2659,7 +2701,8 @@ exclude = ["skip"]
             "~/repos/org/skip",
             "github.com/org/skip",
             "excluded",
-            "main · clean",
+            "main",
+            "clean",
         ],
     );
     assert_row(
@@ -2669,7 +2712,8 @@ exclude = ["skip"]
             "~/repos/local/no-origin",
             "no origin",
             "unregistered",
-            "main · clean",
+            "main",
+            "clean",
         ],
     );
     assert!(
@@ -2798,7 +2842,14 @@ fn inventory_resizes_from_wide_to_compact_without_losing_whole_row_selection() {
         .unwrap();
     assert_eq!(
         wide_header.split_whitespace().collect::<Vec<_>>(),
-        ["repository", "local", "remote", "registration", "status"],
+        [
+            "repository",
+            "local",
+            "remote",
+            "branch",
+            "status",
+            "registration"
+        ],
         "{wide}"
     );
     assert!(
@@ -2809,7 +2860,7 @@ fn inventory_resizes_from_wide_to_compact_without_losing_whole_row_selection() {
         highlighted_inventory_row(compact_frame, 24, 80, "beta").is_some(),
         "{compact}"
     );
-    for column in ["repository", "local", "remote", "registration", "status"] {
+    for column in ["repository", "local", "remote", "status", "registration"] {
         assert!(compact.contains(column), "missing {column}:\n{compact}");
     }
     let compact_header = compact
@@ -2818,7 +2869,7 @@ fn inventory_resizes_from_wide_to_compact_without_losing_whole_row_selection() {
         .unwrap();
     assert_eq!(
         compact_header.split_whitespace().collect::<Vec<_>>(),
-        ["repository", "local", "remote", "registration", "status"],
+        ["repository", "local", "remote", "status", "registration"],
         "{compact}"
     );
     let selected = highlighted_inventory_row(compact_frame, 24, 80, "beta").unwrap();
@@ -6474,7 +6525,7 @@ fn inventory_clone_register_hands_the_terminal_to_git_and_returns_with_the_new_s
                     "NORMAL · 1 row",
                     "absent: Batch /",
                     "absent: Scanning",
-                    "pair: explicit main",
+                    "pair: clean explicit",
                     "absent: problem",
                 ],
                 b"m".to_vec(),
@@ -6568,7 +6619,7 @@ fn inventory_clone_only_from_the_row_menu_runs_the_hook_on_the_terminal_and_keep
                     "NORMAL · 1 row",
                     "absent: Batch /",
                     "absent: Scanning",
-                    "pair: explicit main",
+                    "pair: clean explicit",
                     "absent: problem",
                 ],
                 b"q".to_vec(),
@@ -6968,7 +7019,7 @@ fn inventory_clone_register_on_a_matching_checkout_registers_without_cloning() {
                 vec![
                     "NORMAL · 1 row",
                     "absent: Batch /",
-                    "pair: explicit main",
+                    "pair: clean explicit",
                     "absent: problem",
                 ],
                 b"q".to_vec(),
@@ -8854,7 +8905,7 @@ fn inventory_remove_unregister_waits_for_a_complete_scan_and_then_previews_every
         support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (
-                vec!["Scanning", "main · clean", "selected: org/alpha"],
+                vec!["Scanning", "clean", "selected: org/alpha"],
                 b"kkm\rjjjjj".to_vec(),
             ),
             // The entry says why it is unavailable, and choosing it does nothing: Esc then
@@ -8942,7 +8993,7 @@ fn inventory_direct_remove_unregister_is_blocked_while_the_scan_is_incomplete() 
     run_inventory_pty_actions_with_hook(
         support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
-            (vec!["Scanning", "main · clean"], b"kkU".to_vec()),
+            (vec!["Scanning", "clean"], b"kkU".to_vec()),
             (
                 vec![
                     "Remove + unregister unavailable: the scan is not complete",
@@ -11551,7 +11602,7 @@ fn inventory_remote_keeps_local_rows_usable_while_providers_load_and_keeps_rows_
         partial
             .iter()
             .filter(|row| row[1] == "remote only")
-            .map(|row| (row[0].as_str(), row[3].as_str()))
+            .map(|row| (row[0].as_str(), row[5].as_str()))
             .collect::<Vec<_>>(),
         [
             ("zebra", "unregistered"),
@@ -12040,7 +12091,7 @@ fn inventory_local_refresh_merges_the_cache_into_the_new_config_without_a_provid
     let registration = |rows: &[Vec<String>], name: &str| {
         rows.iter()
             .find(|row| row[0] == name)
-            .map(|row| (row[3].clone(), row[1].clone()))
+            .map(|row| (row[5].clone(), row[1].clone()))
     };
     assert_eq!(
         registration(&rows[1], "skip"),
@@ -12209,7 +12260,7 @@ fn inventory_remote_rows_agree_with_status_remote() {
         assert_eq!(candidates.len(), extras, "{candidates:?}");
         for row in candidates {
             assert!(
-                row[1] == "remote only" && ["unregistered", "excluded"].contains(&row[3].as_str()),
+                row[1] == "remote only" && ["unregistered", "excluded"].contains(&row[5].as_str()),
                 "{row:?}"
             );
         }

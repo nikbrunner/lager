@@ -345,18 +345,18 @@ fn expected_rows(fixture: &Fixture) -> Vec<Value> {
 }
 
 const EXPECTED_TABLE: &str = "\
-repository    local                    remote                  registration  status
-clean         ~/repos/org/clean        github.com/org/clean    explicit      main · clean
-dirty         ~/repos/org/dirty        github.com/org/dirty    explicit      main · 1 modified
-missing       missing                  github.com/org/missing  explicit      —
-moved         missing                  github.com/org/moved    explicit      —
-clean (copy)  ~/repos/copies/clean     github.com/org/clean    explicit      main · clean
-moved         ~/repos/elsewhere/moved  github.com/org/moved    explicit      main · clean
-stray         ~/repos/other/stray      github.com/other/stray  unregistered  main · clean
-member        ~/repos/team/member      github.com/team/member  wildcard      main · clean
-skip          ~/repos/team/skip        github.com/team/skip    excluded      main · clean
-scratch       ~/repos/local/scratch    no origin               unregistered  main · clean
-team/*        —                        github.com/team/*       wildcard      —
+repository    local                    remote                  branch  status      registration
+clean         ~/repos/org/clean        github.com/org/clean    main    clean       explicit
+dirty         ~/repos/org/dirty        github.com/org/dirty    main    1 modified  explicit
+missing       missing                  github.com/org/missing  —       —           explicit
+moved         missing                  github.com/org/moved    —       —           explicit
+clean (copy)  ~/repos/copies/clean     github.com/org/clean    main    clean       explicit
+moved         ~/repos/elsewhere/moved  github.com/org/moved    main    clean       explicit
+stray         ~/repos/other/stray      github.com/other/stray  main    clean       unregistered
+member        ~/repos/team/member      github.com/team/member  main    clean       wildcard
+skip          ~/repos/team/skip        github.com/team/skip    main    clean       excluded
+scratch       ~/repos/local/scratch    no origin               main    clean       unregistered
+team/*        —                        github.com/team/*       —       —           wildcard
 ";
 
 #[test]
@@ -466,7 +466,7 @@ fn empty_config_and_empty_root_print_the_header_and_an_empty_document() {
     assert_eq!(table.status.code(), Some(0), "{table:?}");
     assert_eq!(
         stdout(&table),
-        "repository  local  remote  registration  status\n"
+        "repository  local  remote  branch  status  registration\n"
     );
     assert!(table.stderr.is_empty(), "{table:?}");
     let document = fixture.run(&["status", "--json"]);
@@ -549,7 +549,7 @@ fn control_characters_are_escaped_in_the_table_and_original_in_json() {
     assert!(!text.contains('\u{1b}') && !text.contains('\t'), "{text:?}");
     assert_eq!(
         text.lines().nth(1).unwrap(),
-        "tab\\there\\x1b[31mred  ~/repos/tab\\there\\x1b[31mred  no origin  unregistered  main · clean"
+        "tab\\there\\x1b[31mred  ~/repos/tab\\there\\x1b[31mred  no origin  main    clean   unregistered"
     );
     let document = fixture.run(&["status", "--json"]);
     assert!(!document.stdout.contains(&0x1b), "{document:?}");
@@ -641,8 +641,8 @@ fn a_missing_root_lists_as_empty_with_a_note_and_exits_zero() {
         assert_eq!(String::from_utf8_lossy(&output.stderr), note);
         assert_eq!(
             stdout(&output),
-            "repository  local    remote               registration  status\n\
-             repo        missing  github.com/org/repo  explicit      —\n"
+            "repository  local    remote               branch  status  registration\n\
+             repo        missing  github.com/org/repo  —       —       explicit\n"
         );
     }
     let output = support::lager(&home, &config)
@@ -998,12 +998,12 @@ fn remote_status_merges_members_applies_exclusions_and_keeps_rows_when_a_provide
     assert_eq!(
         stdout(&table),
         "\
-repository  local              remote                             registration  status
-active      remote only        github.com/org/active · public     wildcard      —
-explicit    missing            github.com/org/explicit · private  explicit      —
-local       ~/repos/org/local  github.com/org/local · public      wildcard      main · clean
-project/*   —                  dc.example/project/*               wildcard      —
-org/*       —                  github.com/org/*                   wildcard      —
+repository  local              remote                             branch  status  registration
+active      remote only        github.com/org/active · public     —       —       wildcard
+explicit    missing            github.com/org/explicit · private  —       —       explicit
+local       ~/repos/org/local  github.com/org/local · public      main    clean   wildcard
+project/*   —                  dc.example/project/*               —       —       wildcard
+org/*       —                  github.com/org/*                   —       —       wildcard
 "
     );
     let archived_table = run_remote(
@@ -1015,13 +1015,13 @@ org/*       —                  github.com/org/*                   wildcard    
     assert_eq!(
         stdout(&archived_table),
         "\
-repository  local              remote                             registration  status
-active      remote only        github.com/org/active · public     wildcard      —
-explicit    missing            github.com/org/explicit · private  explicit      —
-old         remote only        github.com/org/old · archived      wildcard      —
-local       ~/repos/org/local  github.com/org/local · public      wildcard      main · clean
-project/*   —                  dc.example/project/*               wildcard      —
-org/*       —                  github.com/org/*                   wildcard      —
+repository  local              remote                             branch  status  registration
+active      remote only        github.com/org/active · public     —       —       wildcard
+explicit    missing            github.com/org/explicit · private  —       —       explicit
+old         remote only        github.com/org/old · archived      —       —       wildcard
+local       ~/repos/org/local  github.com/org/local · public      main    clean   wildcard
+project/*   —                  dc.example/project/*               —       —       wildcard
+org/*       —                  github.com/org/*                   —       —       wildcard
 "
     );
     for alias in ["list", "ls"] {
@@ -1075,9 +1075,9 @@ fn remote_status_looks_up_declared_repositories_the_catalog_does_not_list() {
     assert_eq!(
         stdout(&plain),
         "\
-repository  local    remote                         registration  status
-gone        missing  missing                        explicit      —
-kept        missing  github.com/org/kept · private  explicit      —
+repository  local    remote                         branch  status  registration
+gone        missing  missing                        —       —       explicit
+kept        missing  github.com/org/kept · private  —       —       explicit
 "
     );
 
@@ -1100,9 +1100,9 @@ kept        missing  github.com/org/kept · private  explicit      —
     assert_eq!(
         stdout(&table),
         "\
-repository  local    remote                         registration  status
-gone        missing  missing                        explicit      —
-kept        missing  github.com/org/kept · private  explicit      —
+repository  local    remote                         branch  status  registration
+gone        missing  missing                        —       —       explicit
+kept        missing  github.com/org/kept · private  —       —       explicit
 "
     );
 }
@@ -1138,9 +1138,9 @@ fn plain_status_keeps_the_origin_alone_and_exits_zero_when_a_lookup_fails() {
     assert_eq!(
         stdout(&table),
         "\
-repository  local              remote                registration  status
-kept        missing            github.com/org/kept   explicit      —
-local       ~/repos/org/local  github.com/org/local  explicit      main · clean
+repository  local              remote                branch  status  registration
+kept        missing            github.com/org/kept   —       —       explicit
+local       ~/repos/org/local  github.com/org/local  main    clean   explicit
 "
     );
     let document = run(&["status", "--json"]);

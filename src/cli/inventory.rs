@@ -5834,10 +5834,18 @@ fn fuzzy_subsequence(value: &str, query: &str) -> bool {
     wanted.is_none()
 }
 
-const HEADINGS: [&str; 5] = ["repository", "local", "remote", "registration", "status"];
+const HEADINGS: [&str; 6] = [
+    "repository",
+    "local",
+    "remote",
+    "branch",
+    "status",
+    "registration",
+];
+const BRANCH_COLUMN: usize = 3;
 
 /// One row's cells in the grid's column order, with their tints. The compact grid drops the
-/// origin from `remote` and the branch from `status`. `remote` says whether remote discovery is
+/// origin from `remote` and the grid hides `branch`, whose error then shows in `status`. `remote` says whether remote discovery is
 /// on.
 fn table_cells(
     row: &model::InventoryRow,
@@ -5845,16 +5853,17 @@ fn table_cells(
     home: &Path,
     compact: bool,
     remote: bool,
-) -> [(String, Style); 5] {
+) -> [(String, Style); 6] {
     [
         (name, Style::default()),
         local_cell(row, home),
         remote_cell(row, compact, remote),
+        branch_cell(row),
+        status_cell(row, compact),
         (
             registration_text(&row.registration).to_owned(),
             registration_style(&row.registration),
         ),
-        status_cell(row, compact),
     ]
 }
 
@@ -5904,24 +5913,22 @@ fn remote_cell(row: &model::InventoryRow, compact: bool, remote: bool) -> (Strin
     }
 }
 
+fn branch_cell(row: &model::InventoryRow) -> (String, Style) {
+    let style = match row.branch {
+        model::ObservationField::Error(_) => tint(Color::Red),
+        _ => Style::default(),
+    };
+    (observation_text(&row.branch), style)
+}
+
 fn status_cell(row: &model::InventoryRow, compact: bool) -> (String, Style) {
-    let changes = observation_text(&row.changes);
-    let branch = observation_text(&row.branch);
-    if let model::ObservationField::Error(_) = row.branch {
-        let text = if compact || branch == changes {
-            branch
-        } else {
-            format!("{branch} · {changes}")
-        };
-        return (text, tint(Color::Red));
+    if compact && let model::ObservationField::Error(_) = row.branch {
+        return branch_cell(row);
     }
-    let style = observation_style(&row.changes);
-    if compact || matches!(row.branch, model::ObservationField::NotApplicable) || branch == changes
-    {
-        (changes, style)
-    } else {
-        (format!("{branch} · {changes}"), style)
-    }
+    (
+        observation_text(&row.changes),
+        observation_style(&row.changes),
+    )
 }
 
 fn repository_table(
@@ -5934,17 +5941,25 @@ fn repository_table(
     remote: bool,
 ) -> Table<'static> {
     let compact = width < WIDE_TABLE;
-    let headings = &HEADINGS;
+    let mut headings = HEADINGS.to_vec();
     // Column widths, padding included.
     let (mut widths, flexible): (Vec<u16>, &[usize]) = if compact {
-        (vec![23, 18, 11, 14, 12], &[1])
+        headings.remove(BRANCH_COLUMN);
+        (vec![23, 18, 11, 12, 14], &[1])
     } else {
-        (vec![25, 27, 38, 15, 25], &[1, 2])
+        (vec![22, 27, 37, 18, 12, 14], &[1, 2])
     };
     let slot = |column: usize| if column == 0 { MARK_SLOT } else { 0 };
     let cells = rows
         .iter()
-        .map(|row| table_cells(row, names[&row.key].clone(), home, compact, remote))
+        .map(|row| {
+            let mut cells =
+                table_cells(row, names[&row.key].clone(), home, compact, remote).to_vec();
+            if compact {
+                cells.remove(BRANCH_COLUMN);
+            }
+            cells
+        })
         .collect::<Vec<_>>();
     // Width beyond the grid first lets truncated cells grow, then goes to the flexible columns.
     let mut spare = width

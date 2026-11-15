@@ -169,7 +169,7 @@ pub(crate) fn run(config_path: &Path, args: StatusArgs) -> i32 {
 }
 
 /// Aligns the cells under the wide grid's headings, two spaces apart, never truncated.
-fn table(rows: impl Iterator<Item = [String; 5]>) -> String {
+fn table(rows: impl Iterator<Item = [String; 6]>) -> String {
     let lines = std::iter::once(HEADINGS.map(str::to_owned))
         .chain(rows)
         .collect::<Vec<_>>();
