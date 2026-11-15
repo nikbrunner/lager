@@ -91,6 +91,13 @@ pub trait AtomicRegistrationStore: ConfigStore {
     ) -> Result<Vec<Mutation>, Self::Error>;
 }
 
+/// Rewrites the declarations of a repository whose name changed.
+pub trait RenamingStore: ConfigStore {
+    /// Rewrites an explicit entry's `url` in place and renames an `exclude` entry of a covering
+    /// wildcard; `old` and `new` are repository references.
+    fn rename(&self, path: &Path, old: &str, new: &str) -> Result<Mutation, Self::Error>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnsureEvent<'a> {
     CloneStarted {
@@ -280,8 +287,10 @@ impl Visibility {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteState {
+    /// `owner/name` exactly as the provider spells it.
+    pub name: String,
     pub archived: bool,
     pub visibility: Visibility,
 }
@@ -290,7 +299,8 @@ pub struct RemoteState {
 pub trait RemoteRepositories {
     /// Whether the provider's CLI is installed and logged in for `host`; the error names the fix.
     fn check(&self, host: &str) -> Result<(), String>;
-    /// `None` when the provider has no repository at `reference`.
+    /// `None` when the provider has no repository at `reference`, also when the path only
+    /// redirects to a repository under another name.
     fn state(&self, reference: &RepositoryRef) -> Result<Option<RemoteState>, String>;
     fn archive(&self, reference: &RepositoryRef, archived: bool) -> Result<(), String>;
     fn set_visibility(
@@ -315,6 +325,8 @@ pub trait RemoteRepositories {
     /// Whether the login for `host` may delete repositories; the error names the fix.
     fn check_delete_scope(&self, host: &str) -> Result<(), String>;
     fn delete(&self, reference: &RepositoryRef) -> Result<(), String>;
+    /// Renames `reference` to `name` under the same owner.
+    fn rename(&self, reference: &RepositoryRef, name: &str) -> Result<(), String>;
 }
 
 pub fn config_path(override_path: Option<&Path>) -> PathBuf {
@@ -410,6 +422,9 @@ pub trait WorktreeGit {
     fn commit(&self, repository: &Path, revision: &str) -> Option<String>;
     /// The names of the repository's remotes.
     fn remotes(&self, repository: &Path) -> Result<Vec<String>, String>;
+    /// The origin URL as written.
+    fn origin_url(&self, repository: &Path) -> Result<String, String>;
+    fn set_origin_url(&self, repository: &Path, url: &str) -> Result<(), String>;
     fn branch_exists(&self, repository: &Path, name: &str) -> Result<bool, String>;
     fn valid_branch_name(&self, name: &str) -> bool;
     /// `git worktree add`, with `-b branch start` when `start` is given. Native streams.

@@ -5,13 +5,13 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
-use toml_edit::{ArrayOfTables, Document, DocumentMut, Item, Table, value};
+use toml_edit::{ArrayOfTables, Document, DocumentMut, Item, Table, Value, value};
 
 use crate::application::ports::{
-    AtomicRegistrationStore, ConfigStore, Mutation, RegistrationRequest,
+    AtomicRegistrationStore, ConfigStore, Mutation, RegistrationRequest, RenamingStore,
 };
 use crate::domain::config::{Config, ConfigError};
-use crate::domain::repository::RepositoryRef;
+use crate::domain::repository::{RepositoryRef, renamed_url};
 use crate::presentation::escape;
 
 #[derive(Debug, thiserror::Error)]
@@ -324,6 +324,89 @@ fn remove_with_warnings(
         }
         Ok(results)
     })
+}
+
+fn rename_with_warnings(
+    path: &Path,
+    old: &str,
+    new: &str,
+    warnings: bool,
+) -> Result<Mutation, ConfigStoreError> {
+    let parse = |input: &str| {
+        RepositoryRef::parse(input).map_err(|error| ConfigStoreError::Reference(error.to_string()))
+    };
+    let (old, new) = (parse(old)?, parse(new)?);
+    mutate(path, warnings, |document| {
+        rename_declarations(document, &old, &new)
+    })
+}
+
+/// Rewrites `old` to `new` in place, keeping every other line, comment and position.
+fn rename_declarations(
+    document: &mut DocumentMut,
+    old: &RepositoryRef,
+    new: &RepositoryRef,
+) -> Result<Mutation, ConfigStoreError> {
+    let name = |reference: &RepositoryRef| {
+        reference
+            .path
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let (old_name, new_name) = (name(old), name(new));
+    let Some(repositories) = document
+        .get_mut("repositories")
+        .and_then(Item::as_array_of_tables_mut)
+    else {
+        return Ok(Mutation::Noop);
+    };
+    let mut changed = false;
+    for declaration in repositories.iter_mut() {
+        let Some(url) = declaration.get("url").and_then(Item::as_str) else {
+            continue;
+        };
+        let parsed = RepositoryRef::parse(url)
+            .map_err(|error| ConfigStoreError::Reference(error.to_string()))?;
+        if parsed.identity() == old.identity() {
+            let renamed = renamed_url(url, &old_name, &new_name)
+                .filter(|url| {
+                    RepositoryRef::parse(url).is_ok_and(|url| url.identity() == new.identity())
+                })
+                .unwrap_or_else(|| new.identity());
+            if let Some(url) = declaration.get_mut("url").and_then(Item::as_value_mut) {
+                replace_keeping_decor(url, renamed);
+                changed = true;
+            }
+        } else if parsed.is_wildcard() && wildcard_matches(&parsed, old) {
+            let (excluded, renamed) = (
+                relative_wildcard_name(&parsed, old),
+                relative_wildcard_name(&parsed, new),
+            );
+            for item in declaration
+                .get_mut("exclude")
+                .and_then(Item::as_array_mut)
+                .into_iter()
+                .flat_map(|excludes| excludes.iter_mut())
+                .filter(|item| item.as_str() == Some(&excluded))
+            {
+                replace_keeping_decor(item, renamed.clone());
+                changed = true;
+            }
+        }
+    }
+    Ok(if changed {
+        Mutation::Changed
+    } else {
+        Mutation::Noop
+    })
+}
+
+fn replace_keeping_decor(item: &mut Value, text: String) {
+    let decor = item.decor().clone();
+    *item = Value::from(text);
+    *item.decor_mut() = decor;
 }
 
 fn mutate<T>(
@@ -689,6 +772,12 @@ impl ConfigStore for CommandConfigStore {
     }
 }
 
+impl RenamingStore for CommandConfigStore {
+    fn rename(&self, path: &Path, old: &str, new: &str) -> Result<Mutation, Self::Error> {
+        rename_with_warnings(path, old, new, self.should_warn())
+    }
+}
+
 impl AtomicRegistrationStore for CommandConfigStore {
     fn register_batch(
         &self,
@@ -725,5 +814,68 @@ impl ConfigStore for FileConfigStore {
 
     fn remove(&self, path: &Path, references: &[String]) -> Result<Vec<Mutation>, Self::Error> {
         remove(path, references)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rename_keeps_comments_order_and_the_written_form() {
+        let original = r#"root = "repos" # where checkouts live
+
+# first
+[[repositories]]
+url = "git@github.com:org/other.git"
+
+# the one to rename
+[[repositories]]
+url = "git@github.com:org/demo.git" # trailing
+post_clone = "make"
+
+[[repositories]]
+url = "github.com/team/*"
+exclude = ["demo", "keep"] # excluded
+"#;
+        let mut document = original.parse::<DocumentMut>().unwrap();
+        let reference = |input| RepositoryRef::parse(input).unwrap();
+        assert_eq!(
+            rename_declarations(
+                &mut document,
+                &reference("github.com/org/demo"),
+                &reference("github.com/org/demo-cli"),
+            )
+            .unwrap(),
+            Mutation::Changed
+        );
+        assert_eq!(
+            document.to_string(),
+            original.replace("org/demo.git", "org/demo-cli.git")
+        );
+
+        let mut document = original.parse::<DocumentMut>().unwrap();
+        rename_declarations(
+            &mut document,
+            &reference("github.com/team/demo"),
+            &reference("github.com/team/demo-cli"),
+        )
+        .unwrap();
+        assert_eq!(
+            document.to_string(),
+            original.replace(r#"["demo", "keep"]"#, r#"["demo-cli", "keep"]"#)
+        );
+
+        let mut document = original.parse::<DocumentMut>().unwrap();
+        assert_eq!(
+            rename_declarations(
+                &mut document,
+                &reference("github.com/team/keep2"),
+                &reference("github.com/team/kept"),
+            )
+            .unwrap(),
+            Mutation::Noop
+        );
+        assert_eq!(document.to_string(), original);
     }
 }

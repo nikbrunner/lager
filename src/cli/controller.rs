@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use super::args::{
     ArchiveArgs, Args, CloneArgs, Command, EnsureArgs, HookArgs, InitArgs, InventoryArgs,
-    RemoveArgs, RepositoryArgs, UnregisterArgs, VisibilityArgs, VisibilityValue,
+    RemoveArgs, RenameArgs, RepositoryArgs, UnregisterArgs, VisibilityArgs, VisibilityValue,
 };
 use super::interaction::{Interaction, InteractionError};
 use crate::application::ports::{
@@ -43,6 +43,7 @@ pub fn run(
         Command::Remove(command) => command.repositories.as_slice(),
         Command::Hook(command) => command.repositories.as_slice(),
         Command::Archive(command) => std::slice::from_ref(&command.repository),
+        Command::Rename(command) => std::slice::from_ref(&command.repository),
         Command::Visibility(command) => std::slice::from_ref(&command.repository),
         _ => &[],
     };
@@ -65,6 +66,7 @@ pub fn run(
         Command::Ensure(command) => ensure(&config_path, command),
         Command::Hook(command) => hook(&config_path, command, selector),
         Command::Archive(command) => archive(&config_path, command),
+        Command::Rename(command) => rename(&config_path, command, interaction, interactive),
         Command::Visibility(command) => visibility(&config_path, command, interaction, interactive),
         Command::Status(command) => super::inventory::status::run(&config_path, command),
         Command::Inventory(command) => inventory(&config_path, command),
@@ -856,6 +858,69 @@ fn visibility(
         (ports::Mutation::Noop, _) => "already private",
     });
     report_remote(&args.repository, result)
+}
+
+fn rename(
+    path: &Path,
+    args: RenameArgs,
+    interaction: &mut dyn Interaction,
+    interactive: bool,
+) -> i32 {
+    if !interactive && !args.yes {
+        eprintln!("lager: rename requires --yes outside a TTY");
+        return 2;
+    }
+    if !remote::valid_name(&args.new_name) {
+        eprintln!(
+            "lager: invalid repository name `{}`; use letters, digits, -, _ and . without a leading -",
+            escape(&args.new_name)
+        );
+        return 2;
+    }
+    let (config, providers, reference) = match remote_target(path, &args.repository) {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("lager: {}", escape(error));
+            return 1;
+        }
+    };
+    if reference
+        .path
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case(&args.new_name))
+    {
+        eprintln!(
+            "lager: {}: already named {}",
+            escape(&args.repository),
+            escape(&args.new_name)
+        );
+        return 2;
+    }
+    let renamed = match remote::rename(
+        &config,
+        &providers,
+        &CommandConfigStore::default(),
+        &NativeGit,
+        &Filesystem,
+        interaction,
+        path,
+        &reference,
+        &args.new_name,
+        args.yes,
+        &home_dir(),
+    ) {
+        Ok(renamed) => renamed,
+        Err(error) => return report_remote(&args.repository, Err(error)),
+    };
+    let mut outcome = format!("renamed to {}", renamed.reference.path);
+    if renamed.moved {
+        outcome.push_str(", moved");
+    }
+    if renamed.redeclared {
+        outcome.push_str(", redeclared");
+    }
+    report_remote(&args.repository, Ok(&outcome))
 }
 
 fn inventory(path: &Path, args: InventoryArgs) -> i32 {

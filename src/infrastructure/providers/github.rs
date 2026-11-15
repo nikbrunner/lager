@@ -60,6 +60,8 @@ struct PageInfo {
 
 #[derive(Debug, Deserialize)]
 struct ViewedRepository {
+    #[serde(rename = "nameWithOwner")]
+    name_with_owner: String,
     #[serde(rename = "isArchived")]
     is_archived: bool,
     visibility: String,
@@ -216,7 +218,13 @@ impl Github {
     }
 
     pub fn state(&self, path: &str) -> Result<Option<RemoteState>, String> {
-        let output = match self.gh(&["repo", "view", path, "--json", "isArchived,visibility"]) {
+        let output = match self.gh(&[
+            "repo",
+            "view",
+            path,
+            "--json",
+            "nameWithOwner,isArchived,visibility",
+        ]) {
             Ok(output) => output,
             Err(ProbeError::Exit { stderr, .. })
                 if stderr.contains("Could not resolve to a Repository") =>
@@ -227,6 +235,10 @@ impl Github {
         };
         let viewed: ViewedRepository = serde_json::from_str(&output)
             .map_err(|error| format!("could not parse gh response: {error}"))?;
+        // gh follows GitHub's redirect from a former name to the renamed repository.
+        if !viewed.name_with_owner.eq_ignore_ascii_case(path) {
+            return Ok(None);
+        }
         let visibility = match viewed.visibility.to_ascii_lowercase().as_str() {
             "public" => Visibility::Public,
             "private" => Visibility::Private,
@@ -234,6 +246,7 @@ impl Github {
             other => return Err(format!("gh reported unknown visibility `{other}`")),
         };
         Ok(Some(RemoteState {
+            name: viewed.name_with_owner,
             archived: viewed.is_archived,
             visibility,
         }))
@@ -310,6 +323,12 @@ impl Github {
 
     pub fn delete(&self, path: &str) -> Result<(), String> {
         self.gh(&["repo", "delete", path, "--yes"])
+            .map(drop)
+            .map_err(gh_error)
+    }
+
+    pub fn rename(&self, path: &str, name: &str) -> Result<(), String> {
+        self.gh(&["repo", "rename", name, "--repo", path, "--yes"])
             .map(drop)
             .map_err(gh_error)
     }

@@ -115,6 +115,10 @@ impl RemoteRepositories for ConfiguredProviders {
     fn delete(&self, reference: &RepositoryRef) -> Result<(), String> {
         self.remote(&reference.host)?.delete(&reference.path)
     }
+
+    fn rename(&self, reference: &RepositoryRef, name: &str) -> Result<(), String> {
+        self.remote(&reference.host)?.rename(&reference.path, name)
+    }
 }
 
 impl ProviderCatalog for ConfiguredProviders {

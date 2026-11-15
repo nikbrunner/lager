@@ -53,6 +53,7 @@ fn overlay_current_sources(source: &Path, destination: &Path) {
         "src/cli/signals.rs",
         "src/cli/worktree.rs",
         "src/domain/config.rs",
+        "src/domain/repository.rs",
         "src/main.rs",
         "src/infrastructure/config.rs",
         "src/infrastructure/desktop.rs",

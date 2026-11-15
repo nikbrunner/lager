@@ -21,11 +21,20 @@ case "$1 $2" in
     fi
     ;;
   "repo view")
+    if [ -e "$GH_STATE/free" ] && [ "$3" = "$(cat "$GH_STATE/free")" ]; then
+      printf '%s\n' "GraphQL: Could not resolve to a Repository with the name '$3'. (repository)" >&2
+      exit 1
+    fi
     if [ -e "$GH_STATE/missing" ] && [ ! -e "$GH_STATE/created" ]; then
       printf '%s\n' "GraphQL: Could not resolve to a Repository with the name '$3'. (repository)" >&2
       exit 1
     fi
-    printf '{"isArchived":%s,"visibility":"%s"}\n' "$(cat "$GH_STATE/archived")" "$(cat "$GH_STATE/visibility")"
+    # A `from to` line in redirects stands in for GitHub redirecting a former name.
+    name=""
+    if [ -e "$GH_STATE/redirects" ]; then
+      while read -r from to; do [ "$from" = "$3" ] && name="$to"; done < "$GH_STATE/redirects"
+    fi
+    printf '{"nameWithOwner":"%s","isArchived":%s,"visibility":"%s"}\n' "${name:-$3}" "$(cat "$GH_STATE/archived")" "$(cat "$GH_STATE/visibility")"
     ;;
   "repo archive")
     if [ -e "$GH_STATE/archive-fails" ]; then
@@ -62,6 +71,11 @@ case "$1 $2" in
     : > "$GH_STATE/deleted"
     # Stands in for work arriving in the checkout while GitHub deletes.
     if [ -e "$GH_STATE/dirty-on-delete" ]; then : > "$(cat "$GH_STATE/dirty-on-delete")"; fi
+    ;;
+  "repo rename")
+    : > "$GH_STATE/renamed"
+    # Stands in for something changing locally while GitHub renames.
+    if [ -e "$GH_STATE/on-rename" ]; then eval "$(cat "$GH_STATE/on-rename")"; fi
     ;;
   *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 1 ;;
 esac
@@ -245,7 +259,7 @@ fn archive_is_idempotent_and_undo_unarchives() {
     assert_outcome(&not_archived, 0, "org/demo: not archived\n");
 
     let check = "github.com auth status --hostname github.com";
-    let view = "github.com repo view org/demo --json isArchived,visibility";
+    let view = "github.com repo view org/demo --json nameWithOwner,isArchived,visibility";
     assert_eq!(
         fixture.calls(),
         [
@@ -338,7 +352,7 @@ fn an_enterprise_host_reaches_gh_through_gh_host() {
         fixture.calls(),
         [
             "ghe.example.com auth status --hostname ghe.example.com",
-            "ghe.example.com repo view org/demo --json isArchived,visibility",
+            "ghe.example.com repo view org/demo --json nameWithOwner,isArchived,visibility",
             "ghe.example.com repo archive org/demo --yes",
         ]
     );
@@ -446,7 +460,7 @@ fn create_makes_the_repository_then_clones_registers_and_runs_post_clone() {
         fixture.calls(),
         [
             "github.com auth status --hostname github.com",
-            "github.com repo view org/demo --json isArchived,visibility",
+            "github.com repo view org/demo --json nameWithOwner,isArchived,visibility",
             "github.com repo create org/demo --private --description=-a demo",
         ]
     );
@@ -663,7 +677,7 @@ fn publish_pushes_the_folder_moves_it_into_root_and_registers_it() {
         fixture.calls(),
         [
             "github.com auth status --hostname github.com".to_owned(),
-            "github.com repo view org/demo --json isArchived,visibility".to_owned(),
+            "github.com repo view org/demo --json nameWithOwner,isArchived,visibility".to_owned(),
             format!(
                 "github.com repo create org/demo --private --description=-a demo --source {} --remote origin --push",
                 canonical.display()
@@ -893,6 +907,13 @@ fn delete_fixture() -> Fixture {
 
 /// Declares org/demo and checks it out cleanly, its branch level with its remote-tracking ref.
 fn declared_checkout(fixture: &Fixture) -> PathBuf {
+    let checkout = clean_checkout(fixture);
+    declare(fixture);
+    checkout
+}
+
+/// Checks out org/demo cleanly without declaring it.
+fn clean_checkout(fixture: &Fixture) -> PathBuf {
     let checkout = fixture.home.join("repos/org/demo");
     source_folder(fixture, &checkout, true, true);
     git(fixture, &checkout, &["branch", "-M", "main"]);
@@ -911,7 +932,6 @@ fn declared_checkout(fixture: &Fixture) -> PathBuf {
         &checkout,
         &["branch", "--set-upstream-to=origin/main"],
     );
-    declare(fixture);
     checkout
 }
 
@@ -949,7 +969,7 @@ fn delete_with_yes_deletes_on_github_then_the_checkout_and_the_declaration() {
         [
             "github.com auth status --hostname github.com",
             "github.com api --hostname github.com -i user",
-            "github.com repo view org/demo --json isArchived,visibility",
+            "github.com repo view org/demo --json nameWithOwner,isArchived,visibility",
             "github.com repo delete org/demo --yes",
         ]
     );
@@ -1115,4 +1135,385 @@ fn a_checkout_changing_after_the_github_delete_says_what_remains_and_how_to_fini
     assert!(deleted(&fixture));
     assert!(checkout.join("late.txt").exists());
     assert!(declared(&fixture));
+}
+
+/// A fixture allowing `rename` where org/demo exists on GitHub and org/demo-cli is free.
+fn rename_fixture() -> Fixture {
+    let fixture = Fixture::github("\"rename\"");
+    fixture.set("free", "org/demo-cli");
+    fixture
+}
+
+fn config_text(fixture: &Fixture) -> String {
+    std::fs::read_to_string(&fixture.config).unwrap()
+}
+
+fn append_config(fixture: &Fixture, text: &str) {
+    let config = config_text(fixture) + text;
+    std::fs::write(&fixture.config, config).unwrap();
+}
+
+fn renamed(fixture: &Fixture) -> bool {
+    fixture
+        .calls()
+        .iter()
+        .any(|call| call.contains("repo rename"))
+}
+
+#[test]
+fn rename_renames_on_github_then_repoints_origin_moves_the_checkout_and_redeclares() {
+    let fixture = rename_fixture();
+    let checkout = clean_checkout(&fixture);
+    append_config(
+        &fixture,
+        "\n# the demo\n[[repositories]]\nurl = \"org/demo\" # short\npost_clone = \"make\"\n",
+    );
+    let before = config_text(&fixture);
+    let output = fixture.run(&["rename", "org/demo", "demo-cli", "--yes"]);
+    assert_outcome(
+        &output,
+        0,
+        "org/demo: renamed to org/demo-cli, moved, redeclared\n",
+    );
+    assert_eq!(
+        fixture.calls(),
+        [
+            "github.com auth status --hostname github.com",
+            "github.com repo view org/demo --json nameWithOwner,isArchived,visibility",
+            "github.com repo view org/demo-cli --json nameWithOwner,isArchived,visibility",
+            "github.com repo rename demo-cli --repo org/demo --yes",
+        ]
+    );
+    assert!(!checkout.exists());
+    let moved = fixture.home.join("repos/org/demo-cli");
+    assert_eq!(state(&moved, "README.md"), "demo\n");
+    assert_eq!(
+        git(&fixture, &moved, &["config", "remote.origin.url"]),
+        "git@github.com:org/demo-cli.git"
+    );
+    assert_eq!(
+        config_text(&fixture),
+        before.replace("\"org/demo\"", "\"org/demo-cli\"")
+    );
+}
+
+#[test]
+fn rename_of_a_wildcard_member_leaves_the_config_untouched() {
+    let fixture = rename_fixture();
+    clean_checkout(&fixture);
+    append_config(&fixture, "\n[[repositories]]\nurl = \"github.com/org/*\"\n");
+    let before = config_text(&fixture);
+    let output = fixture.run(&["rename", "org/demo", "demo-cli", "--yes"]);
+    assert_outcome(&output, 0, "org/demo: renamed to org/demo-cli, moved\n");
+    assert!(fixture.home.join("repos/org/demo-cli/.git").is_dir());
+    assert_eq!(config_text(&fixture), before);
+}
+
+#[test]
+fn rename_renames_a_wildcard_exclude_naming_the_repository() {
+    let fixture = rename_fixture();
+    append_config(
+        &fixture,
+        "\n[[repositories]]\nurl = \"github.com/org/*\"\nexclude = [\"demo\", \"other\"]\n",
+    );
+    let before = config_text(&fixture);
+    let output = fixture.run(&["rename", "org/demo", "demo-cli", "--yes"]);
+    assert_outcome(
+        &output,
+        0,
+        "org/demo: renamed to org/demo-cli, redeclared\n",
+    );
+    assert_eq!(
+        config_text(&fixture),
+        before.replace("[\"demo\",", "[\"demo-cli\",")
+    );
+}
+
+#[test]
+fn rename_refuses_linked_worktrees_before_touching_github() {
+    let fixture = rename_fixture();
+    let checkout = declared_checkout(&fixture);
+    let linked = fixture.home.join("worktrees/demo-feature");
+    git(
+        &fixture,
+        &checkout,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "feature",
+            linked.to_str().unwrap(),
+        ],
+    );
+    let output = fixture.run(&["rename", "org/demo", "demo-cli", "--yes"]);
+    assert_outcome(&output, 1, "");
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("it has linked worktrees (feature at ")
+            && stderr
+                .contains("demo-feature); remove them first (lager worktree remove), then rename"),
+        "{stderr}"
+    );
+    assert!(!renamed(&fixture));
+    assert!(checkout.join(".git").is_dir());
+    assert!(declared(&fixture));
+}
+
+#[test]
+fn rename_refuses_a_taken_name() {
+    let fixture = rename_fixture();
+    std::fs::remove_file(fixture.state.join("free")).unwrap();
+    let checkout = declared_checkout(&fixture);
+    let output = fixture.run(&["rename", "org/demo", "demo-cli", "--yes"]);
+    assert_outcome(&output, 1, "");
+    assert!(
+        text(&output.stderr).contains("github.com/org/demo-cli already exists on github.com"),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(!renamed(&fixture));
+    assert!(checkout.exists());
+}
+
+#[test]
+fn rename_without_checkout_renames_on_github_and_redeclares() {
+    let fixture = rename_fixture();
+    declare(&fixture);
+    let output = fixture.run(&["rename", "org/demo", "demo-cli", "--yes"]);
+    assert_outcome(
+        &output,
+        0,
+        "org/demo: renamed to org/demo-cli, redeclared\n",
+    );
+    assert!(renamed(&fixture));
+    assert!(config_text(&fixture).contains("url = \"org/demo-cli\""));
+    assert!(!fixture.home.join("repos/org/demo-cli").exists());
+}
+
+#[test]
+fn rename_outside_a_tty_needs_yes() {
+    let fixture = rename_fixture();
+    let checkout = declared_checkout(&fixture);
+    let output = fixture.run(&["rename", "org/demo", "demo-cli"]);
+    assert_outcome(&output, 2, "");
+    assert!(text(&output.stderr).contains("rename requires --yes outside a TTY"));
+    assert!(fixture.calls().is_empty());
+    assert!(checkout.exists());
+}
+
+#[test]
+fn rename_needs_rename_in_remote_actions() {
+    let fixture = Fixture::github("\"archive\"");
+    let checkout = declared_checkout(&fixture);
+    let output = fixture.run(&["rename", "org/demo", "demo-cli", "--yes"]);
+    assert_outcome(&output, 1, "");
+    assert!(text(&output.stderr).contains("`rename` is not enabled for github.com"));
+    assert!(fixture.calls().is_empty());
+    assert!(checkout.exists());
+}
+
+#[test]
+fn rename_refuses_an_invalid_or_unchanged_name_as_usage() {
+    let fixture = rename_fixture();
+    declare(&fixture);
+    for (args, error) in [
+        (
+            &["rename", "org/demo", "org/demo-cli", "--yes"][..],
+            "invalid repository name `org/demo-cli`",
+        ),
+        (
+            &["rename", "org/demo", "..", "--yes"],
+            "invalid repository name `..`",
+        ),
+        (
+            &["rename", "org/demo", "bad name", "--yes"],
+            "invalid repository name `bad name`",
+        ),
+        (
+            &["rename", "org/demo", "demo.git", "--yes"],
+            "invalid repository name `demo.git`",
+        ),
+        (
+            &["rename", "--yes", "org/demo", "--", "-demo"],
+            "invalid repository name `-demo`",
+        ),
+        (
+            &["rename", "org/demo", "Demo", "--yes"],
+            "org/demo: already named Demo",
+        ),
+    ] {
+        let output = fixture.run(args);
+        assert_outcome(&output, 2, "");
+        assert!(
+            text(&output.stderr).contains(error),
+            "{}",
+            text(&output.stderr)
+        );
+    }
+    assert!(fixture.calls().is_empty());
+}
+
+#[test]
+fn a_move_failing_after_the_github_rename_says_what_was_done_and_how_to_finish() {
+    let fixture = rename_fixture();
+    let checkout = declared_checkout(&fixture);
+    let blocked = fixture.home.join("repos/org/demo-cli");
+    fixture.set("on-rename", &format!(": > '{}'", blocked.display()));
+    let output = fixture.run(&["rename", "org/demo", "demo-cli", "--yes"]);
+    assert_outcome(&output, 1, "");
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains(
+            "renamed github.com/org/demo to github.com/org/demo-cli; origin set to git@github.com:org/demo-cli.git; moving the checkout failed: "
+        ) && stderr.contains("GitHub redirects the old URL meanwhile; finish with: move ")
+            && stderr.contains(", then replace github.com/org/demo with github.com/org/demo-cli in "),
+        "{stderr}"
+    );
+    assert!(checkout.join(".git").is_dir());
+    assert!(config_text(&fixture).contains("url = \"org/demo\""));
+}
+
+#[test]
+fn rename_back_to_a_former_name_that_only_redirects_is_allowed() {
+    let fixture = rename_fixture();
+    std::fs::remove_file(fixture.state.join("free")).unwrap();
+    fixture.set("redirects", "org/demo-cli org/demo\n");
+    declare(&fixture);
+    let output = fixture.run(&["rename", "org/demo", "demo-cli", "--yes"]);
+    assert_outcome(
+        &output,
+        0,
+        "org/demo: renamed to org/demo-cli, redeclared\n",
+    );
+    assert!(renamed(&fixture));
+}
+
+#[test]
+fn delete_of_a_former_name_that_redirects_elsewhere_is_not_found() {
+    let fixture = delete_fixture();
+    fixture.set("redirects", "org/demo org/other\n");
+    declare(&fixture);
+    let output = fixture.run(&["remove", "org/demo", "--remote", "--yes"]);
+    assert_outcome(&output, 1, "");
+    assert!(
+        text(&output.stderr).contains("org/demo: not found on github.com"),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(!deleted(&fixture));
+    assert!(declared(&fixture));
+}
+
+#[test]
+fn rename_refuses_a_differently_cased_name_before_touching_github() {
+    let fixture = rename_fixture();
+    fixture.set("redirects", "org/demo org/Demo\n");
+    declare(&fixture);
+    let output = fixture.run(&["rename", "org/demo", "demo-cli", "--yes"]);
+    assert_outcome(&output, 1, "");
+    assert!(
+        text(&output.stderr).contains("use the exact name org/Demo"),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(!renamed(&fixture));
+}
+
+#[test]
+fn rename_refuses_a_checkout_whose_origin_is_another_repository() {
+    let fixture = rename_fixture();
+    let checkout = declared_checkout(&fixture);
+    git(
+        &fixture,
+        &checkout,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:org/other.git",
+        ],
+    );
+    let output = fixture.run(&["rename", "org/demo", "demo-cli", "--yes"]);
+    assert_outcome(&output, 1, "");
+    assert!(
+        text(&output.stderr)
+            .contains("its origin is not github.com/org/demo; GitHub was not touched"),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(!renamed(&fixture));
+}
+
+#[test]
+fn rename_refuses_an_existing_destination_even_without_checkout() {
+    let fixture = rename_fixture();
+    declare(&fixture);
+    let taken = fixture.home.join("repos/org/demo-cli");
+    std::fs::create_dir_all(&taken).unwrap();
+    let output = fixture.run(&["rename", "org/demo", "demo-cli", "--yes"]);
+    assert_outcome(&output, 1, "");
+    assert!(
+        text(&output.stderr).contains(&format!(
+            "destination already exists: {}; GitHub was not touched",
+            taken.display()
+        )),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(!renamed(&fixture));
+}
+
+#[test]
+fn setting_origin_failing_after_the_github_rename_names_every_step_left() {
+    let fixture = rename_fixture();
+    let checkout = declared_checkout(&fixture);
+    fixture.set(
+        "on-rename",
+        &format!(": > '{}'", checkout.join(".git/config.lock").display()),
+    );
+    let output = fixture.run(&["rename", "org/demo", "demo-cli", "--yes"]);
+    assert_outcome(&output, 1, "");
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("renamed github.com/org/demo to github.com/org/demo-cli; setting origin failed: ")
+            && stderr.contains(&format!(
+                "finish with: `git -C {} remote set-url origin git@github.com:org/demo-cli.git`, then move {} to ",
+                checkout.display(),
+                checkout.display()
+            ))
+            && stderr.contains(", then replace github.com/org/demo with github.com/org/demo-cli in "),
+        "{stderr}"
+    );
+    assert!(checkout.join(".git").is_dir());
+    assert!(config_text(&fixture).contains("url = \"org/demo\""));
+}
+
+#[test]
+fn a_declaration_failing_after_the_move_names_what_was_done_and_what_is_left() {
+    let fixture = rename_fixture();
+    let checkout = declared_checkout(&fixture);
+    fixture.set(
+        "on-rename",
+        &format!("printf '[[' >> '{}'", fixture.config.display()),
+    );
+    let output = fixture.run(&["rename", "org/demo", "demo-cli", "--yes"]);
+    assert_outcome(&output, 1, "");
+    let moved = fixture.home.join("repos/org/demo-cli");
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "renamed github.com/org/demo to github.com/org/demo-cli; origin set to git@github.com:org/demo-cli.git; moved to {}; rewriting the declaration failed: ",
+            moved.display()
+        )) && stderr.contains(&format!(
+            "finish with: replace github.com/org/demo with github.com/org/demo-cli in {}",
+            fixture.config.display()
+        )),
+        "{stderr}"
+    );
+    assert!(!checkout.exists());
+    assert_eq!(
+        git(&fixture, &moved, &["config", "remote.origin.url"]),
+        "git@github.com:org/demo-cli.git"
+    );
 }

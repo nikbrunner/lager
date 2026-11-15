@@ -38,6 +38,11 @@ pub enum Command {
     Ensure(EnsureArgs),
     #[command(about = "Run configured hooks for explicit repositories")]
     Hook(HookArgs),
+    #[command(
+        about = "Rename a GitHub repository with its origin, checkout and declaration",
+        after_help = "Example:\n  lager rename github.com/org/project project-cli --yes"
+    )]
+    Rename(RenameArgs),
     #[command(about = "Archive a GitHub repository, or unarchive it with --undo")]
     Archive(ArchiveArgs),
     #[command(about = "Make a GitHub repository public or private")]
@@ -288,6 +293,16 @@ pub struct EnsureArgs {
 pub struct HookArgs {
     #[arg(value_name = "REPOSITORY", help = "Explicit repository references")]
     pub repositories: Vec<String>,
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct RenameArgs {
+    #[arg(value_name = "REPOSITORY", help = "Repository reference")]
+    pub repository: String,
+    #[arg(value_name = "NEW_NAME", help = "New repository name; the owner stays")]
+    pub new_name: String,
+    #[arg(long, help = "Rename without an interactive prompt")]
+    pub yes: bool,
 }
 
 #[derive(Debug, ClapArgs)]

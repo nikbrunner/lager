@@ -13,11 +13,13 @@ use crate::application::git_dir;
 use crate::application::ports::{
     ConfigStore, GitRemoval, GitState, HookRunner, Interaction, InteractionError, Mutation,
     PathKind, ProviderAnswer, ProviderFailure, ProviderSource, RemoteRepositories, RemoteState,
-    RemovalFilesystem, Visibility, WorktreeFilesystem, WorktreeGit,
+    RemovalFilesystem, RenamingStore, Visibility, WorktreeFilesystem, WorktreeGit,
 };
 use crate::application::warehouse::{self, ExactRemovalError};
 use crate::domain::config::{Config, RemoteAction};
-use crate::domain::repository::{RepositoryRef, RepositorySummary, validate_reference_safety};
+use crate::domain::repository::{
+    RepositoryRef, RepositorySummary, renamed_url, validate_reference_safety,
+};
 use crate::domain::state::LocalState;
 
 /// How long a provider request may run, and how long ending the requests may hold the caller.
@@ -835,6 +837,224 @@ pub fn confirm_name(
     }
 }
 
+/// A repository name GitHub accepts: ASCII letters, digits, `-`, `_` and `.`, not starting with
+/// `-`, not ending in `.git`, and not `.` or `..`.
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && !name.to_ascii_lowercase().ends_with(".git")
+        && name != "."
+        && name != ".."
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// What `rename` changed besides the name on the provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Renamed {
+    pub reference: RepositoryRef,
+    /// A checkout existed; its origin was repointed and it was moved.
+    pub moved: bool,
+    /// A declaration changed.
+    pub redeclared: bool,
+}
+
+/// Renames `reference` to `name` under the same owner on its provider, then repoints the
+/// checkout's origin, moves the checkout and rewrites the declaration. Every refusal and the
+/// confirmation, skipped with `yes`, come before the provider is touched.
+#[allow(clippy::too_many_arguments)]
+pub fn rename<S: RenamingStore>(
+    config: &Config,
+    remote: &dyn RemoteRepositories,
+    store: &S,
+    git: &dyn WorktreeGit,
+    fs: &dyn WorktreeFilesystem,
+    interaction: &mut dyn Interaction,
+    config_path: &Path,
+    reference: &RepositoryRef,
+    name: &str,
+    yes: bool,
+    home: &Path,
+) -> Result<Renamed, ActionError> {
+    ready(config, remote, reference, RemoteAction::Rename)?;
+    let (owner, old_name) = reference
+        .path
+        .split_once('/')
+        .ok_or_else(|| "rename needs one repository as owner/name".to_owned())?;
+    let new_path = format!("{owner}/{name}");
+    let renamed = RepositoryRef::parse(&format!("{}/{new_path}", reference.host))
+        .ok()
+        .filter(|renamed| valid_name(name) && renamed.path == new_path)
+        .ok_or_else(|| format!("invalid repository name `{name}`"))?;
+    if name.eq_ignore_ascii_case(old_name) {
+        return Err(format!("{} is already named {name}", reference.identity()).into());
+    }
+    let (identity, new_identity) = (reference.identity(), renamed.identity());
+    let current = remote
+        .state(reference)?
+        .ok_or_else(|| format!("not found on {}", reference.host))?;
+    // The declaration and checkout match the exact spelling, so a differently cased one would
+    // be left behind.
+    if current.name != reference.path {
+        return Err(format!("use the exact name {}", current.name).into());
+    }
+    if remote.state(&renamed)?.is_some() {
+        return Err(format!("{new_identity} already exists on {}", reference.host).into());
+    }
+    if config.repositories.iter().any(|declaration| {
+        RepositoryRef::parse(&declaration.url)
+            .is_ok_and(|declared| !declared.is_wildcard() && declared.identity() == new_identity)
+    }) {
+        return Err(format!("{new_identity} is already declared").into());
+    }
+    let source = warehouse::destination(config, reference, home)?;
+    let destination = warehouse::destination(config, &renamed, home)?;
+    let refuse = |reason: String| {
+        ActionError::from(format!(
+            "cannot rename {}: {reason}; GitHub was not touched",
+            source.display()
+        ))
+    };
+    let taken = || -> Result<(), ActionError> {
+        if fs.kind(&destination)? != PathKind::Missing {
+            return Err(refuse(format!(
+                "destination already exists: {}",
+                destination.display()
+            )));
+        }
+        Ok(())
+    };
+    taken()?;
+    // The checkout and the origin URL it moves to, when a checkout exists.
+    let checkout = match fs.kind(&source)? {
+        PathKind::Missing => None,
+        PathKind::Directory => {
+            let canonical = fs.canonicalize(&source).map_err(refuse)?;
+            let worktrees = git
+                .entries(&canonical)
+                .map_err(|fault| refuse(fault.error))?;
+            if worktrees.len() > 1 {
+                let linked = worktrees
+                    .iter()
+                    .filter(|entry| entry.path != canonical)
+                    .map(|entry| {
+                        let branch = entry.branch.as_deref().map_or("detached", |branch| {
+                            branch.strip_prefix("refs/heads/").unwrap_or(branch)
+                        });
+                        format!("{branch} at {}", entry.path.display())
+                    })
+                    .collect::<Vec<_>>();
+                return Err(refuse(format!(
+                    "it has linked worktrees ({}); remove them first (lager worktree remove), then rename",
+                    linked.join(", ")
+                )));
+            }
+            if git.origin_identity(&canonical).map_err(refuse)?.as_deref() != Some(&identity) {
+                return Err(refuse(format!("its origin is not {identity}")));
+            }
+            let origin = git.origin_url(&canonical).map_err(refuse)?;
+            let url = renamed_url(&origin, old_name, name)
+                .filter(|url| {
+                    RepositoryRef::parse(url).is_ok_and(|url| url.identity() == new_identity)
+                })
+                .ok_or_else(|| refuse(format!("cannot derive the new origin from {origin}")))?;
+            let parent = destination
+                .parent()
+                .ok_or_else(|| "destination has no parent".to_owned())?;
+            let existing = parent
+                .ancestors()
+                .find(|path| fs.kind(path).is_ok_and(|kind| kind != PathKind::Missing))
+                .unwrap_or(parent);
+            if fs.device(existing)? != fs.device(&canonical)? {
+                return Err(refuse(format!(
+                    "it is on another file system than {}",
+                    destination.display()
+                )));
+            }
+            Some(url)
+        }
+        _ => return Err(refuse("it is not a directory".to_owned())),
+    };
+    if !yes {
+        let mut changes = vec![format!("GitHub: {identity} becomes {new_identity}")];
+        if let Some(url) = &checkout {
+            changes.push(format!("origin: {url}"));
+            changes.push(format!(
+                "checkout: {} moves to {}",
+                source.display(),
+                destination.display()
+            ));
+        }
+        changes.push(format!("config: declaration in {}", config_path.display()));
+        match interaction.confirm_list(
+            &format!("Rename {identity} to {new_identity}:"),
+            &changes,
+            "Rename?",
+            false,
+        ) {
+            Ok(true) => {}
+            Ok(false) => return Err(ActionError::Declined),
+            Err(InteractionError::Cancelled) => return Err(ActionError::Cancelled),
+            Err(InteractionError::Failed(error)) => return Err(ActionError::Failed(error)),
+        }
+    }
+    // The prompt can stay open for a while; the move must never replace what appeared meanwhile.
+    taken()?;
+    remote.rename(reference, name)?;
+    // Every later failure names what is done and what is left; GitHub redirects the old URL.
+    let mut done = vec![format!("renamed {identity} to {new_identity}")];
+    let mut left = Vec::new();
+    if let Some(url) = &checkout {
+        done.push(format!("origin set to {url}"));
+        left.push(format!(
+            "`git -C {} remote set-url origin {url}`",
+            source.display()
+        ));
+        done.push(format!("moved to {}", destination.display()));
+        left.push(format!(
+            "move {} to {}",
+            source.display(),
+            destination.display()
+        ));
+    }
+    left.push(format!(
+        "replace {identity} with {new_identity} in {}",
+        config_path.display()
+    ));
+    let failed = |step: usize, what: &str, error: String| {
+        ActionError::from(format!(
+            "{}; {what} failed: {error}; GitHub redirects the old URL meanwhile; finish with: {}",
+            done[..=step].join("; "),
+            left[step..].join(", then ")
+        ))
+    };
+    if let Some(url) = &checkout {
+        git.set_origin_url(&source, url)
+            .map_err(|error| failed(0, "setting origin", error))?;
+        fs.create_dir_all(destination.parent().unwrap_or(&destination))
+            .and_then(|()| match fs.kind(&destination)? {
+                PathKind::Missing => fs.rename(&source, &destination),
+                _ => Err(format!("{} already exists", destination.display())),
+            })
+            .map_err(|error| failed(1, "moving the checkout", error))?;
+    }
+    let mutation = store
+        .rename(config_path, &identity, &new_identity)
+        .map_err(|error| {
+            failed(
+                left.len() - 1,
+                "rewriting the declaration",
+                error.to_string(),
+            )
+        })?;
+    Ok(Renamed {
+        reference: renamed,
+        moved: checkout.is_some(),
+        redeclared: mutation == Mutation::Changed,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Condvar, Mutex};
@@ -1310,6 +1530,7 @@ mod tests {
         }
         fn state(&self, _reference: &RepositoryRef) -> Result<Option<RemoteState>, String> {
             Ok(Some(RemoteState {
+                name: "org/demo".to_owned(),
                 archived: false,
                 visibility: Visibility::Private,
             }))
@@ -1341,6 +1562,9 @@ mod tests {
             unreachable!()
         }
         fn delete(&self, _: &RepositoryRef) -> Result<(), String> {
+            unreachable!()
+        }
+        fn rename(&self, _: &RepositoryRef, _: &str) -> Result<(), String> {
             unreachable!()
         }
     }
@@ -1405,6 +1629,7 @@ mod tests {
         }
         fn state(&self, _: &RepositoryRef) -> Result<Option<RemoteState>, String> {
             Ok(Some(RemoteState {
+                name: "org/demo".to_owned(),
                 archived: false,
                 visibility: Visibility::Private,
             }))
@@ -1433,6 +1658,9 @@ mod tests {
         fn delete(&self, _: &RepositoryRef) -> Result<(), String> {
             *self.0.lock().unwrap() += 1;
             Ok(())
+        }
+        fn rename(&self, _: &RepositoryRef, _: &str) -> Result<(), String> {
+            unreachable!()
         }
     }
 

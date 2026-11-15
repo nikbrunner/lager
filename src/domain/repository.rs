@@ -261,6 +261,22 @@ fn default_ssh_url(host: &str, path: &str) -> String {
     )
 }
 
+/// `url` with its last path segment `old`, compared case-insensitively, replaced by `new`. The
+/// rest stays as written: scheme, user, host alias, `.git` suffix and trailing slash.
+pub fn renamed_url(url: &str, old: &str, new: &str) -> Option<String> {
+    let trimmed = url.trim_end_matches('/');
+    let (stem, suffix) = match trimmed.strip_suffix(".git") {
+        Some(stem) => (stem, ".git"),
+        None => (trimmed, ""),
+    };
+    let start = stem.len().checked_sub(old.len())?;
+    let (base, name) = (stem.get(..start)?, stem.get(start..)?);
+    if !name.eq_ignore_ascii_case(old) || !base.ends_with(['/', ':']) {
+        return None;
+    }
+    Some(format!("{base}{new}{suffix}{}", &url[trimmed.len()..]))
+}
+
 pub fn normalize_remote(input: &str) -> Result<String, RepositoryRefError> {
     if input.starts_with('/') {
         return Ok(RepositoryRef::parse(&format!("file://{input}"))?.identity());
@@ -286,6 +302,32 @@ mod tests {
 
         let browser = RepositoryRef::parse("https://github.com/nikbrunner/lager").unwrap();
         assert_eq!(browser.clone_url, "https://github.com/nikbrunner/lager");
+    }
+
+    #[test]
+    fn renamed_url_keeps_the_written_form() {
+        use super::renamed_url;
+        for (url, renamed) in [
+            (
+                "git@github.com:org/demo.git",
+                "git@github.com:org/demo-cli.git",
+            ),
+            (
+                "https://github.com/org/Demo/",
+                "https://github.com/org/demo-cli/",
+            ),
+            ("org/demo", "org/demo-cli"),
+            (
+                "ssh://git@alias:22/org/demo",
+                "ssh://git@alias:22/org/demo-cli",
+            ),
+        ] {
+            assert_eq!(
+                renamed_url(url, "demo", "demo-cli").as_deref(),
+                Some(renamed)
+            );
+        }
+        assert_eq!(renamed_url("org/xdemo", "demo", "demo-cli"), None);
     }
 
     #[test]

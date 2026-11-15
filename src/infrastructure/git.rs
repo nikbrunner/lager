@@ -1006,6 +1006,14 @@ impl WorktreeGit for NativeGit {
             .collect())
     }
 
+    fn origin_url(&self, repository: &Path) -> Result<String, String> {
+        captured_text(git_at(repository).args(["remote", "get-url", "origin"]))
+    }
+
+    fn set_origin_url(&self, repository: &Path, url: &str) -> Result<(), String> {
+        captured(git_at(repository).args(["remote", "set-url", "origin", url])).map(drop)
+    }
+
     fn branch_exists(&self, repository: &Path, name: &str) -> Result<bool, String> {
         let output = git_at(repository)
             .args(["show-ref", "--verify", "--quiet"])
