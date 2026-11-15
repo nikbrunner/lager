@@ -832,8 +832,11 @@ fn visibility(
         VisibilityValue::Public => ports::Visibility::Public,
         VisibilityValue::Private => ports::Visibility::Private,
     };
-    if target == ports::Visibility::Public && !interactive && !args.yes {
-        eprintln!("lager: visibility public requires --yes outside a TTY");
+    if !interactive && !args.yes {
+        eprintln!(
+            "lager: visibility {} requires --yes outside a TTY",
+            target.as_str()
+        );
         return 2;
     }
     let (config, providers, reference) = match remote_target(path, &args.repository) {

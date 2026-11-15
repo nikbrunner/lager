@@ -196,6 +196,8 @@ pub(super) fn open(
     };
     let opened = if session.running() {
         Err("a batch is running".to_owned())
+    } else if session.github.running() {
+        Err("a GitHub action is running".to_owned())
     } else {
         model::worktree_checkout(row)
             .map_err(str::to_owned)

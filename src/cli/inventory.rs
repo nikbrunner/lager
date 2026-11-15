@@ -43,6 +43,7 @@ use crate::presentation::escape;
 
 use super::args::InventoryArgs;
 
+mod github;
 mod keys;
 pub(super) mod status;
 mod worktrees;
@@ -141,6 +142,7 @@ struct InventorySession {
     remote_rows: Vec<model::RowKey>,
     /// How many rows the catalogs added when remote discovery was last on.
     remote_cached: usize,
+    github: github::Remote,
 }
 
 /// The providers of a configuration that passed validation.
@@ -170,6 +172,7 @@ impl InventorySession {
             remote,
             remote_rows: Vec::new(),
             remote_cached: 0,
+            github: github::Remote::default(),
             config,
             config_path,
             home,
@@ -346,6 +349,7 @@ impl InventorySession {
     /// Ends the local scan and the provider requests after the terminal is restored. Both count
     /// down one cancellation bound; what still runs after it is left behind.
     fn stop_background(&mut self) {
+        github::finish(self);
         let deadline = Instant::now() + CANCELLATION_BOUND;
         self.worker.cancel();
         self.remote.disable();
@@ -512,6 +516,17 @@ impl InventorySession {
 
     fn running(&self) -> bool {
         self.batch.as_ref().is_some_and(|batch| !batch.finished())
+    }
+
+    /// Why no batch can start now: one is running, or a GitHub action may move what it touches.
+    fn batch_blocked(&self) -> Option<&'static str> {
+        if self.running() {
+            Some("A batch is already running")
+        } else if self.github.running() {
+            Some("A GitHub action is running")
+        } else {
+            None
+        }
     }
 
     /// Stops a running batch before its next target and refreshes what it changed.
@@ -855,6 +870,7 @@ impl TerminalSession {
                 return code;
             }
             session.receive_events();
+            github::poll(session, &mut selection);
             session.reload_changed_config(selection.view() == View::Normal && !selection.quit);
             // The batch waits while the user decides whether to cancel it.
             let deciding = selection.quit;
@@ -919,7 +935,12 @@ impl TerminalSession {
             // A confirmation is answered only by keys typed once it is on screen.
             if matches!(
                 selection.view(),
-                View::Preview | View::AddPreview | View::WorktreePlan | View::WorktreeConfirm
+                View::Preview
+                    | View::AddPreview
+                    | View::WorktreePlan
+                    | View::WorktreeConfirm
+                    | View::RemoteDeleteConfirm
+                    | View::RemoteVisibilityConfirm
             ) && std::mem::take(&mut selection.preview_fresh)
             {
                 discard_input();
@@ -1020,6 +1041,13 @@ impl TerminalSession {
                                     return code;
                                 }
                             }
+                            action
+                                if selection.github.is_some()
+                                    && view != View::Help
+                                    && action != Some(Action::Help) =>
+                            {
+                                github::key(session, &mut selection, action, key);
+                            }
                             Some(Action::Worktrees) if view == View::Normal => {
                                 let row = selection.selected_row(&visible_rows);
                                 let name = row
@@ -1056,7 +1084,12 @@ impl TerminalSession {
                                 | Action::Open
                                 | Action::Remote
                                 | Action::Retry
-                                | Action::Archives),
+                                | Action::Archives
+                                | Action::Rename
+                                | Action::Archive
+                                | Action::Visibility
+                                | Action::DeleteRemote
+                                | Action::CreateRemote),
                             ) if view == View::Normal => {
                                 if let Some(code) = run_direct(
                                     session,
@@ -1219,12 +1252,8 @@ impl TerminalSession {
                                             batch.action.label()
                                         )
                                     });
-                                } else if session
-                                    .batch
-                                    .as_ref()
-                                    .is_some_and(|batch| !batch.finished())
-                                {
-                                    session.message = Some("A batch is already running".to_owned());
+                                } else if let Some(reason) = session.batch_blocked() {
+                                    session.message = Some(reason.to_owned());
                                 } else if let Some(batch) = batch {
                                     start_batch(
                                         session,
@@ -1599,7 +1628,8 @@ impl TerminalSession {
                         .map(|key| format!(" · {key} → cancel batch"))
                         .unwrap_or_default()
                 )
-            });
+            })
+            .or_else(|| github::status(session));
         let remote_state = remote_state(&session.remote);
         let root_missing = report
             .diagnostics
@@ -2110,6 +2140,19 @@ impl TerminalSession {
                             );
                         }
                     }
+                    View::RemoteCreateInput
+                    | View::RemoteRenameInput
+                    | View::RemoteDeleteConfirm
+                    | View::RemoteVisibilityConfirm => {
+                        if let Some(dialog) = &shown.github {
+                            github::draw(
+                                frame,
+                                dialog,
+                                session,
+                                above_status(frame.area(), below_help),
+                            );
+                        }
+                    }
                     View::Normal | View::Search => {}
                 }
             })
@@ -2140,6 +2183,10 @@ enum View {
     WorktreePlan,
     WorktreeBlocked,
     WorktreeConfirm,
+    RemoteCreateInput,
+    RemoteRenameInput,
+    RemoteDeleteConfirm,
+    RemoteVisibilityConfirm,
 }
 
 impl View {
@@ -2150,13 +2197,20 @@ impl View {
             Self::Inspect => "INSPECT",
             Self::Menu => "MENU",
             Self::Problems => "PROBLEMS",
-            Self::Preview | Self::QuitBatch | Self::WorktreePlan | Self::WorktreeConfirm => {
-                "CONFIRM"
-            }
+            Self::Preview
+            | Self::QuitBatch
+            | Self::WorktreePlan
+            | Self::WorktreeConfirm
+            | Self::RemoteDeleteConfirm
+            | Self::RemoteVisibilityConfirm => "CONFIRM",
             Self::Worktrees | Self::WorktreeBlocked => "WORKTREES",
             Self::Batch => "RESULTS",
             Self::Help => "HELP",
-            Self::AddInput | Self::AddPreview | Self::WorktreeInput => "INPUT",
+            Self::AddInput
+            | Self::AddPreview
+            | Self::WorktreeInput
+            | Self::RemoteCreateInput
+            | Self::RemoteRenameInput => "INPUT",
         }
     }
 
@@ -2172,8 +2226,14 @@ impl View {
             | Self::AddPreview
             | Self::QuitBatch
             | Self::WorktreePlan
-            | Self::WorktreeConfirm => Mode::Confirmation,
-            Self::AddInput | Self::WorktreeInput => Mode::Input,
+            | Self::WorktreeConfirm
+            | Self::RemoteVisibilityConfirm => Mode::Confirmation,
+            // The delete confirmation takes a typed name, so letters must stay text.
+            Self::AddInput
+            | Self::WorktreeInput
+            | Self::RemoteCreateInput
+            | Self::RemoteRenameInput
+            | Self::RemoteDeleteConfirm => Mode::Input,
             Self::Worktrees => Mode::Worktrees,
         }
     }
@@ -2347,6 +2407,25 @@ fn footer_widget(
         View::AddInput | View::WorktreeInput => vec![
             (first(Mode::Input, Action::Accept), "preview"),
             (first(Mode::Input, Action::Cancel), "back"),
+        ],
+        View::RemoteCreateInput => vec![
+            (first(Mode::Input, Action::Accept), "create"),
+            ("Tab".to_owned(), "next field"),
+            (first(Mode::Input, Action::Cancel), "cancel"),
+        ],
+        View::RemoteRenameInput => vec![
+            (first(Mode::Input, Action::Accept), "rename"),
+            (first(Mode::Input, Action::Cancel), "cancel"),
+        ],
+        View::RemoteDeleteConfirm => vec![
+            ("Tab".to_owned(), "focus"),
+            (first(Mode::Input, Action::Accept), "choose"),
+            (first(Mode::Input, Action::Cancel), "cancel"),
+        ],
+        View::RemoteVisibilityConfirm => vec![
+            (rows_hint(bindings, Mode::Confirmation, false), "focus"),
+            (first(Mode::Confirmation, Action::Accept), "choose"),
+            (first(Mode::Confirmation, Action::Cancel), "cancel"),
         ],
         View::AddPreview => vec![
             (rows_hint(bindings, Mode::Confirmation, false), "select"),
@@ -2708,6 +2787,10 @@ fn status_lines(
                 | View::AddPreview
                 | View::WorktreePlan
                 | View::Worktrees
+                | View::RemoteCreateInput
+                | View::RemoteRenameInput
+                | View::RemoteDeleteConfirm
+                | View::RemoteVisibilityConfirm
         )
     {
         lines.push(Line::styled(format!("! {failures}"), warn()));
@@ -2728,7 +2811,13 @@ fn status_lines(
         ),
         _ if message.is_some() && complete => message.unwrap_or_default().to_owned(),
         _ if message.is_some() => format!("{state} · {}", message.unwrap_or_default()),
-        View::Preview | View::WorktreeConfirm => "Nothing changes until you confirm".to_owned(),
+        View::Preview
+        | View::WorktreeConfirm
+        | View::RemoteDeleteConfirm
+        | View::RemoteVisibilityConfirm => "Nothing changes until you confirm".to_owned(),
+        View::RemoteCreateInput | View::RemoteRenameInput => {
+            "Ordinary keys type text · nothing changes on GitHub yet".to_owned()
+        }
         View::AddInput => "Ordinary keys type text · nothing is saved yet".to_owned(),
         View::WorktreeInput => "Ordinary keys type text · nothing is created yet".to_owned(),
         View::AddPreview | View::WorktreePlan => "Nothing changes until you choose".to_owned(),
@@ -3161,7 +3250,7 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
 }
 
 /// Normal-mode actions that run a menu entry; none has a default key.
-const DIRECT_ACTIONS: [Action; 10] = [
+const DIRECT_ACTIONS: [Action; 15] = [
     Action::Register,
     Action::Unregister,
     Action::Clone,
@@ -3172,6 +3261,11 @@ const DIRECT_ACTIONS: [Action; 10] = [
     Action::Remote,
     Action::Retry,
     Action::Archives,
+    Action::Rename,
+    Action::Archive,
+    Action::Visibility,
+    Action::DeleteRemote,
+    Action::CreateRemote,
 ];
 
 fn direct_label(action: Action) -> &'static str {
@@ -3186,6 +3280,11 @@ fn direct_label(action: Action) -> &'static str {
         Action::Remote => "Remote",
         Action::Retry => "Retry remote",
         Action::Archives => "Remote archives",
+        Action::Rename => "Rename on GitHub",
+        Action::Archive => "Archive on GitHub",
+        Action::Visibility => "Change visibility on GitHub",
+        Action::DeleteRemote => "Delete everywhere",
+        Action::CreateRemote => "New repository on GitHub",
         other => other.name(),
     }
 }
@@ -3606,6 +3705,7 @@ enum Menu {
     Copy,
     Selection,
     Remote,
+    Visibility,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3632,6 +3732,7 @@ enum Entry {
     RemoteRetry,
     RemoteRefresh,
     RemoteArchives,
+    Github(github::Act),
 }
 
 /// One popup line: a group heading or spacer without an entry, or an entry with its hint.
@@ -3649,6 +3750,7 @@ fn menu_title(menu: Menu, name: &str, marked: usize) -> String {
         Menu::Copy => format!("Copy value / {name}"),
         Menu::Selection => format!("Selection / {marked} marked"),
         Menu::Remote => "Remote discovery".to_owned(),
+        Menu::Visibility => format!("Change visibility / {name}"),
     }
 }
 
@@ -3733,6 +3835,10 @@ fn menu_lines(
                 heading(String::new()),
                 heading("Session".to_owned()),
                 item(Entry::Add, "Add repository", key(Action::Add), true),
+            ]
+            .into_iter()
+            .chain(github::create_line(session))
+            .chain([
                 item(
                     Entry::Open(Menu::Remote),
                     "Remote discovery…",
@@ -3778,7 +3884,8 @@ fn menu_lines(
                 },
                 item(Entry::Help, "Help / keybindings", key(Action::Help), true),
                 item(Entry::Quit, "Quit", key(Action::Quit), true),
-            ]
+            ])
+            .collect()
         }
         Menu::Repository => [
             BatchAction::Register,
@@ -3850,7 +3957,9 @@ fn menu_lines(
                 }
             }
         })
+        .chain(github::group(session, row))
         .collect(),
+        Menu::Visibility => github::visibility_lines(session, row),
         Menu::Copy => CopyField::ALL
             .into_iter()
             .map(|field| {
@@ -4131,6 +4240,10 @@ fn activate_menu_entry(
             worktrees::open(session, selection, row, name);
             return None;
         }
+        (Entry::Github(act), row) => {
+            github::activate(session, selection, act, row);
+            return None;
+        }
         (Entry::Problems, _) => {
             selection.problems = true;
             selection.problems_scroll = 0;
@@ -4211,7 +4324,9 @@ fn activate_menu_entry(
             selection.batch_cancel = false;
             return None;
         }
-        (Entry::Run(_), _) if session.running() => Some("A batch is already running".to_owned()),
+        (Entry::Run(_), _) if session.batch_blocked().is_some() => {
+            session.batch_blocked().map(str::to_owned)
+        }
         (Entry::Run(action), row) if action.removes() => {
             confirm_removal(session, selection, report, visible_rows, row, action);
             return None;
@@ -4287,7 +4402,18 @@ fn run_direct(
         Action::Open => (Menu::Root, Entry::OpenOrigin),
         Action::Remote => (Menu::Root, Entry::Open(Menu::Remote)),
         Action::Retry => (Menu::Remote, Entry::RemoteRetry),
-        _ => (Menu::Remote, Entry::RemoteArchives),
+        Action::Archives => (Menu::Remote, Entry::RemoteArchives),
+        Action::Rename => (Menu::Repository, Entry::Github(github::Act::Rename)),
+        Action::Archive => (Menu::Repository, Entry::Github(github::Act::Archive(true))),
+        Action::Visibility => (Menu::Repository, Entry::Open(Menu::Visibility)),
+        Action::DeleteRemote => (Menu::Repository, Entry::Github(github::Act::Delete)),
+        _ => (Menu::Root, Entry::Github(github::Act::Create)),
+    };
+    // Archive and visibility entries name the state they lead to.
+    let kind = |entry: Entry| match entry {
+        Entry::Github(github::Act::Archive(_)) => Entry::Github(github::Act::Archive(true)),
+        Entry::Github(github::Act::Visibility(_)) => Entry::Open(Menu::Visibility),
+        entry => entry,
     };
     selection.open_menu(menu, visible_rows);
     let row = selection.menu_target_row(&report.rows);
@@ -4298,7 +4424,22 @@ fn run_direct(
         .into_iter()
         .filter(|line| line.entry.is_some())
         .collect::<Vec<_>>();
-    let index = lines.iter().position(|line| line.entry == Some(entry))?;
+    let Some(index) = lines
+        .iter()
+        .position(|line| line.entry.map(kind) == Some(entry))
+    else {
+        selection.menu.clear();
+        session.message = Some(format!(
+            "{} unavailable: {}",
+            direct_label(action),
+            if action == Action::CreateRemote {
+                "no GitHub provider has create in remote_actions"
+            } else {
+                "no GitHub provider for this row"
+            }
+        ));
+        return None;
+    };
     let line = &lines[index];
     if !line.enabled {
         selection.menu.clear();
@@ -4309,7 +4450,7 @@ fn run_direct(
         ));
         return None;
     }
-    if let Entry::Open(submenu) = entry {
+    if let Some(Entry::Open(submenu)) = line.entry {
         selection.menu = vec![(submenu, 0)];
         return None;
     }
@@ -4402,8 +4543,8 @@ fn confirm_removal(
     row: Option<&model::InventoryRow>,
     action: BatchAction,
 ) {
-    if session.running() {
-        session.message = Some("A batch is already running".to_owned());
+    if let Some(reason) = session.batch_blocked() {
+        session.message = Some(reason.to_owned());
         return;
     }
     // Unregistering changes every checkout of an identity; all of them must be known.
@@ -4661,12 +4802,8 @@ fn choose_add(session: &mut InventorySession, selection: &mut Selection) {
     let label = choice.label();
     session.message = Some(match preview.eligibility(choice) {
         Eligibility::Unavailable(reason) => format!("{label} unavailable: {reason}"),
-        _ if session
-            .batch
-            .as_ref()
-            .is_some_and(|batch| !batch.finished()) =>
-        {
-            "A batch is already running".to_owned()
+        _ if session.batch_blocked().is_some() => {
+            session.batch_blocked().unwrap_or_default().to_owned()
         }
         _ => {
             let name = escape(&preview.identity);
@@ -5317,6 +5454,8 @@ struct Selection {
     add: Option<AddForm>,
     /// The open Worktrees popup; it keeps the repository it was opened on.
     worktrees: Option<worktrees::Popup>,
+    /// The open GitHub dialog.
+    github: Option<github::Dialog>,
     help: bool,
     help_mode: Mode,
     help_scroll: u16,
@@ -5412,6 +5551,8 @@ impl Selection {
             View::QuitBatch
         } else if let Some(popup) = &self.worktrees {
             popup.view()
+        } else if let Some(dialog) = &self.github {
+            dialog.view()
         } else if !self.menu.is_empty() {
             View::Menu
         } else if let Some(add) = &self.add {
@@ -5897,6 +6038,7 @@ mod tests {
             ),
             remote_rows: Vec::new(),
             remote_cached: 0,
+            github: super::github::Remote::default(),
         };
 
         session.receive_events();

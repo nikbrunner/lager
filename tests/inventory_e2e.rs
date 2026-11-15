@@ -3181,7 +3181,7 @@ fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
         |action, writer, frame| match action {
             4 => {
                 frames.push(frame.to_owned());
-                resize_pty(writer, 32, 100);
+                resize_pty(writer, 40, 100);
             }
             5 => frames.push(frame.to_owned()),
             _ => {}
@@ -3198,7 +3198,7 @@ fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
         "custom page-down did not scroll help: {scrolled}"
     );
 
-    let resized = screen_text(resized_frame, 32, 100);
+    let resized = screen_text(resized_frame, 40, 100);
     assert!(
         resized.contains("Keyboard / effective bindings"),
         "{resized}"
@@ -12859,5 +12859,524 @@ fn inventory_refresh_drops_a_provider_answer_fetched_with_the_previous_wildcards
     assert!(
         !screen.contains("github.com: ready"),
         "an answer for the previous wildcards was accepted:\n{screen}"
+    );
+}
+
+/// A home with a fake `gh` on PATH that logs its calls and keeps the repository's state.
+#[cfg(unix)]
+struct GhFixture {
+    temp: tempfile::TempDir,
+    home: std::path::PathBuf,
+    config: std::path::PathBuf,
+    bin: std::path::PathBuf,
+    state: std::path::PathBuf,
+    log: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl GhFixture {
+    fn new(config: &str) -> Self {
+        let temp = temp_dir();
+        let home = temp.path().join("home");
+        fs::create_dir_all(home.join("repos")).unwrap();
+        let (bin, state) = support::install_fake_gh(temp.path());
+        let path = temp.path().join("config.toml");
+        fs::write(&path, format!("root = \"repos\"\n\n{config}")).unwrap();
+        Self {
+            log: temp.path().join("gh-args"),
+            temp,
+            home,
+            config: path,
+            bin,
+            state,
+        }
+    }
+
+    fn command(&self) -> Command {
+        let mut command = support::lager_with_path(&self.home, &self.config, Some(&self.bin));
+        command
+            .env("GH_ARGS_LOG", &self.log)
+            .env("GH_STATE", &self.state)
+            .arg("tui");
+        command
+    }
+
+    fn calls(&self) -> Vec<String> {
+        fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn config_text(&self) -> String {
+        fs::read_to_string(&self.config).unwrap()
+    }
+
+    /// A clean checkout of `org/<name>` whose branch is level with its remote-tracking ref.
+    fn checkout(&self, name: &str) -> std::path::PathBuf {
+        let path = self.home.join("repos/org").join(name);
+        init_repo(&path, &format!("git@github.com:org/{name}.git"), true);
+        run_git(&path, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        run_git(&path, &["branch", "--set-upstream-to=origin/main"]);
+        path
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_github_rows_show_the_remote_group_and_bitbucket_rows_do_not() {
+    let fixture = GhFixture::new(
+        "[providers.\"github.com\"]\npreset = \"github\"\nremote_actions = [\"archive\"]\n\n\
+         [providers.\"bitbucket.org\"]\npreset = \"bitbucket-cloud\"\n\n\
+         [[repositories]]\nurl = \"github.com/org/demo\"\n\n\
+         [[repositories]]\nurl = \"bitbucket.org/team/tool\"\n",
+    );
+    run_inventory_pty_actions(
+        &mut fixture.command(),
+        &[
+            (
+                vec!["NORMAL · 2 rows", "absent: Scanning"],
+                b"/demo\r".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "/ demo"], b"m".to_vec()),
+            (vec!["All actions"], b"\r".to_vec()),
+            (
+                vec![
+                    "Repository actions / demo",
+                    "On github.com",
+                    "pair: Rename… not",
+                    "pair: Delete everywhere…",
+                    "Change visibility…",
+                    "not in remote_actions",
+                    "Archive",
+                    "absent: Unarchive",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["All actions", "absent: Repository actions /"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: All actions"], b"\x7f".to_vec()),
+            (vec!["NORMAL · 2 rows"], b"/tool\r".to_vec()),
+            (vec!["NORMAL · 1 row", "/ tool"], b"m".to_vec()),
+            (vec!["All actions"], b"\r".to_vec()),
+            (
+                vec![
+                    "Repository actions / tool",
+                    "Register",
+                    "absent: On bitbucket.org",
+                    "absent: Delete everywhere",
+                ],
+                vec![17],
+            ),
+        ],
+        32,
+        132,
+    );
+    assert!(fixture.calls().is_empty(), "{:?}", fixture.calls());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_creates_a_github_repository_and_clones_it_into_a_new_row() {
+    let fixture = GhFixture::new(
+        "[providers.\"github.com\"]\npreset = \"github\"\nremote_actions = [\"create\"]\n\n\
+         [inventory.keys.normal]\ncreate_remote = [\"N\"]\n",
+    );
+    fs::write(fixture.state.join("missing"), "").unwrap();
+    let remotes = fixture.temp.path().join("remotes");
+    let remote = remotes.join("org/demo.git");
+    fs::create_dir_all(&remote).unwrap();
+    run_git(&remote, &["init", "--bare", "-q"]);
+    let gitconfig = fixture.temp.path().join("gitconfig");
+    fs::write(
+        &gitconfig,
+        format!(
+            "[url \"file://{}/\"]\n    insteadOf = git@github.com:\n",
+            remotes.display()
+        ),
+    )
+    .unwrap();
+    let mut command = fixture.command();
+    command.env("GIT_CONFIG_GLOBAL", &gitconfig);
+    run_inventory_pty_actions(
+        &mut command,
+        &[
+            (vec!["NORMAL", "absent: Scanning"], b"m".to_vec()),
+            (
+                vec!["All actions", "New repository on GitHub…"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: All actions"], b"N".to_vec()),
+            (
+                vec![
+                    "New repository on GitHub",
+                    "github.com/",
+                    "[x] Private",
+                    "[x] Register after cloning",
+                ],
+                b"org/demo\tA demo".to_vec(),
+            ),
+            (vec!["github.com/org/demo", "A demo█"], b"\r".to_vec()),
+            (
+                vec![
+                    "Batch / Clone + register",
+                    "pair: SUCCEEDED github.com/org/demo",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Batch /", "explicit"], b"q".to_vec()),
+        ],
+        32,
+        132,
+    );
+    assert_eq!(
+        fixture.calls(),
+        [
+            "github.com auth status --hostname github.com",
+            "github.com repo view org/demo --json nameWithOwner,isArchived,visibility",
+            "github.com repo create org/demo --private --description=A demo",
+        ]
+    );
+    assert!(fixture.home.join("repos/org/demo/.git").is_dir());
+    assert!(fixture.config_text().contains("org/demo"));
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_renames_a_github_repository_and_moves_its_row() {
+    let fixture = GhFixture::new(
+        "[providers.\"github.com\"]\npreset = \"github\"\nremote_actions = [\"rename\"]\n\n\
+         [[repositories]]\nurl = \"github.com/org/demo\"\n",
+    );
+    fs::write(fixture.state.join("free"), "org/demo-cli").unwrap();
+    let checkout = fixture.checkout("demo");
+    run_inventory_pty_actions(
+        &mut fixture.command(),
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "selected: demo"],
+                b"m\rjjjjjj\r".to_vec(),
+            ),
+            (
+                vec!["Rename on github.com", "same owner: org"],
+                b"-cli".to_vec(),
+            ),
+            (
+                vec![
+                    "org/demo → org/demo-cli",
+                    "~/repos/org/demo → ~/repos/org/demo-cli",
+                    "repointed to github.com/org/demo-cli",
+                    "declaration rewritten",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                vec![
+                    "renamed to org/demo-cli, moved, redeclared",
+                    "absent: Rename on",
+                ],
+                Vec::new(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "selected: demo-cli"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    assert!(
+        fixture
+            .calls()
+            .contains(&"github.com repo rename demo-cli --repo org/demo --yes".to_owned())
+    );
+    assert!(!checkout.exists());
+    assert!(fixture.home.join("repos/org/demo-cli/.git").is_dir());
+    assert!(
+        fixture
+            .config_text()
+            .contains("\"github.com/org/demo-cli\"")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_delete_stays_disabled_until_the_typed_name_matches() {
+    let fixture = GhFixture::new(
+        "[providers.\"github.com\"]\npreset = \"github\"\nremote_actions = [\"delete\"]\n\n\
+         [[repositories]]\nurl = \"github.com/org/jqk\"\n",
+    );
+    fs::write(fixture.state.join("scopes"), "repo, delete_repo").unwrap();
+    let checkout = fixture.checkout("jqk");
+    let mut before_final = Vec::new();
+    run_inventory_pty_actions_with_hook(
+        &mut fixture.command(),
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "selected: jqk"],
+                b"m\rjjjjjjjjj\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Delete everywhere / org/jqk",
+                    "deleted permanently, with issues, PRs and releases",
+                    "nothing local would be lost",
+                    "declaration removed",
+                    "Type org/jqk to confirm",
+                    "type org/jqk first",
+                ],
+                b"org/jq".to_vec(),
+            ),
+            (
+                vec![
+                    "Delete everywhere / org/jqk",
+                    "org/jq█",
+                    "type org/jqk first",
+                ],
+                b"k\r".to_vec(),
+            ),
+            (vec!["org/jqk█", "cannot be undone"], b"\r".to_vec()),
+            (
+                vec![
+                    "org/jqk: deleted remote, removed, unregistered",
+                    "absent: Delete everywhere /",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        |action| {
+            if action == 3 {
+                before_final = fixture.calls();
+            }
+        },
+    );
+    assert!(before_final.is_empty(), "{before_final:?}");
+    assert!(
+        fixture
+            .calls()
+            .contains(&"github.com repo delete org/jqk --yes".to_owned())
+    );
+    assert!(!checkout.exists());
+    assert!(!fixture.config_text().contains("org/jqk"));
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_bound_archive_key_archives_the_current_row() {
+    let fixture = GhFixture::new(
+        "[providers.\"github.com\"]\npreset = \"github\"\nremote_actions = [\"archive\"]\n\n\
+         [inventory.keys.normal]\narchive = [\"A\"]\n\n\
+         [[repositories]]\nurl = \"github.com/org/demo\"\n",
+    );
+    run_inventory_pty_actions(
+        &mut fixture.command(),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"A".to_vec()),
+            (vec!["org/demo: archived"], b"m\r".to_vec()),
+            (vec!["Repository actions / demo", "Unarchive"], vec![17]),
+        ],
+        32,
+        132,
+    );
+    assert_eq!(
+        fixture.calls(),
+        [
+            "github.com auth status --hostname github.com",
+            "github.com repo view org/demo --json nameWithOwner,isArchived,visibility",
+            "github.com repo archive org/demo --yes",
+        ]
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.state.join("archived")).unwrap(),
+        "true"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_github_failure_names_the_fix_in_session_problems_and_exits_one() {
+    let fixture = GhFixture::new(
+        "[providers.\"github.com\"]\npreset = \"github\"\nremote_actions = [\"archive\"]\n\n\
+         [inventory.keys.normal]\narchive = [\"A\"]\n\n\
+         [[repositories]]\nurl = \"github.com/org/demo\"\n",
+    );
+    fs::write(fixture.state.join("logged-out"), "").unwrap();
+    run_inventory_pty_with_exit(
+        &mut fixture.command(),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"A".to_vec()),
+            (
+                vec!["org/demo: failed, see Session problems"],
+                b"m".to_vec(),
+            ),
+            (vec!["All actions", "1 problem"], b"jjjjjjjjj\r".to_vec()),
+            (
+                vec![
+                    "Session problems / 1",
+                    "gh auth login --hostname github.com",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Session problems /"], b"q".to_vec()),
+        ],
+        24,
+        80,
+        1,
+        |_| {},
+    );
+    assert_eq!(
+        fixture.calls(),
+        ["github.com auth status --hostname github.com"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_batches_wait_while_a_github_action_runs() {
+    let fixture = GhFixture::new(
+        "[providers.\"github.com\"]\npreset = \"github\"\nremote_actions = [\"archive\"]\n\n\
+         [inventory.keys.normal]\narchive = [\"A\"]\nunregister = [\"u\"]\n\n\
+         [[repositories]]\nurl = \"github.com/org/demo\"\n",
+    );
+    let hold = fixture.state.join("hold");
+    fs::write(&hold, "").unwrap();
+    run_inventory_pty_actions_with_hook(
+        &mut fixture.command(),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"A".to_vec()),
+            (vec!["Archiving org/demo on github.com…"], b"u".to_vec()),
+            (
+                vec!["A GitHub action is running", "absent: Batch /"],
+                Vec::new(),
+            ),
+            (vec!["org/demo: archived"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        |action| {
+            if action == 2 {
+                fs::remove_file(&hold).unwrap();
+            }
+        },
+    );
+    assert!(fixture.config_text().contains("org/demo"));
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_quit_waits_for_a_running_github_action() {
+    let fixture = GhFixture::new(
+        "[providers.\"github.com\"]\npreset = \"github\"\nremote_actions = [\"archive\"]\n\n\
+         [inventory.keys.normal]\narchive = [\"A\"]\n\n\
+         [[repositories]]\nurl = \"github.com/org/demo\"\n",
+    );
+    let hold = fixture.state.join("hold");
+    fs::write(&hold, "").unwrap();
+    let release = hold.clone();
+    let transcript = run_inventory_pty_actions_with_hook(
+        &mut fixture.command(),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"A".to_vec()),
+            (vec!["Archiving org/demo on github.com…"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        move |action| {
+            if action == 1 {
+                let release = release.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(500));
+                    fs::remove_file(release).unwrap();
+                });
+            }
+        },
+    );
+    assert!(
+        transcript.contains("waiting for the GitHub action on github.com/org/demo to finish"),
+        "{transcript}"
+    );
+    assert!(transcript.contains("lager: github.com/org/demo: archived"));
+    assert_eq!(
+        fs::read_to_string(fixture.state.join("archived")).unwrap(),
+        "true"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_make_private_asks_first_with_its_consequences() {
+    let fixture = GhFixture::new(
+        "[providers.\"github.com\"]\npreset = \"github\"\nremote_actions = [\"visibility\"]\n\n\
+         [inventory.keys.normal]\nvisibility = [\"V\"]\n\n\
+         [[repositories]]\nurl = \"github.com/org/demo\"\n",
+    );
+    fs::write(fixture.state.join("visibility"), "PUBLIC").unwrap();
+    run_inventory_pty_actions(
+        &mut fixture.command(),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"V".to_vec()),
+            (
+                vec!["Change visibility / demo", "pair: private… asks"],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Make private / org/demo",
+                    "its stars and watchers",
+                    "pair: Cancel default",
+                ],
+                b"j".to_vec(),
+            ),
+            (vec!["Make private / org/demo"], b"\r".to_vec()),
+            (vec!["org/demo: made private"], b"q".to_vec()),
+        ],
+        32,
+        132,
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.state.join("visibility")).unwrap(),
+        "PRIVATE"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_a_refused_rename_reopens_its_form_with_the_reason() {
+    let fixture = GhFixture::new(
+        "[providers.\"github.com\"]\npreset = \"github\"\nremote_actions = [\"rename\"]\n\n\
+         [inventory.keys.normal]\nrename = [\"N\"]\n\n\
+         [[repositories]]\nurl = \"github.com/org/demo\"\n",
+    );
+    run_inventory_pty_with_exit(
+        &mut fixture.command(),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"N".to_vec()),
+            (vec!["Rename on github.com", "demo█"], b"-cli\r".to_vec()),
+            (
+                vec![
+                    "Rename on github.com",
+                    "demo-cli█",
+                    "already exists on github.com",
+                    "org/demo: failed, the form shows why",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Rename on"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        1,
+        |_| {},
+    );
+    assert!(
+        !fixture
+            .calls()
+            .iter()
+            .any(|call| call.contains("repo rename"))
     );
 }

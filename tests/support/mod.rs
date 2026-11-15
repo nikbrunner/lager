@@ -6,6 +6,104 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
+/// Logs `$GH_HOST $*` per call and keeps the repository's state in `$GH_STATE`.
+#[allow(dead_code)]
+pub const FAKE_GH: &str = r##"#!/bin/sh
+printf '%s %s\n' "$GH_HOST" "$*" >> "$GH_ARGS_LOG"
+case "$1 $2" in
+  "auth status")
+    if [ -e "$GH_STATE/offline" ]; then
+      printf '%s\n' "error connecting to api.github.com" >&2
+      exit 1
+    fi
+    if [ -e "$GH_STATE/logged-out" ]; then
+      printf '%s\n' "You are not logged into any GitHub hosts. To log in, run: gh auth login" >&2
+      exit 1
+    fi
+    ;;
+  "repo view")
+    if [ -e "$GH_STATE/free" ] && [ "$3" = "$(cat "$GH_STATE/free")" ]; then
+      printf '%s\n' "GraphQL: Could not resolve to a Repository with the name '$3'. (repository)" >&2
+      exit 1
+    fi
+    if [ -e "$GH_STATE/missing" ] && [ ! -e "$GH_STATE/created" ]; then
+      printf '%s\n' "GraphQL: Could not resolve to a Repository with the name '$3'. (repository)" >&2
+      exit 1
+    fi
+    # A `from to` line in redirects stands in for GitHub redirecting a former name.
+    name=""
+    if [ -e "$GH_STATE/redirects" ]; then
+      while read -r from to; do [ "$from" = "$3" ] && name="$to"; done < "$GH_STATE/redirects"
+    fi
+    printf '{"nameWithOwner":"%s","isArchived":%s,"visibility":"%s"}\n' "${name:-$3}" "$(cat "$GH_STATE/archived")" "$(cat "$GH_STATE/visibility")"
+    ;;
+  "repo archive")
+    if [ -e "$GH_STATE/archive-fails" ]; then
+      printf '%s\n' "HTTP 403: Must have admin rights to Repository." >&2
+      exit 1
+    fi
+    # Stands in for a slow GitHub until the test removes the hold file.
+    while [ -e "$GH_STATE/hold" ]; do sleep 0.05; done
+    printf 'true' > "$GH_STATE/archived"
+    ;;
+  "repo unarchive") printf 'false' > "$GH_STATE/archived" ;;
+  "repo edit") printf '%s' "$5" | tr 'a-z' 'A-Z' > "$GH_STATE/visibility" ;;
+  "repo create")
+    # Stands in for --source DIR --remote origin --push.
+    source=""; previous=""
+    for arg in "$@"; do
+      [ "$previous" = "--source" ] && source="$arg"
+      previous="$arg"
+    done
+    if [ -e "$GH_STATE/push-fails" ]; then
+      : > "$GH_STATE/created"
+      printf '%s\n' "failed to run git: rejected push" >&2
+      exit 1
+    fi
+    if [ -n "$source" ]; then
+      git -C "$source" remote add origin "git@github.com:$3.git" || exit 1
+      git -C "$source" push --quiet origin HEAD || exit 1
+    fi
+    ;;
+  "api --hostname")
+    printf 'HTTP/2.0 200 OK\r\n'
+    [ -e "$GH_STATE/scopes" ] && printf 'X-Oauth-Scopes: %s\r\n' "$(cat "$GH_STATE/scopes")"
+    printf '\r\n{"login":"org"}\n'
+    ;;
+  "repo delete")
+    : > "$GH_STATE/deleted"
+    # Stands in for work arriving in the checkout while GitHub deletes.
+    if [ -e "$GH_STATE/dirty-on-delete" ]; then : > "$(cat "$GH_STATE/dirty-on-delete")"; fi
+    ;;
+  "repo rename")
+    : > "$GH_STATE/renamed"
+    # Stands in for something changing locally while GitHub renames.
+    if [ -e "$GH_STATE/on-rename" ]; then eval "$(cat "$GH_STATE/on-rename")"; fi
+    ;;
+  *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 1 ;;
+esac
+"##;
+
+/// Puts the fake `gh` into `<dir>/bin` and its repository state into `<dir>/state`: not
+/// archived, private. Returns both directories.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub fn install_fake_gh(dir: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("bin");
+    let state = dir.join("state");
+    for directory in [&bin, &state] {
+        std::fs::create_dir_all(directory).expect("create fake gh directory");
+    }
+    let gh = bin.join("gh");
+    std::fs::write(&gh, FAKE_GH).expect("write fake gh");
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))
+        .expect("make gh executable");
+    std::fs::write(state.join("archived"), "false").expect("write fake gh state");
+    std::fs::write(state.join("visibility"), "PRIVATE").expect("write fake gh state");
+    (bin, state)
+}
+
 static TOOLS: OnceLock<tempfile::TempDir> = OnceLock::new();
 static OUTBOUND_TRIPWIRE: OnceLock<OutboundTripwire> = OnceLock::new();
 

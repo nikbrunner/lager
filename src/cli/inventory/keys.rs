@@ -46,6 +46,11 @@ pub(super) enum Action {
     Archives,
     Acknowledge,
     Worktrees,
+    Rename,
+    Archive,
+    Visibility,
+    DeleteRemote,
+    CreateRemote,
 }
 
 impl Action {
@@ -79,6 +84,11 @@ impl Action {
             Self::Archives => "archives",
             Self::Acknowledge => "acknowledge",
             Self::Worktrees => "worktrees",
+            Self::Rename => "rename",
+            Self::Archive => "archive",
+            Self::Visibility => "visibility",
+            Self::DeleteRemote => "delete_remote",
+            Self::CreateRemote => "create_remote",
         }
     }
 
@@ -109,6 +119,11 @@ impl Action {
                     | Self::Retry
                     | Self::Archives
                     | Self::Worktrees
+                    | Self::Rename
+                    | Self::Archive
+                    | Self::Visibility
+                    | Self::DeleteRemote
+                    | Self::CreateRemote
             ),
             Mode::Menu => matches!(
                 self,
@@ -241,6 +256,11 @@ impl Bindings {
                     (Retry, vec![]),
                     (Archives, vec![]),
                     (Worktrees, vec!["w"]),
+                    (Rename, vec![]),
+                    (Archive, vec![]),
+                    (Visibility, vec![]),
+                    (DeleteRemote, vec![]),
+                    (CreateRemote, vec![]),
                 ]);
             } else {
                 defaults.extend([

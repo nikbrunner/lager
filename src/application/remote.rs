@@ -673,7 +673,21 @@ pub fn archive(
     Ok(Mutation::Changed)
 }
 
-/// Making a repository public exposes its code and history, so it asks first unless `yes`.
+/// What changing `reference` to `visibility` costs, asked as a yes/no question.
+pub fn visibility_question(reference: &RepositoryRef, visibility: Visibility) -> String {
+    let identity = reference.identity();
+    match visibility {
+        Visibility::Public => {
+            format!("Make {identity} public? Its code and history become visible to everyone.")
+        }
+        _ => format!(
+            "{identity} becomes private; its stars and watchers are erased permanently and forks are detached. Make private?"
+        ),
+    }
+}
+
+/// Either change cannot be undone in full: public exposes the code and history, private erases
+/// stars and watchers and detaches forks. So a change asks first unless `yes`.
 pub fn visibility(
     config: &Config,
     remote: &dyn RemoteRepositories,
@@ -686,11 +700,8 @@ pub fn visibility(
     if state.visibility == visibility {
         return Ok(Mutation::Noop);
     }
-    if visibility == Visibility::Public && !yes {
-        let question = format!(
-            "Make {} public? Its code and history become visible to everyone.",
-            reference.identity()
-        );
+    if !yes {
+        let question = visibility_question(reference, visibility);
         match interaction.confirm(&question, false) {
             Ok(true) => {}
             Ok(false) => return Err(ActionError::Declined),
@@ -1617,6 +1628,20 @@ mod tests {
             *remote.changed.lock().unwrap(),
             [Visibility::Public, Visibility::Public]
         );
+        // Already private: nothing changes, so nothing is asked.
+        let mut interaction = Answer(Ok(false), 0);
+        assert_eq!(
+            visibility(
+                &config,
+                &remote,
+                &mut interaction,
+                &reference,
+                Visibility::Private,
+                false
+            ),
+            Ok(Mutation::Noop)
+        );
+        assert_eq!(interaction.1, 0);
     }
 
     /// A provider that holds every repository and counts deletions.

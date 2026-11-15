@@ -6,81 +6,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-/// Logs `$GH_HOST $*` per call and keeps the repository's state in `$GH_STATE`.
-const FAKE_GH: &str = r##"#!/bin/sh
-printf '%s %s\n' "$GH_HOST" "$*" >> "$GH_ARGS_LOG"
-case "$1 $2" in
-  "auth status")
-    if [ -e "$GH_STATE/offline" ]; then
-      printf '%s\n' "error connecting to api.github.com" >&2
-      exit 1
-    fi
-    if [ -e "$GH_STATE/logged-out" ]; then
-      printf '%s\n' "You are not logged into any GitHub hosts. To log in, run: gh auth login" >&2
-      exit 1
-    fi
-    ;;
-  "repo view")
-    if [ -e "$GH_STATE/free" ] && [ "$3" = "$(cat "$GH_STATE/free")" ]; then
-      printf '%s\n' "GraphQL: Could not resolve to a Repository with the name '$3'. (repository)" >&2
-      exit 1
-    fi
-    if [ -e "$GH_STATE/missing" ] && [ ! -e "$GH_STATE/created" ]; then
-      printf '%s\n' "GraphQL: Could not resolve to a Repository with the name '$3'. (repository)" >&2
-      exit 1
-    fi
-    # A `from to` line in redirects stands in for GitHub redirecting a former name.
-    name=""
-    if [ -e "$GH_STATE/redirects" ]; then
-      while read -r from to; do [ "$from" = "$3" ] && name="$to"; done < "$GH_STATE/redirects"
-    fi
-    printf '{"nameWithOwner":"%s","isArchived":%s,"visibility":"%s"}\n' "${name:-$3}" "$(cat "$GH_STATE/archived")" "$(cat "$GH_STATE/visibility")"
-    ;;
-  "repo archive")
-    if [ -e "$GH_STATE/archive-fails" ]; then
-      printf '%s\n' "HTTP 403: Must have admin rights to Repository." >&2
-      exit 1
-    fi
-    printf 'true' > "$GH_STATE/archived"
-    ;;
-  "repo unarchive") printf 'false' > "$GH_STATE/archived" ;;
-  "repo edit") printf '%s' "$5" | tr 'a-z' 'A-Z' > "$GH_STATE/visibility" ;;
-  "repo create")
-    # Stands in for --source DIR --remote origin --push.
-    source=""; previous=""
-    for arg in "$@"; do
-      [ "$previous" = "--source" ] && source="$arg"
-      previous="$arg"
-    done
-    if [ -e "$GH_STATE/push-fails" ]; then
-      : > "$GH_STATE/created"
-      printf '%s\n' "failed to run git: rejected push" >&2
-      exit 1
-    fi
-    if [ -n "$source" ]; then
-      git -C "$source" remote add origin "git@github.com:$3.git" || exit 1
-      git -C "$source" push --quiet origin HEAD || exit 1
-    fi
-    ;;
-  "api --hostname")
-    printf 'HTTP/2.0 200 OK\r\n'
-    [ -e "$GH_STATE/scopes" ] && printf 'X-Oauth-Scopes: %s\r\n' "$(cat "$GH_STATE/scopes")"
-    printf '\r\n{"login":"org"}\n'
-    ;;
-  "repo delete")
-    : > "$GH_STATE/deleted"
-    # Stands in for work arriving in the checkout while GitHub deletes.
-    if [ -e "$GH_STATE/dirty-on-delete" ]; then : > "$(cat "$GH_STATE/dirty-on-delete")"; fi
-    ;;
-  "repo rename")
-    : > "$GH_STATE/renamed"
-    # Stands in for something changing locally while GitHub renames.
-    if [ -e "$GH_STATE/on-rename" ]; then eval "$(cat "$GH_STATE/on-rename")"; fi
-    ;;
-  *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 1 ;;
-esac
-"##;
-
 struct Fixture {
     _temp: tempfile::TempDir,
     home: PathBuf,
@@ -94,16 +19,8 @@ impl Fixture {
     fn new(providers: &str) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
-        let bin = temp.path().join("bin");
-        let state = temp.path().join("state");
-        for directory in [&home, &bin, &state] {
-            std::fs::create_dir_all(directory).unwrap();
-        }
-        let gh = bin.join("gh");
-        std::fs::write(&gh, FAKE_GH).unwrap();
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::write(state.join("archived"), "false").unwrap();
-        std::fs::write(state.join("visibility"), "PRIVATE").unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let (bin, state) = support::install_fake_gh(temp.path());
         let config = temp.path().join("config.toml");
         std::fs::write(&config, format!("root = \"repos\"\n\n{providers}")).unwrap();
         Self {
@@ -187,7 +104,7 @@ fn an_action_missing_from_remote_actions_never_calls_gh() {
 #[test]
 fn a_provider_without_remote_actions_allows_nothing() {
     let fixture = Fixture::new("[providers.\"github.com\"]\npreset = \"github\"\n");
-    let output = fixture.run(&["visibility", "org/demo", "private"]);
+    let output = fixture.run(&["visibility", "org/demo", "private", "--yes"]);
     assert_outcome(&output, 1, "");
     assert!(text(&output.stderr).contains("`visibility` is not enabled for github.com"));
     assert!(fixture.calls().is_empty());
@@ -297,11 +214,20 @@ fn a_repository_missing_on_github_fails_without_a_change() {
 }
 
 #[test]
-fn private_needs_no_prompt_and_public_needs_yes_outside_a_tty() {
+fn private_and_public_need_yes_outside_a_tty() {
     let fixture = Fixture::github("\"visibility\"");
     fixture.set("visibility", "PUBLIC");
 
-    let private = fixture.run(&["visibility", "org/demo", "private"]);
+    let refused = fixture.run(&["visibility", "org/demo", "private"]);
+    assert_outcome(&refused, 2, "");
+    assert!(
+        text(&refused.stderr).contains("visibility private requires --yes"),
+        "{}",
+        text(&refused.stderr)
+    );
+    assert!(fixture.calls().is_empty(), "gh must not run");
+
+    let private = fixture.run(&["visibility", "org/demo", "private", "--yes"]);
     assert_outcome(&private, 0, "org/demo: made private\n");
     assert_eq!(text(&private.stderr), "");
     assert_eq!(state(&fixture.state, "visibility"), "PRIVATE");
@@ -337,7 +263,7 @@ fn private_needs_no_prompt_and_public_needs_yes_outside_a_tty() {
 fn an_internal_repository_can_be_made_private() {
     let fixture = Fixture::github("\"visibility\"");
     fixture.set("visibility", "INTERNAL");
-    let output = fixture.run(&["visibility", "org/demo", "private"]);
+    let output = fixture.run(&["visibility", "org/demo", "private", "--yes"]);
     assert_outcome(&output, 0, "org/demo: made private\n");
 }
 
