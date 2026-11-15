@@ -1058,7 +1058,28 @@ fn remote_status_looks_up_declared_repositories_the_catalog_does_not_list() {
 
     let plain = run(&["status"]);
     assert_eq!(plain.status.code(), Some(0), "{plain:?}");
-    assert!(!log.exists(), "plain status asked gh");
+    let mut asked = fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    asked.sort();
+    assert_eq!(
+        asked,
+        [
+            "github.com repo view org/gone --json nameWithOwner,isArchived,visibility",
+            "github.com repo view org/kept --json nameWithOwner,isArchived,visibility",
+        ],
+        "plain status asks gh only for declared rows without a checkout"
+    );
+    assert_eq!(
+        stdout(&plain),
+        "\
+repository  local    remote                         registration  status
+gone        missing  missing                        explicit      —
+kept        missing  github.com/org/kept · private  explicit      —
+"
+    );
 
     let document = run(&["status", "--remote", "--json"]);
     assert_eq!(document.status.code(), Some(0), "{document:?}");
@@ -1080,8 +1101,90 @@ fn remote_status_looks_up_declared_repositories_the_catalog_does_not_list() {
         stdout(&table),
         "\
 repository  local    remote                         registration  status
-gone        missing  github.com/org/gone · missing  explicit      —
+gone        missing  missing                        explicit      —
 kept        missing  github.com/org/kept · private  explicit      —
 "
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn plain_status_keeps_the_origin_alone_and_exits_zero_when_a_lookup_fails() {
+    let fixture = empty_fixture(
+        "root = \"repos\"\n\n[providers.\"github.com\"]\npreset = \"github\"\n\n\
+         [[repositories]]\nurl = \"github.com/org/kept\"\n\n\
+         [[repositories]]\nurl = \"github.com/org/local\"\n",
+    );
+    init_repo(
+        &fixture.root().join("org/local"),
+        Some("git@github.com:org/local.git"),
+    );
+    let (bin, state) = support::install_fake_gh(fixture._temp.path());
+    let log = fixture._temp.path().join("gh-args");
+    let run = |args: &[&str]| {
+        support::lager_with_path(&fixture.home, &fixture.config, Some(&bin))
+            .env("GH_STATE", &state)
+            .env("GH_ARGS_LOG", &log)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    fs::write(state.join("broken"), "org/kept").unwrap();
+
+    let table = run(&["status"]);
+    assert_eq!(table.status.code(), Some(0), "{table:?}");
+    assert!(table.stderr.is_empty(), "{table:?}");
+    assert_eq!(
+        stdout(&table),
+        "\
+repository  local              remote                registration  status
+kept        missing            github.com/org/kept   explicit      —
+local       ~/repos/org/local  github.com/org/local  explicit      main · clean
+"
+    );
+    let document = run(&["status", "--json"]);
+    assert_eq!(document.status.code(), Some(0), "{document:?}");
+    let document = json(&document);
+    assert_eq!(document["complete"], true);
+    assert_eq!(document["problems"], json!([]));
+    assert!(
+        document["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["remote"].is_null()),
+        "{document}"
+    );
+    let asked = fs::read_to_string(&log).unwrap();
+    assert!(
+        asked
+            .lines()
+            .all(|line| line.contains("repo view org/kept")),
+        "only the row without a checkout is looked up: {asked}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn plain_status_never_asks_gh_when_every_declared_repository_is_checked_out() {
+    let fixture = empty_fixture(
+        "root = \"repos\"\n\n[providers.\"github.com\"]\npreset = \"github\"\n\n\
+         [[repositories]]\nurl = \"github.com/org/local\"\n",
+    );
+    init_repo(
+        &fixture.root().join("org/local"),
+        Some("git@github.com:org/local.git"),
+    );
+    let (bin, state) = support::install_fake_gh(fixture._temp.path());
+    let log = fixture._temp.path().join("gh-args");
+    let output = support::lager_with_path(&fixture.home, &fixture.config, Some(&bin))
+        .env("GH_STATE", &state)
+        .env("GH_ARGS_LOG", &log)
+        .arg("status")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(!log.exists(), "plain status asked gh");
 }

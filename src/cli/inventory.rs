@@ -31,7 +31,7 @@ use crate::application::ports::{
 use crate::application::remote::{
     self, ProviderPhase, ProviderState, RemoteBounds, RemoteDiscovery,
 };
-use crate::domain::repository::validate_reference_safety;
+use crate::domain::repository::{RepositoryRef, validate_reference_safety};
 use crate::infrastructure::config::{CommandConfigStore, load_inventory};
 use crate::infrastructure::desktop::NativeDesktop;
 use crate::infrastructure::filesystem::Filesystem;
@@ -152,10 +152,36 @@ struct InventorySession {
     github: github::Remote,
 }
 
-/// One answered lookup: the identity and the provider's answer.
+/// Looks `reference` up on its own thread; no answer by `deadline` is an error naming `bound`.
+fn bounded_lookup(
+    providers: &std::sync::Arc<ConfiguredProviders>,
+    reference: &RepositoryRef,
+    deadline: Instant,
+    bound: Duration,
+) -> Result<Option<crate::application::ports::RemoteState>, String> {
+    let late = || format!("no response within {} s", bound.as_secs());
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(late());
+    }
+    let (done, answer) = mpsc::channel();
+    let (providers, asked) = (std::sync::Arc::clone(providers), reference.clone());
+    std::thread::spawn(move || {
+        let _ = done.send(providers.lookup(&asked));
+    });
+    // shortcut: a lookup past its bound stays unknown while its gh runs on; make it
+    // cancellable like the catalog request if stalled lookups ever pile up.
+    answer
+        .recv_timeout(remaining)
+        .unwrap_or_else(|_| Err(late()))
+}
+
+/// One answered lookup: the identity, the provider's answer, and whether remote discovery was
+/// on when it started.
 type Lookup = (
     String,
     Result<Option<crate::application::ports::RemoteState>, String>,
+    bool,
 );
 
 /// The providers of a configuration that passed validation.
@@ -230,9 +256,9 @@ impl InventorySession {
             )?;
             if self.remote.enabled() {
                 self.remote_cached = self.remote_rows.len();
-                self.start_lookups(&report);
-                model::apply_lookups(&mut report, &self.lookups);
             }
+            self.start_lookups(&report);
+            model::apply_lookups(&mut report, &self.lookups, self.remote.enabled());
             self.cached_report = Some(report);
         }
         Ok(self
@@ -242,16 +268,17 @@ impl InventorySession {
             .clone())
     }
 
-    /// Looks up, off the UI loop, the declared GitHub rows a ready catalog did not list. Each
+    /// Looks up, off the UI loop, the declared GitHub rows `model::unlisted` names. Each
     /// identity is looked up once until a refresh.
     fn start_lookups(&mut self, report: &InventoryReport) {
+        let discovery = self.remote.enabled();
         let ready = |host: &str| {
             self.remote
                 .providers()
                 .get(host)
                 .is_some_and(|provider| provider.phase == ProviderPhase::Ready)
         };
-        let references = model::unlisted(report, &self.config, ready)
+        let references = model::unlisted(report, &self.config, discovery, ready)
             .into_iter()
             .filter(|reference| !self.lookups.contains_key(&reference.identity()))
             .collect::<Vec<_>>();
@@ -266,23 +293,18 @@ impl InventorySession {
         let sender = self.lookup_results.0.clone();
         let bound = RemoteBounds::default().request;
         std::thread::spawn(move || {
-            let providers = std::sync::Arc::new(ConfiguredProviders::from_config(&config));
+            let providers = ConfiguredProviders::from_config(&config).map(std::sync::Arc::new);
             for reference in references {
-                let (done, answer) = mpsc::channel();
-                let (providers, asked) = (std::sync::Arc::clone(&providers), reference.clone());
-                std::thread::spawn(move || {
-                    let state = match &*providers {
-                        Ok(providers) => providers.lookup(&asked),
-                        Err(error) => Err(error.clone()),
-                    };
-                    let _ = done.send(state);
-                });
-                // shortcut: a lookup past its bound stays unknown while its gh runs on; make
-                // it cancellable like the catalog request if stalled lookups ever pile up.
-                let state = answer
-                    .recv_timeout(bound)
-                    .unwrap_or_else(|_| Err(format!("no response within {} s", bound.as_secs())));
-                if sender.send((reference.identity(), state)).is_err() {
+                let state = match &providers {
+                    Ok(providers) => {
+                        bounded_lookup(providers, &reference, Instant::now() + bound, bound)
+                    }
+                    Err(error) => Err(error.clone()),
+                };
+                if sender
+                    .send((reference.identity(), state, discovery))
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -298,8 +320,11 @@ impl InventorySession {
 
     fn receive_events(&mut self) {
         let (mut received, failures) = self.remote.poll();
-        while let Ok((identity, state)) = self.lookup_results.1.try_recv() {
-            if let Err(error) = &state {
+        while let Ok((identity, state, discovery)) = self.lookup_results.1.try_recv() {
+            // A lookup started with remote discovery off fails quietly: the origin stays alone.
+            if let Err(error) = &state
+                && discovery
+            {
                 self.problems.record(
                     format!("lookup · {}", escape(&identity)),
                     escape(model::problem_reason(error)),
@@ -4568,6 +4593,7 @@ fn open_add(session: &mut InventorySession, selection: &mut Selection) {
 
 fn enable_remote(session: &mut InventorySession) {
     session.remote.enable();
+    session.lookups.retain(|_, status| status.is_some());
     session.cached_report = None;
 }
 
@@ -5848,15 +5874,20 @@ fn local_cell(row: &model::InventoryRow, home: &Path) -> (String, Style) {
     }
 }
 
-/// The origin, plus the provider's state while remote discovery is on and the state is known.
+/// The origin, plus the provider's known state while remote discovery is on. A row without a
+/// checkout shows its looked-up state with discovery off too, once answered. `missing` stands
+/// alone, since the origin points nowhere.
 fn remote_cell(row: &model::InventoryRow, compact: bool, remote: bool) -> (String, Style) {
     if matches!(row.origin_fact, Some(model::OriginFact::Absent)) {
         return ("no origin".to_owned(), dim());
     }
     let origin = origin_text(row);
-    let status = row
-        .remote_status
-        .filter(|_| remote && !matches!(row.key, model::RowKey::Pattern(_)));
+    let status = row.remote_status.filter(|status| {
+        !matches!(row.key, model::RowKey::Pattern(_))
+            && (remote
+                || row.checkout == model::CheckoutState::Missing
+                    && *status != model::RemoteStatus::Pending)
+    });
     let Some(status) = status else {
         let text = if compact { "—".to_owned() } else { origin };
         return (text, Style::default());
@@ -5866,7 +5897,7 @@ fn remote_cell(row: &model::InventoryRow, compact: bool, remote: bool) -> (Strin
         model::RemoteStatus::Pending => dim(),
         model::RemoteStatus::Public | model::RemoteStatus::Private => Style::default(),
     };
-    if compact {
+    if compact || status == model::RemoteStatus::Missing {
         (status.label().to_owned(), style)
     } else {
         (format!("{origin} · {}", status.label()), style)

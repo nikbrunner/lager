@@ -740,12 +740,14 @@ fn merge_members(
     added
 }
 
-/// The repositories of declared rows on a github provider whose catalog is ready but did not
-/// list them. Only a per-repository lookup tells whether they exist: a catalog lists what the
-/// account sees, so a repository of another owner is absent from it.
+/// The repositories of declared rows on a github provider that need a per-repository lookup.
+/// With remote discovery on, those whose catalog is ready but did not list them: a catalog
+/// lists what the account sees, so a repository of another owner is absent from it. With
+/// discovery off, those without a checkout.
 pub fn unlisted(
     report: &InventoryReport,
     config: &Config,
+    discovery: bool,
     ready: impl Fn(&str) -> bool,
 ) -> Vec<RepositoryRef> {
     let mut seen = HashSet::new();
@@ -759,27 +761,36 @@ pub fn unlisted(
                     RegistrationState::Explicit | RegistrationState::Wildcard { .. }
                 )
         })
-        .filter_map(|row| RepositoryRef::parse(row_identity(row)?).ok())
-        .filter(|reference| {
+        .filter_map(|row| Some((row, RepositoryRef::parse(row_identity(row)?).ok()?)))
+        .filter(|(row, reference)| {
             let host = reference.host.to_ascii_lowercase();
             !reference.is_wildcard()
                 && config
                     .providers
                     .get(&host)
                     .is_some_and(|provider| provider.preset == "github")
-                && ready(&host)
+                && if discovery {
+                    ready(&host)
+                } else {
+                    row.checkout == CheckoutState::Missing
+                }
         })
+        .map(|(_, reference)| reference)
         .filter(|reference| seen.insert(reference.identity()))
         .collect()
 }
 
 /// Applies per-repository lookups, by identity, to the rows no catalog listed: a catalog's
-/// answer always wins. A lookup that answered `None` left the state unknown.
+/// answer always wins. A lookup that answered `None` left the state unknown. With remote
+/// discovery off, only rows without a checkout take a lookup's answer.
 pub fn apply_lookups(
     report: &mut InventoryReport,
     lookups: &HashMap<String, Option<RemoteStatus>>,
+    discovery: bool,
 ) {
-    for row in report.rows.iter_mut().filter(|row| row.archived.is_none()) {
+    for row in report.rows.iter_mut().filter(|row| {
+        row.archived.is_none() && (discovery || row.checkout == CheckoutState::Missing)
+    }) {
         if let Some(status) = row_identity(row).and_then(|identity| *lookups.get(identity)?) {
             row.remote_status = Some(status);
         }

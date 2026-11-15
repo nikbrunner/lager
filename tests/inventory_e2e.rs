@@ -12829,6 +12829,14 @@ impl GhFixture {
             .collect()
     }
 
+    /// The calls apart from `repo view`, which also looks up declared rows without a checkout.
+    fn actions(&self) -> Vec<String> {
+        self.calls()
+            .into_iter()
+            .filter(|call| !call.contains(" repo view "))
+            .collect()
+    }
+
     fn config_text(&self) -> String {
         fs::read_to_string(&self.config).unwrap()
     }
@@ -12895,7 +12903,7 @@ fn inventory_github_rows_show_the_remote_group_and_bitbucket_rows_do_not() {
         32,
         132,
     );
-    assert!(fixture.calls().is_empty(), "{:?}", fixture.calls());
+    assert!(fixture.actions().is_empty(), "{:?}", fixture.calls());
 }
 
 #[cfg(unix)]
@@ -12929,7 +12937,11 @@ fn inventory_remote_states_come_from_the_catalog_and_lookups_and_missing_blocks_
                 b"/gone\r".to_vec(),
             ),
             (
-                vec!["NORMAL · 1 row", "github.com/org/gone · missing"],
+                vec![
+                    "NORMAL · 1 row",
+                    "pair: missing missing",
+                    "absent: github.com/org/gone",
+                ],
                 b"\r".to_vec(),
             ),
             (
@@ -13020,6 +13032,60 @@ fn inventory_remote_states_come_from_the_catalog_and_lookups_and_missing_blocks_
             "github.com repo view org/old --json nameWithOwner,isArchived,visibility",
             "github.com repo view other/broken --json nameWithOwner,isArchived,visibility",
             "github.com repo view other/kept --json nameWithOwner,isArchived,visibility",
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_looks_up_declared_repositories_without_a_checkout_while_discovery_is_off() {
+    let fixture = GhFixture::new(
+        "[providers.\"github.com\"]\npreset = \"github\"\n\n\
+         [[repositories]]\nurl = \"github.com/org/gone\"\n\n\
+         [[repositories]]\nurl = \"github.com/org/kept\"\n\n\
+         [[repositories]]\nurl = \"github.com/other/broken\"\n",
+    );
+    fs::write(fixture.state.join("free"), "org/gone").unwrap();
+    fs::write(fixture.state.join("broken"), "other/broken").unwrap();
+    run_inventory_pty_with_exit(
+        &mut fixture.command(),
+        &[
+            (
+                vec![
+                    "NORMAL · 3 rows",
+                    "pair: missing missing",
+                    "absent: github.com/org/gone",
+                    "github.com/other/broken ",
+                    "github.com/org/kept · private",
+                    "absent: problem",
+                ],
+                b"/gone\r".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "/ gone"], b"\r".to_vec()),
+            (
+                vec![
+                    "Inspect / gone",
+                    "pair: Remote missing",
+                    "unavailable · not found on github.com",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Inspect /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        // A failed lookup with discovery off is no session problem.
+        0,
+        |_| {},
+    );
+    let mut calls = fixture.calls();
+    calls.sort();
+    assert_eq!(
+        calls,
+        [
+            "github.com repo view org/gone --json nameWithOwner,isArchived,visibility",
+            "github.com repo view org/kept --json nameWithOwner,isArchived,visibility",
+            "github.com repo view other/broken --json nameWithOwner,isArchived,visibility",
         ]
     );
 }
@@ -13230,12 +13296,19 @@ fn inventory_bound_archive_key_archives_the_current_row() {
         132,
     );
     assert_eq!(
-        fixture.calls(),
+        fixture.actions(),
         [
             "github.com auth status --hostname github.com",
-            "github.com repo view org/demo --json nameWithOwner,isArchived,visibility",
             "github.com repo archive org/demo --yes",
         ]
+    );
+    let calls = fixture.calls();
+    let archive = calls.iter().position(|call| call.contains("repo archive"));
+    assert!(
+        calls[..archive.unwrap()]
+            .iter()
+            .any(|call| call.contains("repo view org/demo")),
+        "{calls:?}"
     );
     assert_eq!(
         fs::read_to_string(fixture.state.join("archived")).unwrap(),
@@ -13276,7 +13349,7 @@ fn inventory_github_failure_names_the_fix_in_session_problems_and_exits_one() {
         |_| {},
     );
     assert_eq!(
-        fixture.calls(),
+        fixture.actions(),
         ["github.com auth status --hostname github.com"]
     );
 }

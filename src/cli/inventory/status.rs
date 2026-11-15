@@ -1,15 +1,18 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
 use ratatui::text::Line;
 use serde::Serialize;
 
-use super::{HEADINGS, home_relative, short_names, table_cells};
+use super::{HEADINGS, bounded_lookup, home_relative, short_names, table_cells};
 use crate::application::inventory::{
     self as model, InventoryRow, ObservationField, OriginFact, RegistrationState, RowKey,
 };
-use crate::application::ports::{ConfigStore, ProviderCatalog};
+use crate::application::ports::ConfigStore;
+use crate::application::remote::RemoteBounds;
 use crate::cli::args::StatusArgs;
 use crate::domain::config::Config;
 use crate::infrastructure::config::CommandConfigStore;
@@ -37,7 +40,7 @@ pub(crate) fn run(config_path: &Path, args: StatusArgs) -> i32 {
         Err(error) => return fail(error.to_string()),
     };
     let providers = match ConfiguredProviders::from_config(&config) {
-        Ok(providers) => providers,
+        Ok(providers) => Arc::new(providers),
         Err(error) => return fail(error.to_string()),
     };
     let root = match config.resolve_root(&home) {
@@ -73,54 +76,59 @@ pub(crate) fn run(config_path: &Path, args: StatusArgs) -> i32 {
         Ok(report) => report,
         Err(error) => return fail(error),
     };
+    let mut failed = Vec::new();
     if args.remote {
         match model::add_remote_members(
             &mut report,
             &LocalInventoryFilesystem,
             &config,
             &home,
-            &providers,
+            &*providers,
             args.include_archived,
         ) {
             Ok(failures) => {
                 complete &= failures.is_empty();
-                let failed = failures
+                failed = failures
                     .iter()
                     .map(|failure| failure.provider.to_ascii_lowercase())
-                    .collect::<Vec<_>>();
+                    .collect();
                 problems.extend(failures.into_iter().map(|failure| Problem {
                     source: "provider",
                     subject: failure.provider,
                     message: failure.error,
                     path: None,
                 }));
-                // A declared repository its catalog did not list may still exist, or be gone.
-                let mut lookups = HashMap::new();
-                let ready = |host: &str| !failed.iter().any(|failed| failed == host);
-                for reference in model::unlisted(&report, &config, ready) {
-                    match providers.lookup(&reference) {
-                        Ok(state) => {
-                            lookups.insert(
-                                reference.identity(),
-                                model::RemoteStatus::looked_up(Ok(state)),
-                            );
-                        }
-                        Err(error) => {
-                            complete = false;
-                            problems.push(Problem {
-                                source: "lookup",
-                                subject: reference.identity(),
-                                message: error,
-                                path: None,
-                            });
-                        }
-                    }
-                }
-                model::apply_lookups(&mut report, &lookups);
             }
             Err(error) => return fail(error),
         }
     }
+    // A declared repository no catalog listed may still exist, or not be there at all.
+    let mut lookups = HashMap::new();
+    let ready = |host: &str| !failed.iter().any(|failed| failed == host);
+    let bound = RemoteBounds::default().request;
+    let deadline = Instant::now() + bound;
+    for reference in model::unlisted(&report, &config, args.remote, ready) {
+        match bounded_lookup(&providers, &reference, deadline, bound) {
+            Ok(state) => {
+                lookups.insert(
+                    reference.identity(),
+                    model::RemoteStatus::looked_up(Ok(state)),
+                );
+            }
+            // With remote discovery off, a failed lookup leaves the origin alone, quietly.
+            Err(_) if !args.remote => {}
+            Err(error) => {
+                complete = false;
+                problems.push(Problem {
+                    source: "lookup",
+                    subject: reference.identity(),
+                    message: error,
+                    path: None,
+                });
+            }
+        }
+    }
+    model::apply_lookups(&mut report, &lookups, args.remote);
     // Names come from every row, as on the screen, so a filter never renames a copy.
     let names = short_names(&report.rows);
     let rows = report
