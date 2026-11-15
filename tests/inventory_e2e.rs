@@ -14,70 +14,6 @@ use std::{fs, process::Command};
 
 #[cfg(unix)]
 #[test]
-fn inventory_inspect_shows_current_declaration_and_action_reason_after_resize_and_scroll() {
-    let temp = temp_dir();
-    let home = temp.path().join("home");
-    let config = temp.path().join("config.toml");
-    fs::create_dir_all(home.join("repos")).unwrap();
-    let padding = (0..3)
-        .map(|index| format!("\"padding-{index}-{}\"", "a ".repeat(70)))
-        .chain(std::iter::once("\"escape-\\n\\t\\u001b\"".to_owned()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    fs::write(
-        &config,
-        format!(
-            "root = \"repos\"\n\n[providers.\"github.com\"]\npreset = \"github\"\n\n[[repositories]]\nurl = \"github.com/org/alpha\"\n\n[[repositories]]\nurl = \"github.com/org/*\"\nexclude = [{padding}]\n\n[inventory.keys.inspection]\npage_down = [\"x\"]\n"
-        ),
-    )
-    .unwrap();
-
-    let selected = "selected: org/*";
-    let mut scrolled_frames = Vec::new();
-    run_inventory_pty_with_exit_observing(
-        support::lager(&home, &config).arg("tui"),
-        &[
-            (vec!["selected: alpha"], b"j\r".to_vec()),
-            (
-                vec![
-                    "Inspect / org/*",
-                    "pair: Declaration github.com/org/*",
-                    "pair: Registration wildcard",
-                ],
-                vec![b'x'; 32],
-            ),
-            (
-                vec![
-                    "INSPECT",
-                    "excludes escape-\\n\\t\\x1b",
-                    "pair: Register unavailable",
-                    "patterns are inspect-only",
-                ],
-                b"\x1b".to_vec(),
-            ),
-            (vec!["NORMAL", selected, "absent: INSPECT"], b"q".to_vec()),
-        ],
-        24,
-        80,
-        0,
-        |action, writer, frame| match action {
-            1 => resize_pty(writer, 16, 80),
-            2 => scrolled_frames.push(frame.to_owned()),
-            _ => {}
-        },
-    );
-
-    let [scrolled] = scrolled_frames.as_slice() else {
-        panic!("expected one resized, scrolled inspection frame: {scrolled_frames:?}");
-    };
-    let screen = screen_text(scrolled, 16, 80);
-    for text in ["INSPECT", "excludes escape-\\n\\t\\x1b"] {
-        assert!(screen.contains(text), "missing {text}:\n{screen}");
-    }
-}
-
-#[cfg(unix)]
-#[test]
 fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
     let temp = temp_dir();
     let home = temp.path().join("home");
@@ -122,7 +58,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
             &mut command,
             &[
                 (
-                    vec!["absent: Scanning", "NORMAL · 6 rows", "1 modified"],
+                    vec!["absent: Scanning", "NORMAL · 5 rows", "1 modified"],
                     b"/org/alpha".to_vec(),
                 ),
                 (vec!["SEARCH · 2 rows", "/ org/alpha"], b"\r".to_vec()),
@@ -179,7 +115,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         let screen = screen_text(main, rows, cols);
         let lines = screen.lines().collect::<Vec<_>>();
         assert!(
-            lines[0].starts_with("  LAGER / inventory") && lines[0].ends_with("NORMAL · 6 rows"),
+            lines[0].starts_with("  LAGER / inventory") && lines[0].ends_with("NORMAL · 5 rows"),
             "{screen}"
         );
         assert_eq!(lines[1], "  Local + declarations · remote off", "{screen}");
@@ -211,7 +147,11 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
             "{screen}"
         );
         let table = inventory_rows(&screen);
-        assert_eq!(table.len(), 6, "{table:?}\n{screen}");
+        assert_eq!(table.len(), 5, "{table:?}\n{screen}");
+        assert!(
+            !screen.contains("team/*"),
+            "a wildcard pattern is no row:\n{screen}"
+        );
         for (wide, narrow) in [
             (
                 [
@@ -274,10 +214,6 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
                     "clean",
                 ],
             ),
-            (
-                ["team/*", "—", "github.com/team/*", "wildcard", "—", "—"],
-                ["team/*", "—", "—", "wildcard", "—"],
-            ),
         ] {
             let expected = shown(wide, narrow);
             assert!(
@@ -285,13 +221,12 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
                 "missing {expected:?} in {table:?}\n{screen}"
             );
         }
-        for line in &lines[5..11] {
+        for line in &lines[5..10] {
             let characters = line.chars().collect::<Vec<_>>();
             let slot = characters[2..6].iter().collect::<String>();
-            let pattern = line.contains("team/*");
             assert!(
                 characters[..2].iter().all(|character| *character == ' ')
-                    && slot == if pattern { "    " } else { "[ ] " }
+                    && slot == "[ ] "
                     && characters[6] != ' ',
                 "repository text must start after the row padding and mark slot:\n{screen}"
             );
@@ -313,7 +248,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         };
         let status = rows - 1 - footer.len();
         assert!(
-            lines[11..status].iter().all(|line| line.is_empty()),
+            lines[10..status].iter().all(|line| line.is_empty()),
             "{screen}"
         );
         assert_eq!(
@@ -746,7 +681,7 @@ fn inventory_search_matches_full_origins_and_keeps_text_and_filters_safe() {
             ),
             (vec!["NORMAL ·", "/ gto/rgap"], b"\x7f".to_vec()),
             (
-                vec!["NORMAL · 3 rows", "/ Search repositories", "beta"],
+                vec!["NORMAL · 2 rows", "/ Search repositories", "beta"],
                 b"q".to_vec(),
             ),
         ],
@@ -1666,7 +1601,7 @@ exclude = ["repo"]
         support::lager(&home, &config).arg("tui"),
         &[
             (
-                vec!["7 rows", "No active operation"],
+                vec!["5 rows", "No active operation"],
                 b"/elsewhere\r\r".to_vec(),
             ),
             (
@@ -2504,7 +2439,7 @@ exclude = ["skip"]
 
     let transcript = run_inventory_pty_with_size(
         support::lager(&home, &config).arg("tui"),
-        &["8 rows", "No active operation"],
+        &["7 rows", "No active operation"],
         b"q",
         40,
         220,
@@ -2513,8 +2448,9 @@ exclude = ["skip"]
     let status = output(support::lager(&home, &config).arg("status"));
     assert!(status.status.success(), "{status:?}");
     let printed = status_rows(&String::from_utf8(status.stdout).unwrap());
-    assert_eq!(printed.len(), 8, "{printed:?}");
+    assert_eq!(printed.len(), 7, "{printed:?}");
     assert_eq!(printed, screen);
+    assert!(printed.iter().all(|row| row[0] != "org/*"), "{printed:?}");
 }
 
 /// Splits `lager status` table lines at the header's column starts.
@@ -2611,7 +2547,7 @@ exclude = ["skip"]
     let transcript = run_inventory_pty_with_size(
         support::lager(&home, &config).arg("tui"),
         &[
-            "8 rows",
+            "7 rows",
             "ignored repositories: bare.git: bare repository ignored",
             "No active operation",
         ],
@@ -2631,13 +2567,8 @@ exclude = ["skip"]
     ] {
         assert!(plain.contains(header), "missing header {header}:\n{plain}");
     }
-    for expected in [
-        "github.com/org/*",
-        "org/*",
-        "ignored repositories: bare.git: bare repository ignored",
-    ] {
-        assert!(plain.contains(expected), "missing {expected}:\n{plain}");
-    }
+    let expected = "ignored repositories: bare.git: bare repository ignored";
+    assert!(plain.contains(expected), "missing {expected}:\n{plain}");
     let rows = inventory_rows(&plain);
     let assert_row = |label: &str, expected: [&str; 6]| {
         assert!(
@@ -2646,10 +2577,7 @@ exclude = ["skip"]
             "missing exact {label} row {expected:?}; parsed rows: {rows:?}"
         );
     };
-    assert_row(
-        "pattern",
-        ["org/*", "—", "github.com/org/*", "wildcard", "—", "—"],
-    );
+    assert!(rows.iter().all(|row| row[0] != "org/*"), "{rows:?}");
     assert_row(
         "missing declaration",
         [
@@ -4362,19 +4290,15 @@ fn inventory_marks_survive_filtering_and_refresh_and_report_vanished_entries() {
         support::lager(&home, &config).arg("tui"),
         &[
             (
-                vec!["NORMAL · 4 rows", "absent: Scanning", "selected: alpha"],
+                vec!["NORMAL · 3 rows", "absent: Scanning", "selected: alpha"],
                 b" ".to_vec(),
             ),
             (
                 vec!["[x] alpha", "[ ] beta", "1 marked · 0 hidden"],
                 b"jj ".to_vec(),
             ),
-            (vec!["[x] gone", "2 marked · 0 hidden"], b"j ".to_vec()),
             (
-                vec![
-                    "team/* cannot be marked: patterns are inspect-only",
-                    "2 marked · 0 hidden",
-                ],
+                vec!["[x] gone", "2 marked · 0 hidden"],
                 b"/org/alpha\r".to_vec(),
             ),
             (
@@ -4392,7 +4316,7 @@ fn inventory_marks_survive_filtering_and_refresh_and_report_vanished_entries() {
                 vec![127],
             ),
             (
-                vec!["NORMAL · 3 rows", "absent: gone", "[x] alpha", "[ ] beta"],
+                vec!["NORMAL · 2 rows", "absent: gone", "[x] alpha", "[ ] beta"],
                 b"mjjjjj\r".to_vec(),
             ),
             (
@@ -4419,7 +4343,7 @@ fn inventory_marks_survive_filtering_and_refresh_and_report_vanished_entries() {
         32,
         132,
         |action| {
-            if action == 4 {
+            if action == 3 {
                 fs::remove_dir_all(root.join("scratch")).unwrap();
             }
         },
@@ -5801,7 +5725,7 @@ fn inventory_registers_every_marked_row_including_hidden_ones_and_reports_each_o
 
 #[cfg(unix)]
 #[test]
-fn inventory_registration_edits_wildcard_exclusions_and_keeps_patterns_inspect_only() {
+fn inventory_registration_edits_wildcard_exclusions() {
     let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
@@ -5825,7 +5749,7 @@ fn inventory_registration_edits_wildcard_exclusions_and_keeps_patterns_inspect_o
         support::lager(&home, &config).arg("tui"),
         &[
             (
-                vec!["NORMAL · 3 rows", "absent: Scanning", "excluded"],
+                vec!["NORMAL · 2 rows", "absent: Scanning", "excluded"],
                 b"kkjm\r\r".to_vec(),
             ),
             (
@@ -5856,26 +5780,6 @@ fn inventory_registration_edits_wildcard_exclusions_and_keeps_patterns_inspect_o
             ),
             (
                 vec!["NORMAL", "absent: Scanning", "excluded", "selected: delta"],
-                b"jjm\r".to_vec(),
-            ),
-            (
-                vec![
-                    "Repository actions / team/*",
-                    "pair: Register patterns",
-                    "pair: Unregister patterns",
-                ],
-                b"\r".to_vec(),
-            ),
-            (
-                vec!["Repository actions / team/*", "absent: Batch /"],
-                b"\x1b".to_vec(),
-            ),
-            (
-                vec!["All actions", "absent: Repository actions /"],
-                b"\x1b".to_vec(),
-            ),
-            (
-                vec!["NORMAL", "absent: All actions", "absent: Batch /"],
                 b"q".to_vec(),
             ),
         ],
@@ -7133,7 +7037,7 @@ fn inventory_failed_hook_keeps_the_clone_skips_registration_and_lets_the_next_ta
         support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (
-                vec!["NORMAL · 3 rows", "absent: Scanning"],
+                vec!["NORMAL · 2 rows", "absent: Scanning"],
                 b"kk j ".to_vec(),
             ),
             (vec!["2 marked · 0 hidden"], b"m\rjjj\r".to_vec()),
@@ -7161,7 +7065,7 @@ fn inventory_failed_hook_keeps_the_clone_skips_registration_and_lets_the_next_ta
                 ],
                 b"\x1b".to_vec(),
             ),
-            (vec!["NORMAL · 3 rows", "absent: Batch /"], b"q".to_vec()),
+            (vec!["NORMAL · 2 rows", "absent: Batch /"], b"q".to_vec()),
         ],
         32,
         132,
@@ -10562,7 +10466,7 @@ fn inventory_worktree_popup_is_unavailable_on_rows_without_a_checkout() {
     let temp = temp_dir();
     let (home, config, _) = worktree_fixture(
         temp.path(),
-        "\n[providers.\"github.com\"]\npreset = \"github\"\n\n[[repositories]]\nurl = \"github.com/org/ghost\"\n\n[[repositories]]\nurl = \"github.com/org/sealed\"\n\n[[repositories]]\nurl = \"github.com/team/*\"\n",
+        "\n[providers.\"github.com\"]\npreset = \"github\"\n\n[[repositories]]\nurl = \"github.com/org/ghost\"\n\n[[repositories]]\nurl = \"github.com/org/sealed\"\n",
     );
     let sealed = home.join("repos/org/sealed");
     fs::create_dir_all(&sealed).unwrap();
@@ -10572,7 +10476,7 @@ fn inventory_worktree_popup_is_unavailable_on_rows_without_a_checkout() {
         support::lager(&home, &config).arg("tui"),
         &[
             (
-                vec!["NORMAL · 4 rows", "absent: Scanning", "selected: ghost"],
+                vec!["NORMAL · 3 rows", "absent: Scanning", "selected: ghost"],
                 b"w".to_vec(),
             ),
             (
@@ -10588,15 +10492,7 @@ fn inventory_worktree_popup_is_unavailable_on_rows_without_a_checkout() {
                     "Worktrees unavailable: the checkout is unreadable",
                     "absent: Worktrees /",
                 ],
-                b"jjw".to_vec(),
-            ),
-            (
-                vec![
-                    "selected: team/*",
-                    "Worktrees unavailable: a pattern has no checkout",
-                    "absent: Worktrees /",
-                ],
-                b"kkk".to_vec(),
+                b"k".to_vec(),
             ),
             // The menu entry is disabled with the same reason.
             (vec!["selected: ghost"], b"mjjjj\r".to_vec()),
@@ -10610,7 +10506,7 @@ fn inventory_worktree_popup_is_unavailable_on_rows_without_a_checkout() {
                 b"\x1b".to_vec(),
             ),
             (
-                vec!["NORMAL · 4 rows", "absent: All actions"],
+                vec!["NORMAL · 3 rows", "absent: All actions"],
                 b"q".to_vec(),
             ),
         ],
@@ -11354,7 +11250,7 @@ impl BitbucketStub {
 /// Two providers and three local rows. A `gh` stub answers the viewer catalog with `me/zebra`
 /// and `org/local`, and the wildcard `github.com/org/*` with `active`, the archived `old`, the
 /// excluded `skip`, the explicitly declared `explicit` and the cloned `local`. With every
-/// provider ready the inventory shows seven rows, nine with archives. A repository lookup
+/// provider ready the inventory shows six rows, eight with archives. A repository lookup
 /// fails, so it leaves the remote state unknown and the catalog request count alone.
 #[cfg(unix)]
 struct RemoteFixture {
@@ -11491,7 +11387,7 @@ const REMOTE_MENU: &[u8] = b"mjjjjjjj\r";
 
 #[cfg(unix)]
 const REMOTE_READY: [&str; 3] = [
-    "NORMAL · 7 rows",
+    "NORMAL · 6 rows",
     "bitbucket.org: ready, 1 candidate",
     "github.com: ready, 3 candidates",
 ];
@@ -11526,7 +11422,7 @@ fn inventory_remote_keeps_local_rows_usable_while_providers_load_and_keeps_rows_
         &[
             (
                 vec![
-                    "NORMAL · 3 rows",
+                    "NORMAL · 2 rows",
                     "Local: ready",
                     "bitbucket.org: loading…",
                     "github.com: loading…",
@@ -11540,13 +11436,13 @@ fn inventory_remote_keeps_local_rows_usable_while_providers_load_and_keeps_rows_
                 b"\x7fjk ".to_vec(),
             ),
             (
-                vec!["NORMAL · 3 rows", "1 marked · 0 hidden", "loading…"],
+                vec!["NORMAL · 2 rows", "1 marked · 0 hidden", "loading…"],
                 b"j".to_vec(),
             ),
             // The first provider's rows arrive while the second still loads.
             (
                 vec![
-                    "NORMAL · 6 rows",
+                    "NORMAL · 5 rows",
                     "github.com: ready, 3 candidates",
                     "bitbucket.org: loading…",
                     "1 marked · 0 hidden",
@@ -11556,7 +11452,7 @@ fn inventory_remote_keeps_local_rows_usable_while_providers_load_and_keeps_rows_
             ),
             (
                 vec![
-                    "NORMAL · 6 rows · 1 problem",
+                    "NORMAL · 5 rows · 1 problem",
                     "bitbucket.org: failed",
                     "! bitbucket.org failed: bitbucket request failed with status 500",
                     "github.com: ready, 3 candidates",
@@ -11591,12 +11487,12 @@ fn inventory_remote_keeps_local_rows_usable_while_providers_load_and_keeps_rows_
     );
     assert_remote_regions(
         loading,
-        "NORMAL · 3 rows",
+        "NORMAL · 2 rows",
         source.trim_start(),
         "Remote on · local rows stay usable while providers load · R refreshes local/config state only",
         "q quit",
     );
-    assert_eq!(inventory_rows(loading).len(), 3, "{loading}");
+    assert_eq!(inventory_rows(loading).len(), 2, "{loading}");
     let partial = inventory_rows(&frames[3]);
     assert_eq!(
         partial
@@ -11627,7 +11523,7 @@ fn inventory_remote_menu_retries_only_the_failed_provider() {
         &[
             (
                 vec![
-                    "NORMAL · 6 rows · 1 problem",
+                    "NORMAL · 5 rows · 1 problem",
                     "github.com: ready, 3 candidates",
                     "bitbucket.org: failed",
                 ],
@@ -11635,7 +11531,7 @@ fn inventory_remote_menu_retries_only_the_failed_provider() {
             ),
             (
                 vec![
-                    "MENU · 6 rows · 1 problem",
+                    "MENU · 5 rows · 1 problem",
                     "Remote discovery",
                     "Retry failed providers",
                     "bitbucket.org only",
@@ -11645,7 +11541,7 @@ fn inventory_remote_menu_retries_only_the_failed_provider() {
             ),
             (
                 vec![
-                    "NORMAL · 7 rows · 1 problem",
+                    "NORMAL · 6 rows · 1 problem",
                     "bitbucket.org: ready, 1 candidate",
                     "github.com: ready, 3 candidates",
                     "absent: Remote discovery",
@@ -11678,7 +11574,7 @@ fn inventory_remote_menu_retries_only_the_failed_provider() {
     let controls = &frames[1];
     assert_remote_regions(
         controls,
-        "MENU · 6 rows · 1 problem",
+        "MENU · 5 rows · 1 problem",
         "Local: ready · bitbucket.org: failed · github.com: ready, 3 candidates",
         "! bitbucket.org failed: bitbucket request failed with status 500 Internal Server Error",
         "back",
@@ -11730,7 +11626,7 @@ fn inventory_remote_refresh_keeps_cached_rows_stale_while_every_provider_reloads
             ),
             (
                 vec![
-                    "NORMAL · 7 rows",
+                    "NORMAL · 6 rows",
                     "bitbucket.org: refreshing, 1 cached (stale)",
                     "github.com: refreshing, 3 cached (stale)",
                 ],
@@ -11760,7 +11656,7 @@ fn inventory_remote_refresh_keeps_cached_rows_stale_while_every_provider_reloads
             }
         },
     );
-    assert_eq!(rows[0].len(), 7);
+    assert_eq!(rows[0].len(), 6);
     // Staleness shows in the source line only: the cached rows stay as they were.
     assert_eq!(rows[2], rows[0]);
     assert_eq!(rows[3], rows[0]);
@@ -11787,7 +11683,7 @@ fn inventory_remote_disable_hides_candidates_removes_their_marks_and_keeps_the_c
             ),
             (
                 vec![
-                    "NORMAL · 3 rows",
+                    "NORMAL · 2 rows",
                     "Remote off · 4 remote-only rows hidden · 4 marks removed: ",
                     "2 marked · 0 hidden",
                     "remote off · 4 candidates cached for this session",
@@ -11819,7 +11715,7 @@ fn inventory_remote_disable_hides_candidates_removes_their_marks_and_keeps_the_c
     }
     assert_remote_regions(
         off,
-        "NORMAL · 3 rows",
+        "NORMAL · 2 rows",
         "Local + declarations · remote off · 4 candidates cached for this session",
         status.trim_start(),
         "q quit",
@@ -11830,8 +11726,8 @@ fn inventory_remote_disable_hides_candidates_removes_their_marks_and_keeps_the_c
             .map(|row| row[0].clone())
             .collect::<Vec<_>>()
     };
-    assert_eq!(names(off), ["explicit", "local", "org/*"], "{off}");
-    assert_eq!(names(&frames[6]).len(), 7, "{}", frames[6]);
+    assert_eq!(names(off), ["explicit", "local"], "{off}");
+    assert_eq!(names(&frames[6]).len(), 6, "{}", frames[6]);
     assert_eq!(
         (fixture.gh_requests(), fixture.bitbucket.requests()),
         (4, 4)
@@ -11857,13 +11753,13 @@ fn inventory_opening_add_enables_remote_and_cancelling_add_leaves_it_on() {
         &mut fixture.command(&["tui"]),
         &[
             (
-                vec!["NORMAL · 3 rows", "Local + declarations · remote off"],
+                vec!["NORMAL · 2 rows", "Local + declarations · remote off"],
                 b"kka".to_vec(),
             ),
             // AddInput: the form is open, the providers load, typing works meanwhile.
             (
                 vec![
-                    "INPUT · 3 rows",
+                    "INPUT · 2 rows",
                     "Add / URL or reference",
                     "bitbucket.org: loading…",
                     "github.com: loading…",
@@ -11875,7 +11771,7 @@ fn inventory_opening_add_enables_remote_and_cancelling_add_leaves_it_on() {
             // Cancelling Add leaves remote discovery on.
             (
                 vec![
-                    "NORMAL · 3 rows",
+                    "NORMAL · 2 rows",
                     "Add cancelled · nothing changed",
                     "Local: ready",
                     "bitbucket.org: loading…",
@@ -11946,7 +11842,7 @@ fn inventory_opening_add_from_the_menu_enables_remote_and_without_providers_asks
         &mut fixture.command(&["tui"]),
         &[
             (
-                vec!["NORMAL · 3 rows", "Local + declarations · remote off"],
+                vec!["NORMAL · 2 rows", "Local + declarations · remote off"],
                 b"kkmjjjjjj\r".to_vec(),
             ),
             (
@@ -12002,7 +11898,7 @@ fn inventory_opening_add_from_the_menu_enables_remote_and_without_providers_asks
 fn inventory_remote_archive_toggle_refetches_and_survives_disabling() {
     let fixture = RemoteFixture::new();
     let with_archives = [
-        "NORMAL · 9 rows",
+        "NORMAL · 8 rows",
         "github.com/org/old · archived",
         "bitbucket.org/team/attic · archived",
         "bitbucket.org: ready, 2 candidates",
@@ -12021,7 +11917,7 @@ fn inventory_remote_archive_toggle_refetches_and_survives_disabling() {
                 vec!["[x] Include archived", "Disable remote"],
                 b"jjj\r".to_vec(),
             ),
-            (vec!["NORMAL · 3 rows", "remote off"], REMOTE_MENU.to_vec()),
+            (vec!["NORMAL · 2 rows", "remote off"], REMOTE_MENU.to_vec()),
             // The preference outlives disabling and applies to the next fetch.
             (
                 vec!["[x] Include archived", "Enable remote"],
@@ -12066,7 +11962,7 @@ fn inventory_local_refresh_merges_the_cache_into_the_new_config_without_a_provid
             (REMOTE_READY.to_vec(), b"R".to_vec()),
             (
                 vec![
-                    "NORMAL · 8 rows",
+                    "NORMAL · 7 rows",
                     "No active operation",
                     "bitbucket.org: ready, 1 candidate",
                     "github.com: ready, 3 candidates",
@@ -12122,7 +12018,7 @@ fn inventory_remote_ignores_answers_to_requests_that_were_invalidated() {
         &[
             (
                 vec![
-                    "NORMAL · 6 rows",
+                    "NORMAL · 5 rows",
                     "github.com: ready, 3 candidates",
                     "bitbucket.org: loading…",
                 ],
@@ -12131,14 +12027,14 @@ fn inventory_remote_ignores_answers_to_requests_that_were_invalidated() {
             (vec!["Disable remote", "hides 3 rows"], b"jjj\r".to_vec()),
             (
                 vec![
-                    "NORMAL · 3 rows",
+                    "NORMAL · 2 rows",
                     "remote off · 3 candidates cached for this session",
                 ],
                 b"j".to_vec(),
             ),
             (
                 vec![
-                    "NORMAL · 3 rows",
+                    "NORMAL · 2 rows",
                     "remote off · 3 candidates cached for this session",
                 ],
                 REMOTE_MENU.to_vec(),
@@ -12178,7 +12074,7 @@ fn inventory_remote_ignores_answers_to_requests_that_were_invalidated() {
             ),
             (
                 vec![
-                    "NORMAL · 9 rows",
+                    "NORMAL · 8 rows",
                     "bitbucket.org/team/attic · archived",
                     "bitbucket.org: ready, 2 candidates",
                 ],
@@ -12186,7 +12082,7 @@ fn inventory_remote_ignores_answers_to_requests_that_were_invalidated() {
             ),
             (
                 vec![
-                    "NORMAL · 9 rows",
+                    "NORMAL · 8 rows",
                     "bitbucket.org/team/attic · archived",
                     "bitbucket.org: ready, 2 candidates",
                 ],
@@ -12221,10 +12117,10 @@ fn inventory_remote_ignores_answers_to_requests_that_were_invalidated() {
 fn inventory_remote_rows_agree_with_status_remote() {
     let fixture = RemoteFixture::new();
     for (flags, ready, extras) in [
-        (&["--remote"][..], "NORMAL · 7 rows", 3),
+        (&["--remote"][..], "NORMAL · 6 rows", 3),
         (
             &["--remote", "--include-archived"][..],
-            "NORMAL · 9 rows",
+            "NORMAL · 8 rows",
             4,
         ),
     ] {
@@ -12303,7 +12199,7 @@ fn inventory_registers_a_remote_candidate_without_asking_a_provider_again() {
             ),
             (
                 vec![
-                    "RESULTS · 7 rows",
+                    "RESULTS · 6 rows",
                     "Register: 1 succeeded",
                     "bitbucket.org: ready, 0 candidates",
                     "github.com: ready, 3 candidates",
@@ -12333,7 +12229,7 @@ fn inventory_quit_ends_a_hanging_provider_request() {
         &mut fixture.command(&["tui", "--remote"]),
         &[(
             vec![
-                "NORMAL · 4 rows",
+                "NORMAL · 3 rows",
                 "github.com: loading…",
                 "bitbucket.org: ready, 1 candidate",
             ],
@@ -12380,7 +12276,7 @@ fn inventory_remote_keeps_a_provider_catalog_when_one_of_its_wildcards_fails() {
             // The viewer catalog arrived; the wildcard's members did not.
             (
                 vec![
-                    "NORMAL · 5 rows · 1 problem",
+                    "NORMAL · 4 rows · 1 problem",
                     "zebra",
                     "bitbucket.org: ready, 1 candidate",
                     "github.com: failed, 1 cached (stale)",

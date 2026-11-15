@@ -356,7 +356,6 @@ stray         ~/repos/other/stray      github.com/other/stray  main    clean    
 member        ~/repos/team/member      github.com/team/member  main    clean       wildcard
 skip          ~/repos/team/skip        github.com/team/skip    main    clean       excluded
 scratch       ~/repos/local/scratch    no origin               main    clean       unregistered
-team/*        —                        github.com/team/*       —       —           wildcard
 ";
 
 #[test]
@@ -366,6 +365,21 @@ fn status_table_shows_every_row_kind_with_the_inventory_cells() {
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert_eq!(stdout(&output), EXPECTED_TABLE);
     assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
+fn a_wildcard_pattern_is_no_table_row_but_stays_in_json() {
+    let fixture = fixture();
+    let table = fixture.run(&["status"]);
+    assert!(!stdout(&table).contains("team/*"), "{table:?}");
+    let document = json(&fixture.run(&["status", "--json"]));
+    let kinds = document["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["kind"] == "pattern")
+        .count();
+    assert_eq!(kinds, 1, "{document}");
 }
 
 #[test]
@@ -1002,8 +1016,6 @@ repository  local              remote                             branch  status
 active      remote only        github.com/org/active · public     —       —       wildcard
 explicit    missing            github.com/org/explicit · private  —       —       explicit
 local       ~/repos/org/local  github.com/org/local · public      main    clean   wildcard
-project/*   —                  dc.example/project/*               —       —       wildcard
-org/*       —                  github.com/org/*                   —       —       wildcard
 "
     );
     let archived_table = run_remote(
@@ -1020,8 +1032,6 @@ active      remote only        github.com/org/active · public     —       —
 explicit    missing            github.com/org/explicit · private  —       —       explicit
 old         remote only        github.com/org/old · archived      —       —       wildcard
 local       ~/repos/org/local  github.com/org/local · public      main    clean   wildcard
-project/*   —                  dc.example/project/*               —       —       wildcard
-org/*       —                  github.com/org/*                   —       —       wildcard
 "
     );
     for alias in ["list", "ls"] {

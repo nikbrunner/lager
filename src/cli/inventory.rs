@@ -259,6 +259,10 @@ impl InventorySession {
             }
             self.start_lookups(&report);
             model::apply_lookups(&mut report, &self.lookups, self.remote.enabled());
+            // A wildcard is a scan pattern; the table lists its members only.
+            report
+                .rows
+                .retain(|row| !matches!(row.key, model::RowKey::Pattern(_)));
             self.cached_report = Some(report);
         }
         Ok(self
@@ -1458,7 +1462,7 @@ impl TerminalSession {
                             }
                             Some(Action::Mark) if view == View::Normal => {
                                 if let Some(row) = selection.selected_row(&visible_rows) {
-                                    toggle_mark(session, row, &report.rows);
+                                    session.marks.toggle(row);
                                 }
                             }
                             Some(Action::Cancel | Action::Accept) => {}
@@ -4212,7 +4216,7 @@ fn menu_lines(
         }
         Menu::Selection => {
             let marked = session.marks.len();
-            let markable = row.is_some_and(|row| row.markable);
+            let has_row = row.is_some();
             vec![
                 item(
                     Entry::ToggleMark,
@@ -4222,19 +4226,15 @@ fn menu_lines(
                         "Mark this row"
                     },
                     match row {
-                        Some(_) if markable => key(Action::Mark),
-                        Some(_) => "patterns are inspect-only".to_owned(),
+                        Some(_) => key(Action::Mark),
                         None => "no row".to_owned(),
                     },
-                    markable,
+                    has_row,
                 ),
                 item(
                     Entry::MarkVisible,
                     "Mark visible concrete rows",
-                    format!(
-                        "{} visible",
-                        visible.iter().filter(|row| row.markable).count()
-                    ),
+                    format!("{} visible", visible.len()),
                     true,
                 ),
                 item(
@@ -4979,21 +4979,6 @@ fn start_batch(session: &mut InventorySession, selection: &mut Selection, batch:
     selection.batch = true;
     selection.batch_cancel = false;
     selection.batch_scroll = 0;
-}
-
-fn toggle_mark(
-    session: &mut InventorySession,
-    row: &model::InventoryRow,
-    rows: &[model::InventoryRow],
-) {
-    if row.markable {
-        session.marks.toggle(row);
-    } else {
-        session.message = Some(format!(
-            "{} cannot be marked: patterns are inspect-only",
-            short_names(rows)[&row.key]
-        ));
-    }
 }
 
 fn refresh(session: &mut InventorySession) {
@@ -5868,9 +5853,6 @@ fn table_cells(
 }
 
 fn local_cell(row: &model::InventoryRow, home: &Path) -> (String, Style) {
-    if matches!(row.key, model::RowKey::Pattern(_)) {
-        return ("—".to_owned(), Style::default());
-    }
     let path = home_relative(Path::new(&row.path), home);
     match row.checkout {
         model::CheckoutState::Cloned => (path, Style::default()),
@@ -5892,10 +5874,9 @@ fn remote_cell(row: &model::InventoryRow, compact: bool, remote: bool) -> (Strin
     }
     let origin = origin_text(row);
     let status = row.remote_status.filter(|status| {
-        !matches!(row.key, model::RowKey::Pattern(_))
-            && (remote
-                || row.checkout == model::CheckoutState::Missing
-                    && *status != model::RemoteStatus::Pending)
+        remote
+            || row.checkout == model::CheckoutState::Missing
+                && *status != model::RemoteStatus::Pending
     });
     let Some(status) = status else {
         let text = if compact { "—".to_owned() } else { origin };
@@ -6019,7 +6000,6 @@ fn repository_table(
                             style
                         };
                         let mark = match column {
-                            0 if !rows[index].markable => "    ",
                             0 if marks.contains(&rows[index].key) => "[x] ",
                             0 => "[ ] ",
                             _ => "",
@@ -6232,7 +6212,6 @@ mod tests {
             observed_path: None,
             declaration: Some(key.to_owned()),
             warnings: Vec::new(),
-            markable: false,
             archived: None,
             remote_status: None,
         };
@@ -6267,7 +6246,6 @@ mod tests {
             observed_path: None,
             declaration: Some(name.to_owned()),
             warnings: Vec::new(),
-            markable: false,
             archived: None,
             remote_status: None,
         };
@@ -6308,7 +6286,6 @@ mod tests {
             observed_path: None,
             declaration: None,
             warnings: Vec::new(),
-            markable: true,
             archived: None,
             remote_status: None,
         }
@@ -6338,13 +6315,6 @@ mod tests {
 
     #[test]
     fn search_matches_the_labels_the_table_shows() {
-        let mut pattern = display_row(
-            RowKey::Pattern("github.com/org/*".to_owned()),
-            CheckoutState::Pattern,
-        );
-        pattern.registration = RegistrationState::Pattern;
-        assert!(super::row_matches_query(&pattern, "wildcard"));
-        assert!(super::row_matches_query(&pattern, "pattern"));
         let mut clean = display_row(RowKey::Path("/repos/clean".into()), CheckoutState::Cloned);
         clean.changes = ObservationField::Clean;
         assert!(super::row_matches_query(&clean, "known clean"));

@@ -306,7 +306,7 @@ fn row_reference(row: &InventoryRow) -> Option<String> {
 }
 
 /// What cloning a row means: its identity at the configured destination, wherever a checkout
-/// was found. Patterns and originless checkouts cannot be cloned.
+/// was found. Originless checkouts cannot be cloned.
 pub fn clone_preview(
     row: &InventoryRow,
     config: &Config,
@@ -316,10 +316,7 @@ pub fn clone_preview(
     filesystem: &impl InventoryFilesystem,
 ) -> Result<AddPreview, &'static str> {
     let unsupported = "no supported origin observed";
-    let reference = match &row.key {
-        RowKey::Pattern(_) => return Err("patterns are inspect-only"),
-        _ => row_reference(row).ok_or(unsupported)?,
-    };
+    let reference = row_reference(row).ok_or(unsupported)?;
     let mut preview = add_preview(&reference, config, root, rows, scan_complete, filesystem)
         .map_err(|_| unsupported)?;
     if row.remote_status == Some(RemoteStatus::Missing) {
@@ -334,8 +331,9 @@ pub fn clone_preview(
 /// origin can be registered or unregistered.
 pub fn eligibility(row: &InventoryRow, action: BatchAction, config: &Config) -> Eligibility {
     let identity = match &row.key {
-        RowKey::Pattern(_) => return Eligibility::Unavailable("patterns are inspect-only"),
-        RowKey::Path(_) => return Eligibility::Unavailable("no supported origin observed"),
+        RowKey::Path(_) | RowKey::Pattern(_) => {
+            return Eligibility::Unavailable("no supported origin observed");
+        }
         RowKey::Checkout { identity, .. } | RowKey::Declaration { identity, .. } => identity,
     };
     match Registration::of(identity, config).noop(action) {
@@ -352,8 +350,9 @@ pub fn removal_eligibility(
     config: &Config,
 ) -> Eligibility {
     let identity = match &row.key {
-        RowKey::Pattern(_) => return Eligibility::Unavailable("patterns are inspect-only"),
-        RowKey::Path(_) => return Eligibility::Unavailable("no supported origin observed"),
+        RowKey::Path(_) | RowKey::Pattern(_) => {
+            return Eligibility::Unavailable("no supported origin observed");
+        }
         RowKey::Checkout { identity, .. } | RowKey::Declaration { identity, .. } => identity,
     };
     Eligibility::Unavailable(match row.checkout {
@@ -1600,7 +1599,6 @@ mod tests {
             observed_path: Some("/repos/org/beta".into()),
             declaration: None,
             warnings: Vec::new(),
-            markable: true,
             archived: None,
             remote_status: None,
         };
@@ -1612,14 +1610,6 @@ mod tests {
         assert_eq!(
             eligibility(&row, BatchAction::Unregister, &config),
             Eligibility::Noop("identity is not registered")
-        );
-        let pattern = InventoryRow {
-            key: RowKey::Pattern("github.com/org/*".into()),
-            ..row.clone()
-        };
-        assert_eq!(
-            eligibility(&pattern, BatchAction::Register, &config),
-            Eligibility::Unavailable("patterns are inspect-only")
         );
         let path = InventoryRow {
             key: RowKey::Path("/repos/scratch".into()),
@@ -1882,7 +1872,6 @@ mod tests {
             observed_path: observed.map(Into::into),
             declaration: None,
             warnings: Vec::new(),
-            markable: true,
             archived: None,
             remote_status: None,
         };
@@ -1895,7 +1884,6 @@ mod tests {
             path: path.into(),
         };
         let rows = [
-            row(RowKey::Pattern("github.com/org/*".into()), None),
             row(RowKey::Path("/r/scratch".into()), Some("/r/scratch")),
             row(declared("alpha"), None),
             row(declared("gone"), None),
@@ -1912,8 +1900,7 @@ mod tests {
             bool,
             Option<&'static str>,
         );
-        let expected: [Frozen; 8] = [
-            (Some("patterns are inspect-only"), None, false, None),
+        let expected: [Frozen; 7] = [
             (Some("no supported origin observed"), None, true, None),
             (None, None, false, None),
             (Some("destination is unreadable"), None, false, None),
@@ -1956,7 +1943,7 @@ mod tests {
             assert_eq!(target.elsewhere.as_deref(), elsewhere.map(Path::new));
         }
         let misplaced = BatchTarget::freeze_clone(
-            &rows[6],
+            &rows[5],
             String::new(),
             false,
             BatchAction::Clone,

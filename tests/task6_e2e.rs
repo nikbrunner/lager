@@ -150,7 +150,6 @@ fn offline_json_list_is_single_versioned_document_with_wildcard_metadata() -> Te
         "\
 repository  local    remote               branch  status  registration
 repo        missing  github.com/org/repo  —       —       explicit
-team/*      —        github.com/team/*    —       —       wildcard
 "
     );
     Ok(())

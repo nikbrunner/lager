@@ -34,7 +34,6 @@ pub struct InventoryRow {
     pub observed_path: Option<PathBuf>,
     pub declaration: Option<String>,
     pub warnings: Vec<String>,
-    pub markable: bool,
     /// Whether the provider reports the repository as archived; `None` until a provider says.
     pub archived: Option<bool>,
     /// What the provider holds at the row's repository; `None` while nothing tells.
@@ -281,7 +280,6 @@ pub fn build_inventory(
                 observed_path: None,
                 declaration: Some(declaration.declaration.url.clone()),
                 warnings: relationships,
-                markable: true,
                 archived: None,
                 remote_status: None,
             },
@@ -313,7 +311,6 @@ pub fn build_inventory(
                     .iter()
                     .map(|excluded| format!("excludes {excluded}"))
                     .collect(),
-                markable: false,
                 archived: None,
                 remote_status: None,
             },
@@ -347,7 +344,6 @@ pub fn build_inventory(
                 observed_path: Some(pending.clone()),
                 declaration: None,
                 warnings: Vec::new(),
-                markable: true,
                 archived: None,
                 remote_status: None,
             },
@@ -373,7 +369,6 @@ pub fn build_inventory(
                 observed_path: Some(stale.clone()),
                 declaration: None,
                 warnings: vec!["Target changed before its Git observation completed".to_owned()],
-                markable: true,
                 archived: None,
                 remote_status: None,
             },
@@ -467,7 +462,6 @@ pub fn build_inventory(
                         .first()
                         .map(|declaration| declaration.declaration.url.clone()),
                     warnings,
-                    markable: true,
                     archived: None,
                     remote_status: None,
                 },
@@ -499,7 +493,6 @@ pub fn build_inventory(
                     observed_path: Some(observed),
                     declaration: None,
                     warnings,
-                    markable: true,
                     archived: None,
                     remote_status: None,
                 },
@@ -732,7 +725,6 @@ fn merge_members(
             observed_path: None,
             declaration: None,
             warnings: relationships,
-            markable: true,
             archived: Some(member.archived),
             remote_status,
         });
@@ -951,7 +943,7 @@ impl ObservationField {
     }
 }
 
-/// Session marks, kept by exact target. Pattern rows are never marked.
+/// Session marks, kept by exact target.
 #[derive(Debug, Clone, Default)]
 pub struct Marks(BTreeSet<RowKey>);
 
@@ -974,15 +966,11 @@ impl Marks {
 
     /// Returns whether the row is marked afterwards.
     pub fn toggle(&mut self, row: &InventoryRow) -> bool {
-        row.markable && !self.0.remove(&row.key) && self.0.insert(row.key.clone())
+        !self.0.remove(&row.key) && self.0.insert(row.key.clone())
     }
 
     pub fn mark_all<'a>(&mut self, rows: impl IntoIterator<Item = &'a InventoryRow>) {
-        self.0.extend(
-            rows.into_iter()
-                .filter(|row| row.markable)
-                .map(|row| row.key.clone()),
-        );
+        self.0.extend(rows.into_iter().map(|row| row.key.clone()));
     }
 
     /// Returns how many marks were cleared.
@@ -1008,11 +996,7 @@ impl Marks {
         if self.0.is_empty() {
             return 0;
         }
-        let present: HashSet<&RowKey> = rows
-            .iter()
-            .filter(|row| row.markable)
-            .map(|row| &row.key)
-            .collect();
+        let present: HashSet<&RowKey> = rows.iter().map(|row| &row.key).collect();
         let missing: Vec<RowKey> = self
             .0
             .iter()
@@ -1021,9 +1005,7 @@ impl Marks {
             .collect();
         let mut dropped = 0;
         for key in missing {
-            let mut targets = rows
-                .iter()
-                .filter(|row| row.markable && same_target(&key, row));
+            let mut targets = rows.iter().filter(|row| same_target(&key, row));
             match (targets.next(), targets.next()) {
                 (Some(row), None) => {
                     self.0.remove(&key);
@@ -1088,22 +1070,19 @@ impl CopyField {
 /// The checkout whose worktrees a row can show, or why the row has none.
 pub fn worktree_checkout(row: &InventoryRow) -> Result<&Path, &'static str> {
     match row.checkout {
-        CheckoutState::Pattern => Err("a pattern has no checkout"),
         CheckoutState::Missing => Err("no checkout at the destination"),
         CheckoutState::RemoteOnly => Err("remote only, no local checkout"),
         CheckoutState::Unreadable => Err("the checkout is unreadable"),
-        CheckoutState::Cloned | CheckoutState::Unknown | CheckoutState::Conflict => {
-            row.observed_path.as_deref().ok_or("no checkout observed")
-        }
+        CheckoutState::Cloned
+        | CheckoutState::Unknown
+        | CheckoutState::Conflict
+        | CheckoutState::Pattern => row.observed_path.as_deref().ok_or("no checkout observed"),
     }
 }
 
 /// The original full value a Copy choice puts on the clipboard, or why the row has none.
 pub fn copy_value(row: &InventoryRow, field: CopyField) -> Result<OsString, &'static str> {
     match field {
-        CopyField::Path if matches!(row.key, RowKey::Pattern(_)) => {
-            Err("patterns have no single path")
-        }
         CopyField::Path => row
             .observed_path
             .as_ref()
@@ -1139,8 +1118,7 @@ pub fn copy_value(row: &InventoryRow, field: CopyField) -> Result<OsString, &'st
 pub fn web_url(row: &InventoryRow, config: &Config) -> Result<String, &'static str> {
     let identity = match &row.key {
         RowKey::Declaration { identity, .. } | RowKey::Checkout { identity, .. } => identity,
-        RowKey::Pattern(_) => return Err("patterns have no single repository"),
-        RowKey::Path(_) => return Err("no supported origin"),
+        RowKey::Path(_) | RowKey::Pattern(_) => return Err("no supported origin"),
     };
     let unsupported = "no supported origin";
     if identity.starts_with("file://") {
@@ -1425,7 +1403,6 @@ mod tests {
 
     fn row(key: RowKey) -> InventoryRow {
         InventoryRow {
-            markable: !matches!(key, RowKey::Pattern(_)),
             key,
             repository: String::new(),
             path: String::new(),
@@ -1507,10 +1484,6 @@ mod tests {
                 checkout_key("github.com/org/a;b&c", "/r/x"),
                 Err("the repository identity has characters a web address cannot carry safely"),
             ),
-            (
-                RowKey::Pattern("github.com/org/*".to_owned()),
-                Err("patterns have no single repository"),
-            ),
         ] {
             assert_eq!(
                 web_url(&row(key.clone()), &config).as_deref(),
@@ -1578,22 +1551,15 @@ mod tests {
                 Err("detached HEAD"),
             ]
         );
-        let pattern = row(RowKey::Pattern("github.com/org/*".to_owned()));
-        assert_eq!(
-            copy_value(&pattern, CopyField::Path),
-            Err("patterns have no single path")
-        );
     }
 
     #[test]
     fn marks_follow_exact_targets_and_drop_vanished_ones_only_when_complete() {
         let pending = row(RowKey::Path("/r/alpha".into()));
         let gone = row(RowKey::Path("/r/gone".into()));
-        let pattern = row(RowKey::Pattern("github.com/org/*".to_owned()));
         let mut marks = Marks::default();
         assert!(marks.toggle(&pending));
         assert!(marks.toggle(&gone));
-        assert!(!marks.toggle(&pattern));
         assert_eq!(marks.hidden(&[&pending]), 1);
 
         let mut identified = row(checkout_key("github.com/org/alpha", "/r/alpha"));
@@ -1621,7 +1587,7 @@ mod tests {
         assert!(shared.contains(&found.key));
         assert!(!shared.contains(&conflict[0].key));
 
-        marks.mark_all([&identified, &other, &pattern]);
+        marks.mark_all([&identified, &other]);
         assert_eq!(marks.len(), 2);
         assert!(!marks.toggle(&other));
         assert_eq!(marks.clear(), 1);

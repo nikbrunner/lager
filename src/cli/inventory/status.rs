@@ -149,10 +149,15 @@ pub(crate) fn run(config_path: &Path, args: StatusArgs) -> i32 {
             Err(error) => return fail(format!("could not render status: {error}")),
         }
     } else {
-        table(rows.iter().map(|row| {
-            table_cells(row, names[&row.key].clone(), &home, false, args.remote)
-                .map(|(cell, _)| cell)
-        }))
+        // A wildcard is a scan pattern; only `--json` lists it.
+        table(
+            rows.iter()
+                .filter(|row| !matches!(row.key, RowKey::Pattern(_)))
+                .map(|row| {
+                    table_cells(row, names[&row.key].clone(), &home, false, args.remote)
+                        .map(|(cell, _)| cell)
+                }),
+        )
     };
     let written = std::io::stdout().lock().write_all(stdout.as_bytes());
     for problem in notes.iter().chain(&problems) {
