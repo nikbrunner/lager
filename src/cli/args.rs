@@ -192,7 +192,7 @@ pub struct UnregisterArgs {
 
 #[derive(Debug, ClapArgs)]
 #[command(
-    after_help = "Examples:\n  lager add github.com/org/project --register\n  lager add github.com/org/project --no-register\n  lager add github.com/org/project --post-clone 'make setup'"
+    after_help = "Examples:\n  lager add github.com/org/project --register\n  lager add github.com/org/project --no-register\n  lager add github.com/org/project --post-clone 'make setup'\n  lager add github.com/org/new --create --register"
 )]
 pub struct CloneArgs {
     #[arg(
@@ -221,6 +221,20 @@ pub struct CloneArgs {
     pub post_clone: Option<String>,
     #[arg(long, help = "Include archived provider repositories")]
     pub include_archived: bool,
+    #[arg(
+        long,
+        help = "Create the repository on GitHub first; private unless --public"
+    )]
+    pub create: bool,
+    #[arg(long, requires = "create", help = "Create the repository as public")]
+    pub public: bool,
+    #[arg(
+        long,
+        value_name = "TEXT",
+        requires = "create",
+        help = "Description of the created repository"
+    )]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, ClapArgs)]

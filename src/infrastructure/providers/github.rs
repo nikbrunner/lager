@@ -258,6 +258,20 @@ impl Github {
         .map(drop)
         .map_err(gh_error)
     }
+
+    pub fn create(
+        &self,
+        path: &str,
+        visibility: Visibility,
+        description: Option<&str>,
+    ) -> Result<(), String> {
+        let visibility = format!("--{}", visibility.as_str());
+        // One argument, so a description starting with `-` stays a value.
+        let description = description.map(|text| format!("--description={text}"));
+        let mut args = vec!["repo", "create", path, &visibility];
+        args.extend(description.as_deref());
+        self.gh(&args).map(drop).map_err(gh_error)
+    }
 }
 
 fn gh_error(error: ProbeError) -> String {

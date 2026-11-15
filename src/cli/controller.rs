@@ -257,15 +257,36 @@ fn add(
         eprintln!("lager: --post-clone conflicts with --no-register");
         return 2;
     }
-    let ask_registration =
+    let mut ask_registration =
         interactive && !args.register && !args.no_register && args.post_clone.is_none();
     if !interactive && !args.register && !args.no_register && args.post_clone.is_none() {
         eprintln!("lager: add requires exactly one of --register or --no-register outside a TTY");
         return 2;
     }
-    let register = args.register || args.post_clone.is_some();
+    let mut register = args.register || args.post_clone.is_some();
+    let mut post_clone = args.post_clone.clone();
+    // Asked before GitHub is touched, so cancelling creates nothing.
+    if args.create
+        && ask_registration
+        && let [repository] = args.repositories.as_slice()
+        && RepositoryRef::parse(repository).is_ok_and(|reference| !reference.is_wildcard())
+    {
+        (register, post_clone) = match registration_before_create(interaction, repository) {
+            Ok(choice) => choice,
+            Err(code) => return code,
+        };
+        ask_registration = false;
+    }
     let store = CommandConfigStore::default();
     let home = home_dir();
+    let created = if args.create {
+        match create(path, &args, &home) {
+            Ok(created) => Some(created),
+            Err(code) => return code,
+        }
+    } else {
+        None
+    };
     let selected = if args.repositories.is_empty() {
         match pick(
             &store,
@@ -312,7 +333,7 @@ fn add(
                 path,
                 &repositories,
                 register,
-                args.post_clone.as_deref(),
+                post_clone.as_deref(),
                 &home,
                 &mut reporter,
             )
@@ -336,7 +357,7 @@ fn add(
             path,
             &args.repositories,
             register,
-            args.post_clone.as_deref(),
+            post_clone.as_deref(),
             &home,
             &mut reporter,
         )
@@ -349,6 +370,14 @@ fn add(
                 .filter(|item| matches!(item.status, warehouse::OperationStatus::Failed(_)))
             {
                 if let warehouse::OperationStatus::Failed(error) = &repository.status {
+                    let error = match &created {
+                        // clone_repository removes the destination when the clone fails.
+                        Some((identity, destination)) if !destination.exists() => format!(
+                            "created {identity}; clone failed: {error}; rerun `lager add {identity}` without --create"
+                        ),
+                        Some((identity, _)) => format!("created {identity}; {error}"),
+                        None => error.clone(),
+                    };
                     eprintln!(
                         "lager: {}: {}",
                         escape(&repository.reference),
@@ -363,10 +392,79 @@ fn add(
             }
         }
         Err(error) => {
+            let error = match &created {
+                Some((identity, _)) => format!("created {identity}; {error}"),
+                None => error,
+            };
             eprintln!("lager: {}", escape(error));
             1
         }
     }
+}
+
+/// The answers `add` would ask for after cloning: whether to register, and which post_clone.
+fn registration_before_create(
+    interaction: &mut dyn Interaction,
+    repository: &str,
+) -> Result<(bool, Option<String>), i32> {
+    interaction
+        .confirm(&format!("Register {repository}?"), true)
+        .and_then(|register| {
+            if register {
+                crate::application::registry::registration_choice(
+                    repository,
+                    None,
+                    true,
+                    interaction,
+                )
+                .map(|post_clone| (true, post_clone))
+            } else {
+                Ok((false, None))
+            }
+        })
+        .map_err(|error| match error {
+            InteractionError::Cancelled => 130,
+            InteractionError::Failed(error) => {
+                eprintln!("lager: {}", escape(error));
+                1
+            }
+        })
+}
+
+/// Creates the one repository `add --create` names; returns its identity and checkout path.
+fn create(path: &Path, args: &CloneArgs, home: &Path) -> Result<(String, PathBuf), i32> {
+    let [repository] = args.repositories.as_slice() else {
+        eprintln!("lager: --create needs exactly one repository reference");
+        return Err(2);
+    };
+    let (config, providers, reference) = remote_target(path, repository).map_err(|error| {
+        eprintln!("lager: {}", escape(error));
+        1
+    })?;
+    if reference.is_wildcard() {
+        eprintln!("lager: --create needs one repository, not a wildcard");
+        return Err(2);
+    }
+    let visibility = if args.public {
+        ports::Visibility::Public
+    } else {
+        ports::Visibility::Private
+    };
+    let result = remote::create(
+        &config,
+        &providers,
+        &NativeGit,
+        &reference,
+        visibility,
+        args.description.as_deref(),
+        home,
+    );
+    let destination = match result {
+        Ok(destination) => destination,
+        Err(error) => return Err(report_remote(repository, Err(error))),
+    };
+    report_remote(repository, Ok("created"));
+    Ok((reference.identity(), destination))
 }
 
 #[derive(Default)]

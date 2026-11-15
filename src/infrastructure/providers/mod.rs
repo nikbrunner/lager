@@ -85,6 +85,16 @@ impl RemoteRepositories for ConfiguredProviders {
         self.remote(&reference.host)?
             .set_visibility(&reference.path, visibility)
     }
+
+    fn create(
+        &self,
+        reference: &RepositoryRef,
+        visibility: Visibility,
+        description: Option<&str>,
+    ) -> Result<(), String> {
+        self.remote(&reference.host)?
+            .create(&reference.path, visibility, description)
+    }
 }
 
 impl ProviderCatalog for ConfiguredProviders {

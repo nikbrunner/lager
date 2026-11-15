@@ -298,6 +298,12 @@ pub trait RemoteRepositories {
         reference: &RepositoryRef,
         visibility: Visibility,
     ) -> Result<(), String>;
+    fn create(
+        &self,
+        reference: &RepositoryRef,
+        visibility: Visibility,
+        description: Option<&str>,
+    ) -> Result<(), String>;
 }
 
 pub fn config_path(override_path: Option<&Path>) -> PathBuf {

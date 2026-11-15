@@ -3,17 +3,20 @@
 //! lager takes on a provider's repositories, which `remote_actions` must allow.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::application::ports::{
-    Interaction, InteractionError, Mutation, ProviderAnswer, ProviderFailure, ProviderSource,
-    RemoteRepositories, RemoteState, Visibility,
+    GitState, Interaction, InteractionError, Mutation, ProviderAnswer, ProviderFailure,
+    ProviderSource, RemoteRepositories, RemoteState, Visibility,
 };
+use crate::application::warehouse;
 use crate::domain::config::{Config, RemoteAction};
 use crate::domain::repository::{RepositoryRef, RepositorySummary, validate_reference_safety};
+use crate::domain::state::LocalState;
 
 /// How long a provider request may run, and how long ending the requests may hold the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -448,6 +451,19 @@ fn prepare(
     reference: &RepositoryRef,
     action: RemoteAction,
 ) -> Result<RemoteState, ActionError> {
+    ready(config, remote, reference, action)?;
+    remote
+        .state(reference)?
+        .ok_or_else(|| format!("not found on {}", reference.host).into())
+}
+
+/// One `owner/name` repository whose provider allows `action` and whose CLI is logged in.
+fn ready(
+    config: &Config,
+    remote: &dyn RemoteRepositories,
+    reference: &RepositoryRef,
+    action: RemoteAction,
+) -> Result<(), ActionError> {
     // A leading dash would reach gh as a flag.
     if reference.is_wildcard()
         || reference.path.split('/').count() != 2
@@ -457,9 +473,30 @@ fn prepare(
     }
     allowed(config, reference, action)?;
     remote.check(&reference.host)?;
-    remote
-        .state(reference)?
-        .ok_or_else(|| format!("not found on {}", reference.host).into())
+    Ok(())
+}
+
+/// Creates `reference` on its provider once neither its checkout path nor its name is taken,
+/// and returns that checkout path.
+pub fn create(
+    config: &Config,
+    remote: &dyn RemoteRepositories,
+    git: &dyn GitState,
+    reference: &RepositoryRef,
+    visibility: Visibility,
+    description: Option<&str>,
+    home: &Path,
+) -> Result<PathBuf, ActionError> {
+    ready(config, remote, reference, RemoteAction::Create)?;
+    let destination = warehouse::destination(config, reference, home)?;
+    if git.classify_destination(&destination, &reference.clone_url) != LocalState::Missing {
+        return Err(format!("destination already exists: {}", destination.display()).into());
+    }
+    if remote.state(reference)?.is_some() {
+        return Err(format!("already exists on {}", reference.host).into());
+    }
+    remote.create(reference, visibility, description)?;
+    Ok(destination)
 }
 
 pub fn archive(
@@ -994,6 +1031,9 @@ mod tests {
         ) -> Result<(), String> {
             self.changed.lock().unwrap().push(visibility);
             Ok(())
+        }
+        fn create(&self, _: &RepositoryRef, _: Visibility, _: Option<&str>) -> Result<(), String> {
+            unreachable!()
         }
     }
 

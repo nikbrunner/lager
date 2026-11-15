@@ -36,6 +36,7 @@ case "$1 $2" in
     ;;
   "repo unarchive") printf 'false' > "$GH_STATE/archived" ;;
   "repo edit") printf '%s' "$5" | tr 'a-z' 'A-Z' > "$GH_STATE/visibility" ;;
+  "repo create") ;;
   *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 1 ;;
 esac
 "##;
@@ -346,4 +347,228 @@ fn a_failing_change_passes_gh_s_error_through() {
         text(&output.stderr)
     );
     assert_eq!(state(&fixture.state, "archived"), "false");
+}
+
+/// A fixture allowing `create` whose github.com clones come from bare repositories it holds.
+fn create_fixture() -> (Fixture, PathBuf) {
+    let fixture = Fixture::github("\"create\"");
+    fixture.set("missing", "");
+    let temp = fixture.home.parent().unwrap();
+    let remotes = temp.join("remotes");
+    std::fs::create_dir_all(remotes.join("org")).unwrap();
+    let gitconfig = temp.join("gitconfig");
+    std::fs::write(
+        &gitconfig,
+        format!(
+            "[url \"file://{}/\"]\n    insteadOf = git@github.com:\n",
+            remotes.display()
+        ),
+    )
+    .unwrap();
+    (fixture, gitconfig)
+}
+
+/// The empty repository `gh repo create` leaves on GitHub.
+fn remote_repository(fixture: &Fixture, name: &str) {
+    let remote = fixture
+        .home
+        .parent()
+        .unwrap()
+        .join(format!("remotes/org/{name}.git"));
+    let output = support::external(fixture.home.parent().unwrap(), "git")
+        .args(["init", "--bare", "--quiet", remote.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", text(&output.stderr));
+}
+
+fn run_create(fixture: &Fixture, gitconfig: &Path, args: &[&str]) -> Output {
+    support::lager_with_path(&fixture.home, &fixture.config, Some(&fixture.bin))
+        .env("GH_ARGS_LOG", &fixture.log)
+        .env("GH_STATE", &fixture.state)
+        .env("GIT_CONFIG_GLOBAL", gitconfig)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+fn created(fixture: &Fixture) -> bool {
+    fixture
+        .calls()
+        .iter()
+        .any(|call| call.contains("repo create"))
+}
+
+#[test]
+fn create_makes_the_repository_then_clones_registers_and_runs_post_clone() {
+    let (fixture, gitconfig) = create_fixture();
+    remote_repository(&fixture, "demo");
+    let output = run_create(
+        &fixture,
+        &gitconfig,
+        &[
+            "add",
+            "org/demo",
+            "--create",
+            "--description=-a demo",
+            "--post-clone",
+            "printf hooked > hooked.txt",
+        ],
+    );
+    assert_outcome(&output, 0, "org/demo: created\n");
+    assert_eq!(
+        fixture.calls(),
+        [
+            "github.com auth status --hostname github.com",
+            "github.com repo view org/demo --json isArchived,visibility",
+            "github.com repo create org/demo --private --description=-a demo",
+        ]
+    );
+    let checkout = fixture.home.join("repos/org/demo");
+    assert!(checkout.join(".git").is_dir());
+    assert_eq!(state(&checkout, "hooked.txt"), "hooked");
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    assert!(config.contains("url = \"org/demo\""), "{config}");
+    assert!(
+        config.contains("post_clone = \"printf hooked > hooked.txt\""),
+        "{config}"
+    );
+}
+
+#[test]
+fn create_public_without_registering() {
+    let (fixture, gitconfig) = create_fixture();
+    remote_repository(&fixture, "demo");
+    let output = run_create(
+        &fixture,
+        &gitconfig,
+        &["add", "org/demo", "--create", "--public", "--no-register"],
+    );
+    assert_outcome(&output, 0, "org/demo: created\n");
+    assert_eq!(
+        fixture.calls().last().unwrap(),
+        "github.com repo create org/demo --public"
+    );
+    assert!(fixture.home.join("repos/org/demo/.git").is_dir());
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    assert!(!config.contains("[[repositories]]"), "{config}");
+}
+
+#[test]
+fn create_refuses_an_existing_destination_before_touching_github() {
+    let (fixture, gitconfig) = create_fixture();
+    std::fs::create_dir_all(fixture.home.join("repos/org/demo")).unwrap();
+    let output = run_create(
+        &fixture,
+        &gitconfig,
+        &["add", "org/demo", "--create", "--no-register"],
+    );
+    assert_outcome(&output, 1, "");
+    assert!(
+        text(&output.stderr).contains("destination already exists"),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(!created(&fixture));
+}
+
+#[test]
+fn create_refuses_a_taken_name() {
+    let (fixture, gitconfig) = create_fixture();
+    std::fs::remove_file(fixture.state.join("missing")).unwrap();
+    let output = run_create(
+        &fixture,
+        &gitconfig,
+        &["add", "org/demo", "--create", "--no-register"],
+    );
+    assert_outcome(&output, 1, "");
+    assert!(
+        text(&output.stderr).contains("org/demo: already exists on github.com"),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(!created(&fixture));
+    assert!(!fixture.home.join("repos/org/demo").exists());
+}
+
+#[test]
+fn create_needs_create_in_remote_actions() {
+    let (fixture, gitconfig) = create_fixture();
+    std::fs::write(
+        &fixture.config,
+        "root = \"repos\"\n\n[providers.\"github.com\"]\npreset = \"github\"\nremote_actions = [\"archive\"]\n",
+    )
+    .unwrap();
+    let output = run_create(
+        &fixture,
+        &gitconfig,
+        &["add", "org/demo", "--create", "--no-register"],
+    );
+    assert_outcome(&output, 1, "");
+    assert!(
+        text(&output.stderr).contains("`create` is not enabled for github.com"),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(fixture.calls().is_empty());
+}
+
+#[test]
+fn a_clone_failing_after_create_says_what_happened_and_how_to_finish() {
+    let (fixture, gitconfig) = create_fixture();
+    let output = run_create(
+        &fixture,
+        &gitconfig,
+        &["add", "org/demo", "--create", "--register"],
+    );
+    assert_outcome(&output, 1, "org/demo: created\n");
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("created github.com/org/demo; clone failed:")
+            && stderr.contains("rerun `lager add github.com/org/demo` without --create"),
+        "{stderr}"
+    );
+    assert!(created(&fixture));
+    assert!(!fixture.home.join("repos/org/demo").exists());
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    assert!(!config.contains("[[repositories]]"), "{config}");
+}
+
+#[test]
+fn create_takes_exactly_one_explicit_repository() {
+    let (fixture, gitconfig) = create_fixture();
+    for args in [
+        &["add", "org/demo", "--public", "--no-register"][..],
+        &["add", "org/demo", "--description", "x", "--no-register"],
+        &["add", "--create", "--no-register"],
+        &["add", "org/one", "org/two", "--create", "--no-register"],
+        &["add", "org/*", "--create", "--no-register"],
+    ] {
+        let output = run_create(&fixture, &gitconfig, args);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            text(&output.stderr)
+        );
+    }
+    assert!(fixture.calls().is_empty());
+}
+
+#[test]
+fn a_post_clone_failing_after_create_reports_the_creation_without_a_rerun_hint() {
+    let (fixture, gitconfig) = create_fixture();
+    remote_repository(&fixture, "demo");
+    let output = run_create(
+        &fixture,
+        &gitconfig,
+        &["add", "org/demo", "--create", "--post-clone", "exit 3"],
+    );
+    assert_outcome(&output, 1, "org/demo: created\n");
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("created github.com/org/demo; ") && !stderr.contains("rerun"),
+        "{stderr}"
+    );
+    assert!(fixture.home.join("repos/org/demo/.git").is_dir());
 }
