@@ -304,6 +304,14 @@ pub trait RemoteRepositories {
         visibility: Visibility,
         description: Option<&str>,
     ) -> Result<(), String>;
+    /// Creates `reference` from the local repository at `source`, sets it as origin and pushes.
+    fn publish(
+        &self,
+        reference: &RepositoryRef,
+        visibility: Visibility,
+        description: Option<&str>,
+        source: &Path,
+    ) -> Result<(), String>;
 }
 
 pub fn config_path(override_path: Option<&Path>) -> PathBuf {
@@ -397,6 +405,8 @@ pub trait WorktreeGit {
     fn origin_identity(&self, repository: &Path) -> Result<Option<String>, String>;
     /// The commit `revision` names in the local object store.
     fn commit(&self, repository: &Path, revision: &str) -> Option<String>;
+    /// The names of the repository's remotes.
+    fn remotes(&self, repository: &Path) -> Result<Vec<String>, String>;
     fn branch_exists(&self, repository: &Path, name: &str) -> Result<bool, String>;
     fn valid_branch_name(&self, name: &str) -> bool;
     /// `git worktree add`, with `-b branch start` when `start` is given. Native streams.
@@ -448,4 +458,7 @@ pub trait WorktreeFilesystem {
     fn holds(&self, path: &Path) -> Option<bool>;
     /// What tells this directory from another one put at the same path later.
     fn identity(&self, path: &Path) -> Result<String, String>;
+    /// The device the file system holding `path` lives on, following symlinks.
+    fn device(&self, path: &Path) -> Result<u64, String>;
+    fn rename(&self, from: &Path, to: &Path) -> Result<(), String>;
 }

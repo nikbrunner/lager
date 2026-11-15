@@ -10,8 +10,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::application::ports::{
-    GitState, Interaction, InteractionError, Mutation, ProviderAnswer, ProviderFailure,
-    ProviderSource, RemoteRepositories, RemoteState, Visibility,
+    ConfigStore, GitState, HookRunner, Interaction, InteractionError, Mutation, PathKind,
+    ProviderAnswer, ProviderFailure, ProviderSource, RemoteRepositories, RemoteState, Visibility,
+    WorktreeFilesystem, WorktreeGit,
 };
 use crate::application::warehouse;
 use crate::domain::config::{Config, RemoteAction};
@@ -497,6 +498,162 @@ pub fn create(
     }
     remote.create(reference, visibility, description)?;
     Ok(destination)
+}
+
+/// Publishes the local repository at `source` as `reference`, then moves it to its checkout
+/// path and returns that path. Every refusal happens before the provider is touched.
+#[allow(clippy::too_many_arguments)]
+pub fn publish(
+    config: &Config,
+    remote: &dyn RemoteRepositories,
+    git: &dyn WorktreeGit,
+    fs: &dyn WorktreeFilesystem,
+    reference: &RepositoryRef,
+    visibility: Visibility,
+    description: Option<&str>,
+    source: &Path,
+    home: &Path,
+) -> Result<PathBuf, ActionError> {
+    ready(config, remote, reference, RemoteAction::Create)?;
+    let destination = warehouse::destination(config, reference, home)?;
+    if fs.kind(&destination)? != PathKind::Missing {
+        return Err(format!("destination already exists: {}", destination.display()).into());
+    }
+    let shown = source.display();
+    let refuse = |reason: String| ActionError::from(format!("cannot publish {shown}: {reason}"));
+    let source = fs.canonicalize(source).map_err(refuse)?;
+    if source.to_str().is_none() {
+        return Err(refuse("its path is not UTF-8".to_owned()));
+    }
+    let location = git
+        .locate(&source)
+        .map_err(|_| refuse("not a Git working tree".to_owned()))?;
+    if location.top_level != source {
+        return Err(refuse("not the top of its repository".to_owned()));
+    }
+    if location.git_dir != source.join(".git") {
+        return Err(refuse(
+            "its Git directory lives outside it, as in a submodule or linked worktree".to_owned(),
+        ));
+    }
+    let worktrees = git.entries(&source).map_err(|fault| refuse(fault.error))?;
+    if worktrees.len() > 1 {
+        let linked = worktrees
+            .iter()
+            .filter(|entry| entry.path != source)
+            .map(|entry| entry.path.display().to_string())
+            .collect::<Vec<_>>();
+        return Err(refuse(format!(
+            "it has linked worktrees ({}); remove them first (lager worktree remove)",
+            linked.join(", ")
+        )));
+    }
+    if git.commit(&source, "HEAD").is_none() {
+        return Err(refuse("it has no commit yet".to_owned()));
+    }
+    let remotes = git.remotes(&source).map_err(refuse)?;
+    if !remotes.is_empty() {
+        return Err(refuse(format!(
+            "it already has a remote ({})",
+            remotes.join(", ")
+        )));
+    }
+    let root = config
+        .resolve_root(home)
+        .map_err(|error| error.to_string())?;
+    if let Ok(root) = fs.canonicalize(&root)
+        && source.starts_with(&root)
+    {
+        return Err(refuse(format!("it is already inside {}", root.display())));
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "destination has no parent".to_owned())?;
+    let existing = parent
+        .ancestors()
+        .find(|path| fs.kind(path).is_ok_and(|kind| kind != PathKind::Missing))
+        .unwrap_or(parent);
+    if fs.canonicalize(existing)?.starts_with(&source) {
+        return Err(refuse(format!("{} lies inside it", destination.display())));
+    }
+    if fs.device(existing)? != fs.device(&source)? {
+        return Err(refuse(format!(
+            "it is on another file system than {}",
+            destination.display()
+        )));
+    }
+    if remote.state(reference)?.is_some() {
+        return Err(format!("already exists on {}", reference.host).into());
+    }
+    let identity = reference.identity();
+    let finish = format!(
+        "move it to {}, then `lager register {identity}`",
+        destination.display()
+    );
+    if let Err(error) = remote.publish(reference, visibility, description, &source) {
+        // gh can create the repository and then fail to push.
+        return Err(match remote.state(reference) {
+            Ok(Some(_)) => {
+                let origin = git
+                    .remotes(&source)
+                    .is_ok_and(|remotes| remotes.iter().any(|name| name == "origin"));
+                let (state, push) = if origin {
+                    ("origin is set", "push")
+                } else {
+                    ("origin is not set", "set origin, push")
+                };
+                format!(
+                    "created {identity}; push failed: {error}; {state} and {shown} was not moved; {push}, {finish}"
+                )
+            }
+            _ => error,
+        }
+        .into());
+    }
+    fs.create_dir_all(parent)
+        .and_then(|()| fs.rename(&source, &destination))
+        .map_err(|error| {
+            format!(
+                "published {identity} from {shown}; move failed: {error}; {shown} is pushed with origin set; {finish}"
+            )
+        })?;
+    Ok(destination)
+}
+
+/// Declares a repository `publish` moved into root and runs `post_clone` in it. Errors say
+/// that the publish and the move already happened.
+#[allow(clippy::too_many_arguments)]
+pub fn settle_published<S: ConfigStore, H: HookRunner>(
+    store: &S,
+    hooks: &H,
+    config_path: &Path,
+    repository: &str,
+    register: bool,
+    post_clone: Option<&str>,
+    source: &Path,
+    destination: &Path,
+) -> Result<(), ActionError> {
+    let fail = |error: String| {
+        ActionError::from(format!(
+            "published {repository} from {}; moved to {}; {error}",
+            source.display(),
+            destination.display()
+        ))
+    };
+    if register {
+        store
+            .register(config_path, &[repository.to_owned()], post_clone)
+            .map_err(|error| fail(format!("could not persist declaration: {error}")))?;
+    }
+    if let Some(command) = post_clone
+        && let Err(error) = hooks.run_hook(command, destination)
+    {
+        if hooks.is_cancelled(&error) {
+            return Err(ActionError::Cancelled);
+        }
+        return Err(fail(format!("post_clone failed: {error}")));
+    }
+    Ok(())
 }
 
 pub fn archive(
@@ -1033,6 +1190,15 @@ mod tests {
             Ok(())
         }
         fn create(&self, _: &RepositoryRef, _: Visibility, _: Option<&str>) -> Result<(), String> {
+            unreachable!()
+        }
+        fn publish(
+            &self,
+            _: &RepositoryRef,
+            _: Visibility,
+            _: Option<&str>,
+            _: &Path,
+        ) -> Result<(), String> {
             unreachable!()
         }
     }

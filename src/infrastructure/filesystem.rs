@@ -117,6 +117,17 @@ impl crate::application::ports::WorktreeFilesystem for Filesystem {
     fn identity(&self, path: &Path) -> Result<String, String> {
         RemovalFilesystem::directory_identity(self, path).map_err(|error| error.to_string())
     }
+
+    fn device(&self, path: &Path) -> Result<u64, String> {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path)
+            .map(|metadata| metadata.dev())
+            .map_err(|error| error.to_string())
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> Result<(), String> {
+        std::fs::rename(from, to).map_err(|error| error.to_string())
+    }
 }
 
 /// The names directly inside `directory`.

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
 
@@ -270,6 +270,22 @@ impl Github {
         let description = description.map(|text| format!("--description={text}"));
         let mut args = vec!["repo", "create", path, &visibility];
         args.extend(description.as_deref());
+        self.gh(&args).map(drop).map_err(gh_error)
+    }
+
+    pub fn publish(
+        &self,
+        path: &str,
+        visibility: Visibility,
+        description: Option<&str>,
+        source: &Path,
+    ) -> Result<(), String> {
+        let visibility = format!("--{}", visibility.as_str());
+        let description = description.map(|text| format!("--description={text}"));
+        let source = source.to_str().ok_or("source path is not UTF-8")?;
+        let mut args = vec!["repo", "create", path, &visibility];
+        args.extend(description.as_deref());
+        args.extend(["--source", source, "--remote", "origin", "--push"]);
         self.gh(&args).map(drop).map_err(gh_error)
     }
 }

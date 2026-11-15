@@ -21,7 +21,7 @@ case "$1 $2" in
     fi
     ;;
   "repo view")
-    if [ -e "$GH_STATE/missing" ]; then
+    if [ -e "$GH_STATE/missing" ] && [ ! -e "$GH_STATE/created" ]; then
       printf '%s\n' "GraphQL: Could not resolve to a Repository with the name '$3'. (repository)" >&2
       exit 1
     fi
@@ -36,7 +36,23 @@ case "$1 $2" in
     ;;
   "repo unarchive") printf 'false' > "$GH_STATE/archived" ;;
   "repo edit") printf '%s' "$5" | tr 'a-z' 'A-Z' > "$GH_STATE/visibility" ;;
-  "repo create") ;;
+  "repo create")
+    # Stands in for --source DIR --remote origin --push.
+    source=""; previous=""
+    for arg in "$@"; do
+      [ "$previous" = "--source" ] && source="$arg"
+      previous="$arg"
+    done
+    if [ -e "$GH_STATE/push-fails" ]; then
+      : > "$GH_STATE/created"
+      printf '%s\n' "failed to run git: rejected push" >&2
+      exit 1
+    fi
+    if [ -n "$source" ]; then
+      git -C "$source" remote add origin "git@github.com:$3.git" || exit 1
+      git -C "$source" push --quiet origin HEAD || exit 1
+    fi
+    ;;
   *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 1 ;;
 esac
 "##;
@@ -543,6 +559,7 @@ fn create_takes_exactly_one_explicit_repository() {
         &["add", "--create", "--no-register"],
         &["add", "org/one", "org/two", "--create", "--no-register"],
         &["add", "org/*", "--create", "--no-register"],
+        &["add", "org/demo", "--from", "scratch", "--no-register"],
     ] {
         let output = run_create(&fixture, &gitconfig, args);
         assert_eq!(
@@ -571,4 +588,288 @@ fn a_post_clone_failing_after_create_reports_the_creation_without_a_rerun_hint()
         "{stderr}"
     );
     assert!(fixture.home.join("repos/org/demo/.git").is_dir());
+}
+
+fn git(fixture: &Fixture, directory: &Path, args: &[&str]) -> String {
+    let output = support::external(fixture.home.parent().unwrap(), "git")
+        .arg("-C")
+        .arg(directory)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    text(&output.stdout).trim().to_owned()
+}
+
+/// A folder at `path` holding a README, optionally a repository and optionally committed.
+fn source_folder(fixture: &Fixture, path: &Path, repository: bool, commit: bool) {
+    std::fs::create_dir_all(path).unwrap();
+    std::fs::write(path.join("README.md"), "demo\n").unwrap();
+    if repository {
+        git(fixture, path, &["init", "--quiet"]);
+    }
+    if commit {
+        git(fixture, path, &["add", "README.md"]);
+        git(
+            fixture,
+            path,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--quiet",
+                "-m",
+                "start",
+            ],
+        );
+    }
+}
+
+#[test]
+fn publish_pushes_the_folder_moves_it_into_root_and_registers_it() {
+    let (fixture, gitconfig) = create_fixture();
+    remote_repository(&fixture, "demo");
+    let source = fixture.home.parent().unwrap().join("scratch/demo");
+    source_folder(&fixture, &source, true, true);
+    let canonical = std::fs::canonicalize(&source).unwrap();
+    let output = run_create(
+        &fixture,
+        &gitconfig,
+        &[
+            "add",
+            "org/demo",
+            "--create",
+            "--from",
+            source.to_str().unwrap(),
+            "--description=-a demo",
+            "--post-clone",
+            "printf hooked > hooked.txt",
+        ],
+    );
+    assert_outcome(&output, 0, "org/demo: published\n");
+    assert_eq!(
+        fixture.calls(),
+        [
+            "github.com auth status --hostname github.com".to_owned(),
+            "github.com repo view org/demo --json isArchived,visibility".to_owned(),
+            format!(
+                "github.com repo create org/demo --private --description=-a demo --source {} --remote origin --push",
+                canonical.display()
+            ),
+        ]
+    );
+    assert!(!source.exists());
+    let checkout = fixture.home.join("repos/org/demo");
+    assert_eq!(state(&checkout, "README.md"), "demo\n");
+    assert_eq!(state(&checkout, "hooked.txt"), "hooked");
+    assert_eq!(
+        git(&fixture, &checkout, &["config", "remote.origin.url"]),
+        "git@github.com:org/demo.git"
+    );
+    let remote = fixture.home.parent().unwrap().join("remotes/org/demo.git");
+    assert!(!git(&fixture, &remote, &["for-each-ref"]).is_empty());
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    assert!(config.contains("url = \"org/demo\""), "{config}");
+}
+
+#[test]
+fn publish_refuses_an_unready_folder_before_touching_github() {
+    let cases: [(&str, &str); 9] = [
+        ("not a repository", "not a Git working tree"),
+        ("no commit", "it has no commit yet"),
+        ("has origin", "it already has a remote (origin)"),
+        ("destination exists", "destination already exists"),
+        ("inside root", "it is already inside"),
+        ("subdirectory", "not the top of its repository"),
+        (
+            "linked worktree",
+            "remove them first (lager worktree remove)",
+        ),
+        ("git dir elsewhere", "its Git directory lives outside it"),
+        ("destination inside source", "lies inside it"),
+    ];
+    for (case, message) in cases {
+        let (fixture, gitconfig) = create_fixture();
+        let temp = fixture.home.parent().unwrap().to_owned();
+        let source = match case {
+            "inside root" => fixture.home.join("repos/scratch/demo"),
+            "destination inside source" => fixture.home.clone(),
+            _ => temp.join("scratch/demo"),
+        };
+        source_folder(
+            &fixture,
+            &source,
+            case != "not a repository",
+            !matches!(case, "not a repository" | "no commit"),
+        );
+        if case == "has origin" {
+            git(
+                &fixture,
+                &source,
+                &["remote", "add", "origin", "https://example.com/x.git"],
+            );
+        }
+        if case == "linked worktree" {
+            let linked = temp.join("scratch/linked");
+            git(
+                &fixture,
+                &source,
+                &["worktree", "add", "--quiet", linked.to_str().unwrap()],
+            );
+        }
+        if case == "git dir elsewhere" {
+            let elsewhere = temp.join("gitdir");
+            std::fs::rename(source.join(".git"), &elsewhere).unwrap();
+            std::fs::write(
+                source.join(".git"),
+                format!("gitdir: {}\n", elsewhere.display()),
+            )
+            .unwrap();
+        }
+        if case == "destination exists" {
+            std::fs::create_dir_all(fixture.home.join("repos/org/demo")).unwrap();
+        }
+        let from = match case {
+            "subdirectory" => source.join("nested"),
+            _ => source.clone(),
+        };
+        std::fs::create_dir_all(&from).unwrap();
+        let output = run_create(
+            &fixture,
+            &gitconfig,
+            &[
+                "add",
+                "org/demo",
+                "--create",
+                "--from",
+                from.to_str().unwrap(),
+                "--no-register",
+            ],
+        );
+        assert_outcome(&output, 1, "");
+        assert!(
+            text(&output.stderr).contains(message),
+            "{case}: {}",
+            text(&output.stderr)
+        );
+        assert!(!created(&fixture), "{case}");
+        if case != "destination exists" {
+            assert!(!fixture.home.join("repos/org").exists(), "{case}");
+        }
+        assert_eq!(state(&source, "README.md"), "demo\n", "{case}");
+        if case != "not a repository" {
+            let remotes = git(&fixture, &source, &["remote"]);
+            assert_eq!(
+                remotes,
+                if case == "has origin" { "origin" } else { "" },
+                "{case}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_move_failing_after_publish_says_what_was_published_and_leaves_the_folder() {
+    let (fixture, gitconfig) = create_fixture();
+    remote_repository(&fixture, "demo");
+    let source = fixture.home.parent().unwrap().join("scratch/demo");
+    source_folder(&fixture, &source, true, true);
+    let owner = fixture.home.join("repos/org");
+    std::fs::create_dir_all(&owner).unwrap();
+    std::fs::set_permissions(&owner, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let output = run_create(
+        &fixture,
+        &gitconfig,
+        &[
+            "add",
+            "org/demo",
+            "--create",
+            "--from",
+            source.to_str().unwrap(),
+            "--register",
+        ],
+    );
+    std::fs::set_permissions(&owner, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_outcome(&output, 1, "");
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "org/demo: published github.com/org/demo from {}; move failed:",
+            source.display()
+        )) && stderr.contains("then `lager register github.com/org/demo`"),
+        "{stderr}"
+    );
+    assert!(created(&fixture));
+    assert_eq!(git(&fixture, &source, &["remote"]), "origin");
+    assert!(!owner.join("demo").exists());
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    assert!(!config.contains("[[repositories]]"), "{config}");
+}
+
+#[test]
+fn a_push_failing_after_gh_created_the_repository_says_it_was_created() {
+    let (fixture, gitconfig) = create_fixture();
+    fixture.set("push-fails", "");
+    let source = fixture.home.parent().unwrap().join("scratch/demo");
+    source_folder(&fixture, &source, true, true);
+    let output = run_create(
+        &fixture,
+        &gitconfig,
+        &[
+            "add",
+            "org/demo",
+            "--create",
+            "--from",
+            source.to_str().unwrap(),
+            "--no-register",
+        ],
+    );
+    assert_outcome(&output, 1, "");
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("org/demo: created github.com/org/demo; push failed: ")
+            && stderr.contains("rejected push")
+            && stderr.contains("origin is not set and ")
+            && stderr.contains("then `lager register github.com/org/demo`"),
+        "{stderr}"
+    );
+    assert_eq!(state(&source, "README.md"), "demo\n");
+    assert!(!fixture.home.join("repos/org/demo").exists());
+}
+
+#[test]
+fn a_post_clone_failing_after_the_move_says_what_was_done() {
+    let (fixture, gitconfig) = create_fixture();
+    remote_repository(&fixture, "demo");
+    let source = fixture.home.parent().unwrap().join("scratch/demo");
+    source_folder(&fixture, &source, true, true);
+    let output = run_create(
+        &fixture,
+        &gitconfig,
+        &[
+            "add",
+            "org/demo",
+            "--create",
+            "--from",
+            source.to_str().unwrap(),
+            "--post-clone",
+            "exit 3",
+        ],
+    );
+    assert_outcome(&output, 1, "org/demo: published\n");
+    let checkout = fixture.home.join("repos/org/demo");
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "published org/demo from {}; moved to {}; post_clone failed",
+            source.display(),
+            checkout.display()
+        )),
+        "{stderr}"
+    );
+    assert!(checkout.join(".git").is_dir());
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    assert!(config.contains("post_clone = \"exit 3\""), "{config}");
 }

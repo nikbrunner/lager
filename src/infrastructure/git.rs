@@ -999,6 +999,13 @@ impl WorktreeGit for NativeGit {
         .filter(|commit| !commit.is_empty())
     }
 
+    fn remotes(&self, repository: &Path) -> Result<Vec<String>, String> {
+        Ok(captured_text(git_at(repository).arg("remote"))?
+            .lines()
+            .map(str::to_owned)
+            .collect())
+    }
+
     fn branch_exists(&self, repository: &Path, name: &str) -> Result<bool, String> {
         let output = git_at(repository)
             .args(["show-ref", "--verify", "--quiet"])

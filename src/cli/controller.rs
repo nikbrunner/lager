@@ -13,6 +13,7 @@ use crate::application::{configuration, ports, remote, warehouse};
 use crate::domain::repository::RepositoryRef;
 use crate::infrastructure::{
     config::{CommandConfigStore, FileConfigStore},
+    filesystem::Filesystem,
     git::NativeGit,
     providers::ConfiguredProviders,
     shell::Shell,
@@ -287,6 +288,22 @@ fn add(
     } else {
         None
     };
+    if let (Some((_, destination)), Some(source)) = (&created, &args.from) {
+        let result = remote::settle_published(
+            &store,
+            &Shell,
+            path,
+            &args.repositories[0],
+            register,
+            post_clone.as_deref(),
+            source,
+            destination,
+        );
+        return match result {
+            Ok(()) => 0,
+            Err(error) => report_remote(&args.repositories[0], Err(error)),
+        };
+    }
     let selected = if args.repositories.is_empty() {
         match pick(
             &store,
@@ -450,20 +467,38 @@ fn create(path: &Path, args: &CloneArgs, home: &Path) -> Result<(String, PathBuf
     } else {
         ports::Visibility::Private
     };
-    let result = remote::create(
-        &config,
-        &providers,
-        &NativeGit,
-        &reference,
-        visibility,
-        args.description.as_deref(),
-        home,
-    );
+    let result = match &args.from {
+        Some(source) => remote::publish(
+            &config,
+            &providers,
+            &NativeGit,
+            &Filesystem,
+            &reference,
+            visibility,
+            args.description.as_deref(),
+            source,
+            home,
+        ),
+        None => remote::create(
+            &config,
+            &providers,
+            &NativeGit,
+            &reference,
+            visibility,
+            args.description.as_deref(),
+            home,
+        ),
+    };
     let destination = match result {
         Ok(destination) => destination,
         Err(error) => return Err(report_remote(repository, Err(error))),
     };
-    report_remote(repository, Ok("created"));
+    let outcome = if args.from.is_some() {
+        "published"
+    } else {
+        "created"
+    };
+    report_remote(repository, Ok(outcome));
     Ok((reference.identity(), destination))
 }
 

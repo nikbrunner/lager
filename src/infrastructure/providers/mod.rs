@@ -3,6 +3,7 @@ pub mod bitbucket_data_center;
 pub mod github;
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 use crate::application::ports::{
@@ -94,6 +95,17 @@ impl RemoteRepositories for ConfiguredProviders {
     ) -> Result<(), String> {
         self.remote(&reference.host)?
             .create(&reference.path, visibility, description)
+    }
+
+    fn publish(
+        &self,
+        reference: &RepositoryRef,
+        visibility: Visibility,
+        description: Option<&str>,
+        source: &Path,
+    ) -> Result<(), String> {
+        self.remote(&reference.host)?
+            .publish(&reference.path, visibility, description, source)
     }
 }
 

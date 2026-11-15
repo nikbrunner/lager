@@ -192,7 +192,7 @@ pub struct UnregisterArgs {
 
 #[derive(Debug, ClapArgs)]
 #[command(
-    after_help = "Examples:\n  lager add github.com/org/project --register\n  lager add github.com/org/project --no-register\n  lager add github.com/org/project --post-clone 'make setup'\n  lager add github.com/org/new --create --register"
+    after_help = "Examples:\n  lager add github.com/org/project --register\n  lager add github.com/org/project --no-register\n  lager add github.com/org/project --post-clone 'make setup'\n  lager add github.com/org/new --create --register\n  lager add github.com/org/new --create --from ./new --register"
 )]
 pub struct CloneArgs {
     #[arg(
@@ -235,6 +235,13 @@ pub struct CloneArgs {
         help = "Description of the created repository"
     )]
     pub description: Option<String>,
+    #[arg(
+        long,
+        value_name = "DIR",
+        requires = "create",
+        help = "Publish the local repository in DIR and move it into root"
+    )]
+    pub from: Option<PathBuf>,
 }
 
 #[derive(Debug, ClapArgs)]
