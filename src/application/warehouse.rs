@@ -1067,26 +1067,106 @@ where
         provider_errors,
         cancelled: false,
     };
+    let explicit: HashSet<String> = config
+        .repositories
+        .iter()
+        .filter_map(|declaration| RepositoryRef::parse(&declaration.url).ok())
+        .filter(|reference| !reference.is_wildcard())
+        .map(|reference| reference.identity())
+        .collect();
     let mut reporter = Some(reporter);
     for (reference, hook) in candidates {
-        let outcome = clone_reference(
-            store,
-            git,
-            hooks,
-            config_path,
-            &config,
-            &reference,
-            &reference.clone_url,
-            false,
-            hook.as_deref(),
-            home,
-            &mut reporter,
-        );
+        // A wildcard member was just listed by its provider; only a declaration can name a
+        // repository the provider does not have.
+        let declared_missing = explicit.contains(&reference.identity())
+            && destination(&config, &reference, home).is_ok_and(|path| {
+                git.classify_destination(&path, &reference.clone_url) == LocalState::Missing
+            });
+        // A declared repository's failure waits for the lookup: a skip replaces it.
+        let mut holding = HoldFailure {
+            inner: reporter
+                .as_mut()
+                .map(|reporter| &mut **reporter as &mut dyn EnsureReporter),
+            hold: declared_missing,
+            failed: None,
+        };
+        let outcome = {
+            let mut forwarded: Option<&mut dyn EnsureReporter> = Some(&mut holding);
+            clone_reference(
+                store,
+                git,
+                hooks,
+                config_path,
+                &config,
+                &reference,
+                &reference.clone_url,
+                false,
+                hook.as_deref(),
+                home,
+                &mut forwarded,
+            )
+        };
+        let failed = holding.failed.take();
+        // Only a failed clone asks the provider, so a repository the token cannot see still
+        // clones whenever Git reaches it.
+        let skipped = declared_missing
+            && !outcome.cancelled
+            && matches!(outcome.outcome.status, OperationStatus::Failed(_))
+            && matches!(providers.lookup(&reference), Ok(None));
+        if let Some((failed, error)) = failed.filter(|_| !skipped)
+            && let Some(reporter) = reporter.as_deref_mut()
+        {
+            reporter.report(EnsureEvent::CloneFailed {
+                reference: &failed,
+                error: &error,
+            });
+        }
+        if skipped {
+            let identity = reference.identity();
+            if let Some(reporter) = reporter.as_mut() {
+                reporter.skipped(
+                    &identity,
+                    &format!(
+                        "not on {} (or not visible to gh); `lager unregister {identity}` removes the declaration",
+                        reference.host
+                    ),
+                );
+            }
+            continue;
+        }
         if record_clone(&mut result, outcome) {
             break;
         }
     }
     Ok(result)
+}
+
+/// Forwards every event; with `hold`, a clone failure is kept for the caller to report or drop.
+struct HoldFailure<'r> {
+    inner: Option<&'r mut dyn EnsureReporter>,
+    hold: bool,
+    failed: Option<(String, String)>,
+}
+
+impl EnsureReporter for HoldFailure<'_> {
+    fn report(&mut self, event: EnsureEvent<'_>) {
+        match event {
+            EnsureEvent::CloneFailed { reference, error } if self.hold => {
+                self.failed = Some((reference.to_owned(), error.to_owned()));
+            }
+            other => {
+                if let Some(inner) = self.inner.as_deref_mut() {
+                    inner.report(other);
+                }
+            }
+        }
+    }
+
+    fn skipped(&mut self, reference: &str, note: &str) {
+        if let Some(inner) = self.inner.as_deref_mut() {
+            inner.skipped(reference, note);
+        }
+    }
 }
 
 pub fn hook<S, G, H>(
@@ -1583,6 +1663,7 @@ where
                 summaries.push(RepositorySummary {
                     reference: pattern,
                     archived: false,
+                    visibility: None,
                 });
             }
             continue;
@@ -2029,6 +2110,7 @@ mod tests {
         RepositorySummary {
             reference: RepositoryRef::parse(reference).unwrap(),
             archived,
+            visibility: None,
         }
     }
 

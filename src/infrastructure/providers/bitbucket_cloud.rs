@@ -222,6 +222,7 @@ fn summary(
     Ok(RepositorySummary {
         reference,
         archived: repository.is_archived.unwrap_or(false),
+        visibility: None,
     })
 }
 

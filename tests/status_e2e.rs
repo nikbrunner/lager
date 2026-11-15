@@ -179,6 +179,7 @@ fn expected_rows(fixture: &Fixture) -> Vec<Value> {
             "branch": fact("known", Some("main")),
             "changes": changes,
             "archived": null,
+            "remote": null,
             "warnings": warnings,
         })
     };
@@ -205,6 +206,7 @@ fn expected_rows(fixture: &Fixture) -> Vec<Value> {
             "branch": fact("not_applicable", None),
             "changes": fact("not_applicable", None),
             "archived": null,
+            "remote": null,
             "warnings": [],
         })
     };
@@ -318,6 +320,7 @@ fn expected_rows(fixture: &Fixture) -> Vec<Value> {
             "branch": fact("known", Some("main")),
             "changes": fact("clean", None),
             "archived": null,
+            "remote": null,
             "warnings": ["Identity is the exact path"],
         }),
         json!({
@@ -335,24 +338,25 @@ fn expected_rows(fixture: &Fixture) -> Vec<Value> {
             "branch": fact("not_applicable", None),
             "changes": fact("not_applicable", None),
             "archived": null,
+            "remote": null,
             "warnings": ["excludes skip"],
         }),
     ]
 }
 
 const EXPECTED_TABLE: &str = "\
-repository    path                     registration  checkout  origin                  branch  changes
-clean         ~/repos/org/clean        explicit      cloned    github.com/org/clean    main    clean
-dirty         ~/repos/org/dirty        explicit      cloned    github.com/org/dirty    main    1 modified
-missing       ~/repos/org/missing      explicit      missing   github.com/org/missing  —       —
-moved         ~/repos/org/moved        explicit      missing   github.com/org/moved    —       —
-clean (copy)  ~/repos/copies/clean     explicit      cloned    github.com/org/clean    main    clean
-moved         ~/repos/elsewhere/moved  explicit      cloned    github.com/org/moved    main    clean
-stray         ~/repos/other/stray      unregistered  cloned    github.com/other/stray  main    clean
-member        ~/repos/team/member      wildcard      cloned    github.com/team/member  main    clean
-skip          ~/repos/team/skip        excluded      cloned    github.com/team/skip    main    clean
-scratch       ~/repos/local/scratch    unregistered  cloned    No origin               main    clean
-team/*        —                        wildcard      —         github.com/team/*       —       —
+repository    local                    remote                  registration  status
+clean         ~/repos/org/clean        github.com/org/clean    explicit      main · clean
+dirty         ~/repos/org/dirty        github.com/org/dirty    explicit      main · 1 modified
+missing       missing                  github.com/org/missing  explicit      —
+moved         missing                  github.com/org/moved    explicit      —
+clean (copy)  ~/repos/copies/clean     github.com/org/clean    explicit      main · clean
+moved         ~/repos/elsewhere/moved  github.com/org/moved    explicit      main · clean
+stray         ~/repos/other/stray      github.com/other/stray  unregistered  main · clean
+member        ~/repos/team/member      github.com/team/member  wildcard      main · clean
+skip          ~/repos/team/skip        github.com/team/skip    excluded      main · clean
+scratch       ~/repos/local/scratch    no origin               unregistered  main · clean
+team/*        —                        github.com/team/*       wildcard      —
 ";
 
 #[test]
@@ -395,6 +399,7 @@ fn status_json_carries_every_fact_of_every_row() {
         "\"branch\"",
         "\"changes\"",
         "\"archived\"",
+        "\"remote\"",
         "\"warnings\"",
     ];
     let first_row = &text[text.find("\"rows\":[").unwrap()..];
@@ -461,7 +466,7 @@ fn empty_config_and_empty_root_print_the_header_and_an_empty_document() {
     assert_eq!(table.status.code(), Some(0), "{table:?}");
     assert_eq!(
         stdout(&table),
-        "repository  path  registration  checkout  origin  branch  changes\n"
+        "repository  local  remote  registration  status\n"
     );
     assert!(table.stderr.is_empty(), "{table:?}");
     let document = fixture.run(&["status", "--json"]);
@@ -544,7 +549,7 @@ fn control_characters_are_escaped_in_the_table_and_original_in_json() {
     assert!(!text.contains('\u{1b}') && !text.contains('\t'), "{text:?}");
     assert_eq!(
         text.lines().nth(1).unwrap(),
-        "tab\\there\\x1b[31mred  ~/repos/tab\\there\\x1b[31mred  unregistered  cloned    No origin  main    clean"
+        "tab\\there\\x1b[31mred  ~/repos/tab\\there\\x1b[31mred  no origin  unregistered  main · clean"
     );
     let document = fixture.run(&["status", "--json"]);
     assert!(!document.stdout.contains(&0x1b), "{document:?}");
@@ -636,8 +641,8 @@ fn a_missing_root_lists_as_empty_with_a_note_and_exits_zero() {
         assert_eq!(String::from_utf8_lossy(&output.stderr), note);
         assert_eq!(
             stdout(&output),
-            "repository  path              registration  checkout  origin               branch  changes\n\
-             repo        ~/repos/org/repo  explicit      missing   github.com/org/repo  —       —\n"
+            "repository  local    remote               registration  status\n\
+             repo        missing  github.com/org/repo  explicit      —\n"
         );
     }
     let output = support::lager(&home, &config)
@@ -818,17 +823,17 @@ url = "dc.example/project/*"
     );
     let bin = fixture._temp.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
-    let node = |name: &str, archived: bool| {
+    let node = |name: &str, archived: bool, private: bool| {
         format!(
-            r#"{{"name":"{name}","isArchived":{archived},"sshUrl":"git@github.com:org/{name}.git","owner":{{"login":"org"}}}}"#
+            r#"{{"name":"{name}","isArchived":{archived},"isPrivate":{private},"sshUrl":"git@github.com:org/{name}.git","owner":{{"login":"org"}}}}"#
         )
     };
     let nodes = [
-        node("active", false),
-        node("old", true),
-        node("skip", false),
-        node("explicit", false),
-        node("local", false),
+        node("active", false, false),
+        node("old", true, false),
+        node("skip", false, false),
+        node("explicit", false, true),
+        node("local", false, false),
     ]
     .join(",");
     let gh = bin.join("gh");
@@ -861,6 +866,7 @@ fn run_remote(fixture: &Fixture, bin: &Path, args: &[&str]) -> Output {
 fn remote_status_merges_members_applies_exclusions_and_keeps_rows_when_a_provider_fails() {
     let (fixture, bin) = remote_fixture();
     let remote_only = |name: &str, archived: bool| {
+        let remote = if archived { "archived" } else { "public" };
         json!({
             "kind": "declaration",
             "identity": format!("github.com/org/{name}"),
@@ -876,6 +882,7 @@ fn remote_status_merges_members_applies_exclusions_and_keeps_rows_when_a_provide
             "branch": fact("not_applicable", None),
             "changes": fact("not_applicable", None),
             "archived": archived,
+            "remote": remote,
             "warnings": ["covered by github.com/org/*"],
         })
     };
@@ -894,6 +901,7 @@ fn remote_status_merges_members_applies_exclusions_and_keeps_rows_when_a_provide
         "branch": fact("not_applicable", None),
         "changes": fact("not_applicable", None),
         "archived": false,
+        "remote": "private",
         "warnings": ["covered by github.com/org/*"],
     });
     let local = json!({
@@ -911,6 +919,7 @@ fn remote_status_merges_members_applies_exclusions_and_keeps_rows_when_a_provide
         "branch": fact("known", Some("main")),
         "changes": fact("clean", None),
         "archived": false,
+        "remote": "public",
         "warnings": ["covered by github.com/org/*"],
     });
     let pattern = |identity: &str, destination: &str, exclusions: Value, warnings: Value| {
@@ -929,6 +938,7 @@ fn remote_status_merges_members_applies_exclusions_and_keeps_rows_when_a_provide
             "branch": fact("not_applicable", None),
             "changes": fact("not_applicable", None),
             "archived": null,
+            "remote": null,
             "warnings": warnings,
         })
     };
@@ -988,12 +998,12 @@ fn remote_status_merges_members_applies_exclusions_and_keeps_rows_when_a_provide
     assert_eq!(
         stdout(&table),
         "\
-repository  path                  registration  checkout     origin                   branch  changes
-active      ~/repos/org/active    wildcard      remote only  github.com/org/active    —       —
-explicit    ~/repos/org/explicit  explicit      missing      github.com/org/explicit  —       —
-local       ~/repos/org/local     wildcard      cloned       github.com/org/local     main    clean
-project/*   —                     wildcard      —            dc.example/project/*     —       —
-org/*       —                     wildcard      —            github.com/org/*         —       —
+repository  local              remote                             registration  status
+active      remote only        github.com/org/active · public     wildcard      —
+explicit    missing            github.com/org/explicit · private  explicit      —
+local       ~/repos/org/local  github.com/org/local · public      wildcard      main · clean
+project/*   —                  dc.example/project/*               wildcard      —
+org/*       —                  github.com/org/*                   wildcard      —
 "
     );
     let archived_table = run_remote(
@@ -1005,13 +1015,13 @@ org/*       —                     wildcard      —            github.com/org/
     assert_eq!(
         stdout(&archived_table),
         "\
-repository      path                  registration  checkout     origin                   branch  changes
-active          ~/repos/org/active    wildcard      remote only  github.com/org/active    —       —
-explicit        ~/repos/org/explicit  explicit      missing      github.com/org/explicit  —       —
-old [archived]  ~/repos/org/old       wildcard      remote only  github.com/org/old       —       —
-local           ~/repos/org/local     wildcard      cloned       github.com/org/local     main    clean
-project/*       —                     wildcard      —            dc.example/project/*     —       —
-org/*           —                     wildcard      —            github.com/org/*         —       —
+repository  local              remote                             registration  status
+active      remote only        github.com/org/active · public     wildcard      —
+explicit    missing            github.com/org/explicit · private  explicit      —
+old         remote only        github.com/org/old · archived      wildcard      —
+local       ~/repos/org/local  github.com/org/local · public      wildcard      main · clean
+project/*   —                  dc.example/project/*               wildcard      —
+org/*       —                  github.com/org/*                   wildcard      —
 "
     );
     for alias in ["list", "ls"] {
@@ -1023,4 +1033,55 @@ org/*           —                     wildcard      —            github.com/
             assert_eq!(other.stderr, reference.stderr, "{alias} {flags:?}");
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn remote_status_looks_up_declared_repositories_the_catalog_does_not_list() {
+    let fixture = empty_fixture(
+        "root = \"repos\"\n\n[providers.\"github.com\"]\npreset = \"github\"\n\n\
+         [[repositories]]\nurl = \"github.com/org/gone\"\n\n\
+         [[repositories]]\nurl = \"github.com/org/kept\"\n",
+    );
+    let (bin, state) = support::install_fake_gh(fixture._temp.path());
+    fs::write(state.join("free"), "org/gone").unwrap();
+    let log = fixture._temp.path().join("gh-args");
+    let run = |args: &[&str]| {
+        support::lager_with_path(&fixture.home, &fixture.config, Some(&bin))
+            .env("GH_STATE", &state)
+            .env("GH_ARGS_LOG", &log)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+
+    let plain = run(&["status"]);
+    assert_eq!(plain.status.code(), Some(0), "{plain:?}");
+    assert!(!log.exists(), "plain status asked gh");
+
+    let document = run(&["status", "--remote", "--json"]);
+    assert_eq!(document.status.code(), Some(0), "{document:?}");
+    let rows = json(&document)["rows"].clone();
+    let remote = |identity: &str| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["identity"] == identity)
+            .map(|row| row["remote"].clone())
+            .unwrap()
+    };
+    assert_eq!(remote("github.com/org/gone"), json!("missing"));
+    assert_eq!(remote("github.com/org/kept"), json!("private"));
+
+    let table = run(&["status", "--remote"]);
+    assert_eq!(table.status.code(), Some(0), "{table:?}");
+    assert_eq!(
+        stdout(&table),
+        "\
+repository  local    remote                         registration  status
+gone        missing  github.com/org/gone · missing  explicit      —
+kept        missing  github.com/org/kept · private  explicit      —
+"
+    );
 }

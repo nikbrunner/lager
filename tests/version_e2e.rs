@@ -62,6 +62,8 @@ fn overlay_current_sources(source: &Path, destination: &Path) {
         "src/infrastructure/git.rs",
         "src/infrastructure/inventory.rs",
         "src/infrastructure/mod.rs",
+        "src/infrastructure/providers/bitbucket_cloud.rs",
+        "src/infrastructure/providers/bitbucket_data_center.rs",
         "src/infrastructure/providers/github.rs",
         "src/infrastructure/providers/mod.rs",
     ] {

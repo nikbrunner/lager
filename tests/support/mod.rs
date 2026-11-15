@@ -26,6 +26,10 @@ case "$1 $2" in
       printf '%s\n' "GraphQL: Could not resolve to a Repository with the name '$3'. (repository)" >&2
       exit 1
     fi
+    if [ -e "$GH_STATE/broken" ] && [ "$3" = "$(cat "$GH_STATE/broken")" ]; then
+      printf '%s\n' "HTTP 502: Bad Gateway (https://api.github.com/graphql)" >&2
+      exit 1
+    fi
     if [ -e "$GH_STATE/missing" ] && [ ! -e "$GH_STATE/created" ]; then
       printf '%s\n' "GraphQL: Could not resolve to a Repository with the name '$3'. (repository)" >&2
       exit 1
@@ -64,6 +68,10 @@ case "$1 $2" in
       git -C "$source" remote add origin "git@github.com:$3.git" || exit 1
       git -C "$source" push --quiet origin HEAD || exit 1
     fi
+    ;;
+  "api graphql")
+    # The catalog pages, or none.
+    if [ -e "$GH_STATE/catalog" ]; then cat "$GH_STATE/catalog"; else printf '[]\n'; fi
     ;;
   "api --hostname")
     printf 'HTTP/2.0 200 OK\r\n'

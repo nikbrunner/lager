@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -24,7 +25,9 @@ use crate::application::inventory::{
     self as model, CopyField, InventoryFilesystem, InventoryReport, LocalScan, Marks,
     SessionProblems,
 };
-use crate::application::ports::{Desktop, EnsureEvent, EnsureReporter, HookRunner};
+use crate::application::ports::{
+    Desktop, EnsureEvent, EnsureReporter, HookRunner, ProviderCatalog,
+};
 use crate::application::remote::{
     self, ProviderPhase, ProviderState, RemoteBounds, RemoteDiscovery,
 };
@@ -142,8 +145,18 @@ struct InventorySession {
     remote_rows: Vec<model::RowKey>,
     /// How many rows the catalogs added when remote discovery was last on.
     remote_cached: usize,
+    /// Per-repository lookups of declared GitHub rows the catalogs did not list, by identity;
+    /// `None` when the lookup failed. A refresh clears them.
+    lookups: HashMap<String, Option<model::RemoteStatus>>,
+    lookup_results: (mpsc::Sender<Lookup>, mpsc::Receiver<Lookup>),
     github: github::Remote,
 }
+
+/// One answered lookup: the identity and the provider's answer.
+type Lookup = (
+    String,
+    Result<Option<crate::application::ports::RemoteState>, String>,
+);
 
 /// The providers of a configuration that passed validation.
 fn configured_providers(config: &crate::domain::config::Config) -> ConfiguredProviders {
@@ -172,6 +185,8 @@ impl InventorySession {
             remote,
             remote_rows: Vec::new(),
             remote_cached: 0,
+            lookups: HashMap::new(),
+            lookup_results: mpsc::channel(),
             github: github::Remote::default(),
             config,
             config_path,
@@ -215,6 +230,8 @@ impl InventorySession {
             )?;
             if self.remote.enabled() {
                 self.remote_cached = self.remote_rows.len();
+                self.start_lookups(&report);
+                model::apply_lookups(&mut report, &self.lookups);
             }
             self.cached_report = Some(report);
         }
@@ -223,6 +240,53 @@ impl InventorySession {
             .as_ref()
             .expect("report was cached")
             .clone())
+    }
+
+    /// Looks up, off the UI loop, the declared GitHub rows a ready catalog did not list. Each
+    /// identity is looked up once until a refresh.
+    fn start_lookups(&mut self, report: &InventoryReport) {
+        let ready = |host: &str| {
+            self.remote
+                .providers()
+                .get(host)
+                .is_some_and(|provider| provider.phase == ProviderPhase::Ready)
+        };
+        let references = model::unlisted(report, &self.config, ready)
+            .into_iter()
+            .filter(|reference| !self.lookups.contains_key(&reference.identity()))
+            .collect::<Vec<_>>();
+        if references.is_empty() {
+            return;
+        }
+        for reference in &references {
+            self.lookups
+                .insert(reference.identity(), Some(model::RemoteStatus::Pending));
+        }
+        let config = self.config.clone();
+        let sender = self.lookup_results.0.clone();
+        let bound = RemoteBounds::default().request;
+        std::thread::spawn(move || {
+            let providers = std::sync::Arc::new(ConfiguredProviders::from_config(&config));
+            for reference in references {
+                let (done, answer) = mpsc::channel();
+                let (providers, asked) = (std::sync::Arc::clone(&providers), reference.clone());
+                std::thread::spawn(move || {
+                    let state = match &*providers {
+                        Ok(providers) => providers.lookup(&asked),
+                        Err(error) => Err(error.clone()),
+                    };
+                    let _ = done.send(state);
+                });
+                // shortcut: a lookup past its bound stays unknown while its gh runs on; make
+                // it cancellable like the catalog request if stalled lookups ever pile up.
+                let state = answer
+                    .recv_timeout(bound)
+                    .unwrap_or_else(|_| Err(format!("no response within {} s", bound.as_secs())));
+                if sender.send((reference.identity(), state)).is_err() {
+                    return;
+                }
+            }
+        });
     }
 
     fn event_is_current(&self, context: &ScanContext) -> bool {
@@ -234,6 +298,17 @@ impl InventorySession {
 
     fn receive_events(&mut self) {
         let (mut received, failures) = self.remote.poll();
+        while let Ok((identity, state)) = self.lookup_results.1.try_recv() {
+            if let Err(error) = &state {
+                self.problems.record(
+                    format!("lookup · {}", escape(&identity)),
+                    escape(model::problem_reason(error)),
+                );
+            }
+            self.lookups
+                .insert(identity, model::RemoteStatus::looked_up(state));
+            received = true;
+        }
         for failure in failures {
             self.problems.record(
                 format!("provider · {}", escape(&failure.provider)),
@@ -384,6 +459,7 @@ impl InventorySession {
     /// stays active. A scan in progress when a revision fails to load restarts with the
     /// previous configuration, since its events carry a revision that is no longer on disk.
     fn refresh(&mut self) -> Result<(), (String, &'static str)> {
+        self.lookups.clear();
         let installed = self.install_config();
         if installed.is_err() && !self.complete {
             self.worker.cancel();
@@ -1739,7 +1815,15 @@ impl TerminalSession {
                 }
                 if visible_rows.is_empty() {
                     frame.render_widget(
-                        repository_table(&[], &names, &session.marks, home, table.width, None),
+                        repository_table(
+                            &[],
+                            &names,
+                            &session.marks,
+                            home,
+                            table.width,
+                            None,
+                            session.remote.enabled(),
+                        ),
                         table,
                     );
                     let message = if !report.rows.is_empty() && !shown.query.is_empty() {
@@ -1772,6 +1856,7 @@ impl TerminalSession {
                             home,
                             table.width,
                             table_state.selected(),
+                            session.remote.enabled(),
                         ),
                         table,
                         &mut table_state,
@@ -3620,6 +3705,9 @@ fn inspection_widget(
         false,
     );
     field("Origin", escape(&row.origin), Style::default(), true);
+    if let Some(status) = row.remote_status {
+        field("Remote", status.label().to_owned(), Style::default(), false);
+    }
     for (name, observation, gloss) in [
         ("Branch", &row.branch, "not observed yet"),
         ("Changes", &row.changes, "status not observed yet"),
@@ -3665,6 +3753,7 @@ fn inspection_widget(
                 &LocalInventoryFilesystem,
             )
         });
+    let absent = clone.as_ref().ok().and_then(batch::AddPreview::absent);
     let clone = match clone.as_ref().map(|preview| {
         (
             preview.eligibility(AddChoice::Clone),
@@ -3683,6 +3772,7 @@ fn inspection_widget(
             format!("unavailable · {reason}")
         }
     };
+    let clone = absent.map_or(clone, |reason| format!("unavailable · {reason}"));
     lines.extend(field_lines("Clone", &clone, dim(), width));
     let remove = match (
         batch::removal_eligibility(row, BatchAction::Remove, config),
@@ -3914,6 +4004,7 @@ fn menu_lines(
                 };
             };
             let mut elsewhere = None;
+            let mut absent = None;
             let eligibility = if action.clones() {
                 match batch::clone_preview(
                     row,
@@ -3929,6 +4020,7 @@ fn menu_lines(
                             .as_ref()
                             .is_some_and(|found| *found != preview.destination)
                             .then(|| home_relative(&preview.destination, &session.home));
+                        absent = preview.absent();
                         preview.eligibility(if action == BatchAction::Clone {
                             AddChoice::Clone
                         } else {
@@ -3944,6 +4036,9 @@ fn menu_lines(
             } else {
                 batch::eligibility(row, action, &session.config)
             };
+            if let Some(reason) = absent {
+                return item(entry, label, reason, false);
+            }
             match (eligibility, elsewhere) {
                 (Eligibility::Available, Some(destination)) => {
                     item(entry, label, format!("clones at {destination}"), true)
@@ -5713,50 +5808,89 @@ fn fuzzy_subsequence(value: &str, query: &str) -> bool {
     wanted.is_none()
 }
 
-const WIDE_HEADINGS: [&str; 7] = [
-    "repository",
-    "path",
-    "registration",
-    "checkout",
-    "origin",
-    "branch",
-    "changes",
-];
+const HEADINGS: [&str; 5] = ["repository", "local", "remote", "registration", "status"];
 
-/// One row's cells in the wide grid's column order, with their tints. The compact grid drops
-/// path and origin.
-fn wide_cells(row: &model::InventoryRow, name: String, home: &Path) -> [(String, Style); 7] {
-    let path = if matches!(row.key, model::RowKey::Pattern(_)) {
-        "—".to_owned()
-    } else {
-        home_relative(Path::new(&row.path), home)
-    };
-    let name = if row.archived == Some(true) {
-        format!("{name} [archived]")
-    } else {
-        name
-    };
+/// One row's cells in the grid's column order, with their tints. The compact grid drops the
+/// origin from `remote` and the branch from `status`. `remote` says whether remote discovery is
+/// on.
+fn table_cells(
+    row: &model::InventoryRow,
+    name: String,
+    home: &Path,
+    compact: bool,
+    remote: bool,
+) -> [(String, Style); 5] {
     [
         (name, Style::default()),
-        (path, Style::default()),
+        local_cell(row, home),
+        remote_cell(row, compact, remote),
         (
             registration_text(&row.registration).to_owned(),
             registration_style(&row.registration),
         ),
-        (
-            checkout_text(&row.checkout).to_owned(),
-            checkout_style(&row.checkout),
-        ),
-        (origin_text(row), Style::default()),
-        (
-            observation_text(&row.branch),
-            observation_style(&row.branch),
-        ),
-        (
-            observation_text(&row.changes),
-            observation_style(&row.changes),
-        ),
+        status_cell(row, compact),
     ]
+}
+
+fn local_cell(row: &model::InventoryRow, home: &Path) -> (String, Style) {
+    if matches!(row.key, model::RowKey::Pattern(_)) {
+        return ("—".to_owned(), Style::default());
+    }
+    let path = home_relative(Path::new(&row.path), home);
+    match row.checkout {
+        model::CheckoutState::Cloned => (path, Style::default()),
+        model::CheckoutState::Missing => ("missing".to_owned(), warn()),
+        model::CheckoutState::RemoteOnly => ("remote only".to_owned(), dim()),
+        ref other => (
+            format!("{path} · {}", checkout_text(other)),
+            checkout_style(other),
+        ),
+    }
+}
+
+/// The origin, plus the provider's state while remote discovery is on and the state is known.
+fn remote_cell(row: &model::InventoryRow, compact: bool, remote: bool) -> (String, Style) {
+    if matches!(row.origin_fact, Some(model::OriginFact::Absent)) {
+        return ("no origin".to_owned(), dim());
+    }
+    let origin = origin_text(row);
+    let status = row
+        .remote_status
+        .filter(|_| remote && !matches!(row.key, model::RowKey::Pattern(_)));
+    let Some(status) = status else {
+        let text = if compact { "—".to_owned() } else { origin };
+        return (text, Style::default());
+    };
+    let style = match status {
+        model::RemoteStatus::Archived | model::RemoteStatus::Missing => warn(),
+        model::RemoteStatus::Pending => dim(),
+        model::RemoteStatus::Public | model::RemoteStatus::Private => Style::default(),
+    };
+    if compact {
+        (status.label().to_owned(), style)
+    } else {
+        (format!("{origin} · {}", status.label()), style)
+    }
+}
+
+fn status_cell(row: &model::InventoryRow, compact: bool) -> (String, Style) {
+    let changes = observation_text(&row.changes);
+    let branch = observation_text(&row.branch);
+    if let model::ObservationField::Error(_) = row.branch {
+        let text = if compact || branch == changes {
+            branch
+        } else {
+            format!("{branch} · {changes}")
+        };
+        return (text, tint(Color::Red));
+    }
+    let style = observation_style(&row.changes);
+    if compact || matches!(row.branch, model::ObservationField::NotApplicable) || branch == changes
+    {
+        (changes, style)
+    } else {
+        (format!("{branch} · {changes}"), style)
+    }
 }
 
 fn repository_table(
@@ -5766,35 +5900,20 @@ fn repository_table(
     home: &Path,
     width: u16,
     selected: Option<usize>,
+    remote: bool,
 ) -> Table<'static> {
     let compact = width < WIDE_TABLE;
-    // Column widths from the canvas grid (term.css `g7` and `g5`), padding included.
-    let (headings, mut widths, flexible): (&[&str], Vec<u16>, &[usize]) = if compact {
-        (
-            &[
-                "repository",
-                "registration",
-                "checkout",
-                "branch",
-                "changes",
-            ],
-            vec![23, 15, 13, 13, 14],
-            &[0],
-        )
+    let headings = &HEADINGS;
+    // Column widths, padding included.
+    let (mut widths, flexible): (Vec<u16>, &[usize]) = if compact {
+        (vec![23, 18, 11, 14, 12], &[1])
     } else {
-        (&WIDE_HEADINGS, vec![25, 27, 15, 13, 24, 13, 13], &[1, 4])
+        (vec![25, 27, 38, 15, 25], &[1, 2])
     };
     let slot = |column: usize| if column == 0 { MARK_SLOT } else { 0 };
     let cells = rows
         .iter()
-        .map(|row| {
-            let mut cells = Vec::from(wide_cells(row, names[&row.key].clone(), home));
-            if compact {
-                cells.remove(4);
-                cells.remove(1);
-            }
-            cells
-        })
+        .map(|row| table_cells(row, names[&row.key].clone(), home, compact, remote))
         .collect::<Vec<_>>();
     // Width beyond the grid first lets truncated cells grow, then goes to the flexible columns.
     let mut spare = width
@@ -5839,12 +5958,13 @@ fn repository_table(
                     .into_iter()
                     .enumerate()
                     .map(|(column, (value, style))| {
-                        // Path cells keep their tail: it is what tells duplicate checkouts apart.
+                        // Local and remote cells keep their tail: it tells duplicate checkouts
+                        // apart and carries the remote state.
                         let room = usize::from(widths[column]).saturating_sub(2 + slot(column));
                         let text = if column == 0 {
                             abbreviate_name(&value, room)
                         } else {
-                            abbreviate(&value, room, !compact && column == 1)
+                            abbreviate(&value, room, matches!(column, 1 | 2))
                         };
                         // Reverse video carries the selection, so the selected row drops its tints.
                         let style = if selected == Some(index) {
@@ -6038,6 +6158,8 @@ mod tests {
             ),
             remote_rows: Vec::new(),
             remote_cached: 0,
+            lookups: Default::default(),
+            lookup_results: std::sync::mpsc::channel(),
             github: super::github::Remote::default(),
         };
 
@@ -6066,6 +6188,7 @@ mod tests {
             warnings: Vec::new(),
             markable: false,
             archived: None,
+            remote_status: None,
         };
         let alpha = row("github.com/org/alpha/*");
         let beta = row("github.com/org/beta/*");
@@ -6100,6 +6223,7 @@ mod tests {
             warnings: Vec::new(),
             markable: false,
             archived: None,
+            remote_status: None,
         };
         let alpha = row("alpha");
         let beta = row("beta");
@@ -6140,6 +6264,7 @@ mod tests {
             warnings: Vec::new(),
             markable: true,
             archived: None,
+            remote_status: None,
         }
     }
 

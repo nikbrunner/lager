@@ -133,6 +133,7 @@ impl BitbucketDataCenter {
         Ok(RepositorySummary {
             reference,
             archived: repository.archived.unwrap_or(false),
+            visibility: None,
         })
     }
 

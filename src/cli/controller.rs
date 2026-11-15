@@ -528,6 +528,7 @@ fn create(
 #[derive(Default)]
 struct TerminalEnsureReporter {
     destination: Option<PathBuf>,
+    skipped: usize,
 }
 
 impl EnsureReporter for TerminalEnsureReporter {
@@ -557,6 +558,11 @@ impl EnsureReporter for TerminalEnsureReporter {
             }
         };
         let _ = result;
+    }
+
+    fn skipped(&mut self, reference: &str, note: &str) {
+        self.skipped += 1;
+        let _ = cliclack::log::warning(format!("{}: skipped, {}", escape(reference), escape(note)));
     }
 }
 
@@ -594,7 +600,7 @@ fn ensure(path: &Path, args: EnsureArgs) -> i32 {
     ) {
         Ok(outcome) => {
             print_provider_failures(&outcome);
-            print_ensure_summary(&outcome);
+            print_ensure_summary(&outcome, reporter.skipped);
             if outcome.cancelled {
                 130
             } else {
@@ -618,7 +624,7 @@ fn print_provider_failures(outcome: &warehouse::BatchOutcome) {
     }
 }
 
-fn print_ensure_summary(outcome: &warehouse::BatchOutcome) {
+fn print_ensure_summary(outcome: &warehouse::BatchOutcome, skipped: usize) {
     let cloned = outcome
         .outcomes
         .iter()
@@ -641,6 +647,9 @@ fn print_ensure_summary(outcome: &warehouse::BatchOutcome) {
     }
     if present > 0 {
         parts.push(format!("{present} already present"));
+    }
+    if skipped > 0 {
+        parts.push(format!("{skipped} skipped"));
     }
     if failed > 0 {
         parts.push(format!("{failed} failed"));

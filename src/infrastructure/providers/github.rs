@@ -71,6 +71,8 @@ struct ViewedRepository {
 struct Repository {
     #[serde(rename = "isArchived")]
     is_archived: bool,
+    #[serde(rename = "isPrivate")]
+    is_private: Option<bool>,
     #[serde(rename = "sshUrl")]
     ssh_url: String,
 }
@@ -217,7 +219,17 @@ impl Github {
         }
     }
 
+    /// The repository at exactly `path`; a former name that redirects is `None`.
     pub fn state(&self, path: &str) -> Result<Option<RemoteState>, String> {
+        // gh follows GitHub's redirect from a former name to the renamed repository.
+        Ok(self
+            .lookup(path)?
+            .filter(|state| state.name.eq_ignore_ascii_case(path)))
+    }
+
+    /// The repository `path` reaches, following a redirect from a former name; `name` is the
+    /// name GitHub answers with.
+    pub fn lookup(&self, path: &str) -> Result<Option<RemoteState>, String> {
         let output = match self.gh(&[
             "repo",
             "view",
@@ -235,10 +247,6 @@ impl Github {
         };
         let viewed: ViewedRepository = serde_json::from_str(&output)
             .map_err(|error| format!("could not parse gh response: {error}"))?;
-        // gh follows GitHub's redirect from a former name to the renamed repository.
-        if !viewed.name_with_owner.eq_ignore_ascii_case(path) {
-            return Ok(None);
-        }
         let visibility = match viewed.visibility.to_ascii_lowercase().as_str() {
             "public" => Visibility::Public,
             "private" => Visibility::Private,
@@ -374,6 +382,13 @@ fn summary(
     Ok(RepositorySummary {
         reference,
         archived: repository.is_archived,
+        visibility: repository.is_private.map(|private| {
+            if private {
+                Visibility::Private
+            } else {
+                Visibility::Public
+            }
+        }),
     })
 }
 
@@ -400,7 +415,7 @@ mod tests {
             r##"#!/bin/sh
 printf '%s' "$*" > "$GH_DIRECT_ARGS"
 cat <<'JSON'
-[{"data":{"viewer":{"repositories":{"nodes":[{"name":"active","isArchived":false,"sshUrl":"ssh://returned@ghe.example:2222/org/active.git","owner":{"login":"org"}},{"name":"old","isArchived":true,"sshUrl":"ssh://returned@ghe.example:2222/org/old.git","owner":{"login":"org"}}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}},{"data":{"viewer":{"repositories":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]
+[{"data":{"viewer":{"repositories":{"nodes":[{"name":"active","isArchived":false,"isPrivate":true,"sshUrl":"ssh://returned@ghe.example:2222/org/active.git","owner":{"login":"org"}},{"name":"old","isArchived":true,"sshUrl":"ssh://returned@ghe.example:2222/org/old.git","owner":{"login":"org"}}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}},{"data":{"viewer":{"repositories":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]
 JSON
 "##,
         )
@@ -419,7 +434,11 @@ JSON
             active[0].reference.clone_url,
             "ssh://forge@ghe.example:2222/org/active.git"
         );
-        assert_eq!(provider.catalog(true).unwrap().len(), 2);
+        assert_eq!(active[0].visibility, Some(Visibility::Private));
+        let all = provider.catalog(true).unwrap();
+        assert_eq!(all.len(), 2);
+        // A response without isPrivate leaves the visibility unknown, never public.
+        assert_eq!(all[1].visibility, None);
         let args = std::fs::read_to_string(log).unwrap();
         assert!(args.contains("--hostname ghe.example"));
         assert!(args.contains("--paginate"));

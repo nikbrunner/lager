@@ -424,8 +424,13 @@ fn human_rows_and_unknown_keys_escape_controls_while_json_preserves_values() {
             String::from_utf8_lossy(&human.stderr).lines().count(),
             if with_nul { 4 } else { 3 }
         );
-        assert!(stdout.contains("\\x1b"));
-        assert_eq!(stdout.contains("\\x00"), with_nul, "{stdout}");
+        // The missing checkout's row shows `missing`, not the root; the warnings carry the
+        // escaped controls.
+        let stderr = String::from_utf8_lossy(&human.stderr);
+        assert!(
+            stderr.contains("\\x1b") && stderr.contains("\\x00"),
+            "{stderr}"
+        );
         let json = support::lager(temp.path(), &config)
             .args(["list", "--json"])
             .output()

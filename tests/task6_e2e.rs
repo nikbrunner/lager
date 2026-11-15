@@ -40,7 +40,7 @@ fn ls_matches_empty_list_in_human_and_json_formats() -> TestResult {
         if flags.is_empty() {
             assert_eq!(
                 String::from_utf8(listed.stdout)?,
-                "repository  path  registration  checkout  origin  branch  changes\n"
+                "repository  local  remote  registration  status\n"
             );
         } else {
             let document: Value = serde_json::from_slice(&listed.stdout)?;
@@ -118,6 +118,7 @@ fn offline_json_list_is_single_versioned_document_with_wildcard_metadata() -> Te
                     "branch": not_applicable,
                     "changes": not_applicable,
                     "archived": null,
+                    "remote": null,
                     "warnings": [],
                 },
                 {
@@ -135,6 +136,7 @@ fn offline_json_list_is_single_versioned_document_with_wildcard_metadata() -> Te
                     "branch": not_applicable,
                     "changes": not_applicable,
                     "archived": null,
+                    "remote": null,
                     "warnings": ["excludes skip"],
                 },
             ],
@@ -146,9 +148,9 @@ fn offline_json_list_is_single_versioned_document_with_wildcard_metadata() -> Te
     assert_eq!(
         String::from_utf8(human.stdout)?,
         "\
-repository  path              registration  checkout  origin               branch  changes
-repo        ~/repos/org/repo  explicit      missing   github.com/org/repo  —       —
-team/*      —                 wildcard      —         github.com/team/*    —       —
+repository  local    remote               registration  status
+repo        missing  github.com/org/repo  explicit      —
+team/*      —        github.com/team/*    wildcard      —
 "
     );
     Ok(())
@@ -241,20 +243,26 @@ fn ls_matches_offline_list_for_every_local_state() -> TestResult {
     let human = list_with_alias_parity(&config, &home, &[]);
     assert!(human.status.success());
     let human = String::from_utf8(human.stdout)?;
-    let checkouts: Vec<_> = human
+    let locals: Vec<_> = human
         .lines()
         .skip(1)
-        .map(|line| line.split_whitespace().nth(3).unwrap())
+        .map(|line| {
+            line.split("  ")
+                .map(str::trim)
+                .filter(|cell| !cell.is_empty())
+                .nth(1)
+                .unwrap()
+        })
         .collect();
     assert_eq!(
-        checkouts,
+        locals,
         [
-            "unreadable",
-            "cloned",
-            "conflict",
+            "~/repos/blocked/unreadable · unreadable",
+            "~/repos/org/cloned",
+            "~/repos/org/conflict · conflict",
             "missing",
-            "unknown",
-            "cloned"
+            "~/repos/org/plain · unknown",
+            "~/repos/org/conflict"
         ],
         "{human}"
     );

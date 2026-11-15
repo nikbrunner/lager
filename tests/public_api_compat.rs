@@ -68,6 +68,7 @@ fn original_shapes() {
     let _ = RepositorySummary {
         reference: reference.clone(),
         archived: false,
+        visibility: None,
     };
     let candidate = SelectionCandidate {
         reference,

@@ -1264,6 +1264,7 @@ mod tests {
         RepositorySummary {
             reference: RepositoryRef::parse(identity).unwrap(),
             archived: false,
+            visibility: None,
         }
     }
 

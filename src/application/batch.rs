@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::application::inventory::{
-    CheckoutState, InventoryFilesystem, InventoryRow, ObservationField, RowKey,
+    CheckoutState, InventoryFilesystem, InventoryRow, ObservationField, RemoteStatus, RowKey,
     configured_destination, wildcard_relative,
 };
 use crate::application::ports::{
@@ -127,6 +127,8 @@ pub struct AddPreview {
     pub pending: bool,
     pub registration: Registration,
     pub hook: Option<String>,
+    /// The host a lookup found without this repository.
+    pub missing_on: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +204,7 @@ pub fn add_preview(
         destination,
         checkout,
         hook,
+        missing_on: None,
     })
 }
 
@@ -230,6 +233,15 @@ impl AddPreview {
             }
             _ => Eligibility::Available,
         }
+    }
+
+    /// Why a clone cannot start although the destination allows one: the provider has no
+    /// repository there. A checkout already at the destination needs no clone.
+    pub fn absent(&self) -> Option<String> {
+        self.missing_on
+            .as_ref()
+            .filter(|_| self.checkout != CheckoutState::Cloned)
+            .map(|host| format!("not found on {host}"))
     }
 
     /// The Register target, frozen like a row's: a checkout observed at the destination must
@@ -271,7 +283,7 @@ impl AddPreview {
             Eligibility::Unavailable(reason) => (Some(reason.to_owned()), None),
         };
         BatchTarget {
-            blocked,
+            blocked: self.absent().or(blocked),
             noop,
             ..self.target(name)
         }
@@ -308,7 +320,14 @@ pub fn clone_preview(
         RowKey::Pattern(_) => return Err("patterns are inspect-only"),
         _ => row_reference(row).ok_or(unsupported)?,
     };
-    add_preview(&reference, config, root, rows, scan_complete, filesystem).map_err(|_| unsupported)
+    let mut preview = add_preview(&reference, config, root, rows, scan_complete, filesystem)
+        .map_err(|_| unsupported)?;
+    if row.remote_status == Some(RemoteStatus::Missing) {
+        preview.missing_on = RepositoryRef::parse(&reference)
+            .ok()
+            .map(|parsed| parsed.host);
+    }
+    Ok(preview)
 }
 
 /// Registration is identity-scoped: only an identity known from configuration or a supported
@@ -1583,6 +1602,7 @@ mod tests {
             warnings: Vec::new(),
             markable: true,
             archived: None,
+            remote_status: None,
         };
         let config = CountingStore::default().load(Path::new("config")).unwrap();
         assert_eq!(
@@ -1864,6 +1884,7 @@ mod tests {
             warnings: Vec::new(),
             markable: true,
             archived: None,
+            remote_status: None,
         };
         let declared = |name: &str| RowKey::Declaration {
             identity: format!("github.com/org/{name}"),

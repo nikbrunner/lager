@@ -1495,3 +1495,79 @@ fn a_declaration_failing_after_the_move_names_what_was_done_and_what_is_left() {
         "git@github.com:org/demo-cli.git"
     );
 }
+
+fn declaring(repository: &str) -> Fixture {
+    Fixture::new(&format!(
+        "[providers.\"github.com\"]\npreset = \"github\"\n\n[[repositories]]\nurl = \"{repository}\"\n"
+    ))
+}
+
+/// The clone runs first; only its failure asks gh.
+#[test]
+fn ensure_skips_a_declaration_github_does_not_have_and_exits_zero() {
+    let fixture = declaring("github.com/org/gone");
+    fixture.set("missing", "");
+    let output = fixture.run(&["ensure"]);
+    let printed = text(&output.stdout) + &text(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{printed}");
+    assert!(
+        printed.contains(
+            "github.com/org/gone: skipped, not on github.com (or not visible to gh); `lager unregister github.com/org/gone` removes the declaration"
+        ),
+        "{printed}"
+    );
+    assert!(printed.contains("1 skipped"), "{printed}");
+    // The skip replaces the clone's failure; it is never reported as failed.
+    assert!(!printed.contains("Failed"), "{printed}");
+    assert!(!fixture.home.join("repos/org/gone").exists());
+    assert_eq!(
+        fixture.calls(),
+        ["github.com repo view org/gone --json nameWithOwner,isArchived,visibility"]
+    );
+    // The hint names a spelling unregister accepts.
+    let unregistered = fixture.run(&["unregister", "github.com/org/gone"]);
+    assert_eq!(
+        unregistered.status.code(),
+        Some(0),
+        "{}",
+        text(&unregistered.stderr)
+    );
+    assert!(
+        !std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .contains("org/gone")
+    );
+}
+
+#[test]
+fn ensure_keeps_the_failure_when_gh_finds_the_repository() {
+    let fixture = declaring("github.com/org/here");
+    let output = fixture.run(&["ensure"]);
+    let printed = text(&output.stdout) + &text(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{printed}");
+    assert!(
+        printed.contains("Failed") && printed.contains("org/here"),
+        "{printed}"
+    );
+    assert!(!printed.contains("skipped"), "{printed}");
+    assert_eq!(
+        fixture.calls(),
+        ["github.com repo view org/here --json nameWithOwner,isArchived,visibility"]
+    );
+}
+
+#[test]
+fn ensure_without_gh_tries_the_clone_as_before() {
+    let fixture = declaring("github.com/org/gone");
+    let output = support::lager(&fixture.home, &fixture.config)
+        .arg("ensure")
+        .output()
+        .unwrap();
+    let printed = text(&output.stdout) + &text(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{printed}");
+    assert!(
+        printed.contains("Failed") && printed.contains("org/gone"),
+        "{printed}"
+    );
+    assert!(!printed.contains("skipped"), "{printed}");
+}

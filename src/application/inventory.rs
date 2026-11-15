@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::application::ports::{ProviderCatalog, ProviderFailure};
+use crate::application::ports::{ProviderCatalog, ProviderFailure, RemoteState, Visibility};
 use crate::domain::config::{Config, RepositoryDeclaration};
 use crate::domain::repository::{RepositoryRef, RepositorySummary};
 
@@ -37,6 +37,52 @@ pub struct InventoryRow {
     pub markable: bool,
     /// Whether the provider reports the repository as archived; `None` until a provider says.
     pub archived: Option<bool>,
+    /// What the provider holds at the row's repository; `None` while nothing tells.
+    pub remote_status: Option<RemoteStatus>,
+}
+
+/// A repository's state on its provider, as a catalog or a per-repository lookup reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteStatus {
+    Public,
+    Private,
+    /// Wins over the visibility.
+    Archived,
+    /// A lookup found no repository there. A catalog never tells, since it lists only what
+    /// the account sees.
+    Missing,
+    /// A lookup is running.
+    Pending,
+}
+
+impl RemoteStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Private => "private",
+            Self::Archived => "archived",
+            Self::Missing => "missing",
+            Self::Pending => "checking",
+        }
+    }
+
+    fn of(archived: bool, visibility: Option<Visibility>) -> Option<Self> {
+        match (archived, visibility) {
+            (true, _) => Some(Self::Archived),
+            (false, Some(Visibility::Public)) => Some(Self::Public),
+            (false, Some(Visibility::Private | Visibility::Internal)) => Some(Self::Private),
+            (false, None) => None,
+        }
+    }
+
+    /// The outcome of a per-repository lookup; an error leaves the state unknown.
+    pub fn looked_up(state: Result<Option<RemoteState>, String>) -> Option<Self> {
+        match state {
+            Ok(Some(state)) => Self::of(state.archived, Some(state.visibility)),
+            Ok(None) => Some(Self::Missing),
+            Err(_) => None,
+        }
+    }
 }
 
 /// A row key deliberately preserves the observed platform path. Display strings are lossy.
@@ -237,6 +283,7 @@ pub fn build_inventory(
                 warnings: relationships,
                 markable: true,
                 archived: None,
+                remote_status: None,
             },
         );
     }
@@ -268,6 +315,7 @@ pub fn build_inventory(
                     .collect(),
                 markable: false,
                 archived: None,
+                remote_status: None,
             },
         );
     }
@@ -301,6 +349,7 @@ pub fn build_inventory(
                 warnings: Vec::new(),
                 markable: true,
                 archived: None,
+                remote_status: None,
             },
         );
     }
@@ -326,6 +375,7 @@ pub fn build_inventory(
                 warnings: vec!["Target changed before its Git observation completed".to_owned()],
                 markable: true,
                 archived: None,
+                remote_status: None,
             },
         );
     }
@@ -419,6 +469,7 @@ pub fn build_inventory(
                     warnings,
                     markable: true,
                     archived: None,
+                    remote_status: None,
                 },
             );
         } else {
@@ -450,6 +501,7 @@ pub fn build_inventory(
                     warnings,
                     markable: true,
                     archived: None,
+                    remote_status: None,
                 },
             );
         }
@@ -638,9 +690,11 @@ fn merge_members(
     members.sort_by_key(|member| member.reference.identity());
     for member in members {
         let identity = member.reference.identity();
+        let remote_status = RemoteStatus::of(member.archived, member.visibility);
         let mut known = false;
         for &index in rows_by_identity.get(&identity).into_iter().flatten() {
             report.rows[index].archived = Some(member.archived);
+            report.rows[index].remote_status = remote_status;
             known = true;
         }
         if known || member.archived && !include_archived {
@@ -680,9 +734,56 @@ fn merge_members(
             warnings: relationships,
             markable: true,
             archived: Some(member.archived),
+            remote_status,
         });
     }
     added
+}
+
+/// The repositories of declared rows on a github provider whose catalog is ready but did not
+/// list them. Only a per-repository lookup tells whether they exist: a catalog lists what the
+/// account sees, so a repository of another owner is absent from it.
+pub fn unlisted(
+    report: &InventoryReport,
+    config: &Config,
+    ready: impl Fn(&str) -> bool,
+) -> Vec<RepositoryRef> {
+    let mut seen = HashSet::new();
+    report
+        .rows
+        .iter()
+        .filter(|row| {
+            row.archived.is_none()
+                && matches!(
+                    row.registration,
+                    RegistrationState::Explicit | RegistrationState::Wildcard { .. }
+                )
+        })
+        .filter_map(|row| RepositoryRef::parse(row_identity(row)?).ok())
+        .filter(|reference| {
+            let host = reference.host.to_ascii_lowercase();
+            !reference.is_wildcard()
+                && config
+                    .providers
+                    .get(&host)
+                    .is_some_and(|provider| provider.preset == "github")
+                && ready(&host)
+        })
+        .filter(|reference| seen.insert(reference.identity()))
+        .collect()
+}
+
+/// Applies per-repository lookups, by identity, to the rows no catalog listed: a catalog's
+/// answer always wins. A lookup that answered `None` left the state unknown.
+pub fn apply_lookups(
+    report: &mut InventoryReport,
+    lookups: &HashMap<String, Option<RemoteStatus>>,
+) {
+    for row in report.rows.iter_mut().filter(|row| row.archived.is_none()) {
+        if let Some(status) = row_identity(row).and_then(|identity| *lookups.get(identity)?) {
+            row.remote_status = Some(status);
+        }
+    }
 }
 
 fn row_identity(row: &InventoryRow) -> Option<&str> {
@@ -1135,6 +1236,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_lookup_error_is_unknown_and_only_an_empty_answer_is_missing() {
+        let state = |archived, visibility| RemoteState {
+            name: "org/new".to_owned(),
+            archived,
+            visibility,
+        };
+        assert_eq!(RemoteStatus::looked_up(Err("HTTP 502".to_owned())), None);
+        assert_eq!(
+            RemoteStatus::looked_up(Ok(None)),
+            Some(RemoteStatus::Missing)
+        );
+        assert_eq!(
+            RemoteStatus::looked_up(Ok(Some(state(true, Visibility::Public)))),
+            Some(RemoteStatus::Archived)
+        );
+        assert_eq!(
+            RemoteStatus::looked_up(Ok(Some(state(false, Visibility::Internal)))),
+            Some(RemoteStatus::Private)
+        );
+        assert_eq!(
+            RemoteStatus::looked_up(Ok(Some(state(false, Visibility::Public)))),
+            Some(RemoteStatus::Public)
+        );
+    }
+
+    #[test]
     fn row_keys_preserve_non_utf8_paths_that_share_a_lossy_display() {
         #[cfg(unix)]
         {
@@ -1303,6 +1430,7 @@ mod tests {
             declaration: None,
             warnings: Vec::new(),
             archived: None,
+            remote_status: None,
         }
     }
 
@@ -1509,6 +1637,7 @@ mod tests {
         RepositorySummary {
             reference: RepositoryRef::parse(url).unwrap(),
             archived,
+            visibility: None,
         }
     }
 

@@ -115,6 +115,9 @@ pub enum EnsureEvent<'a> {
 
 pub trait EnsureReporter {
     fn report(&mut self, event: EnsureEvent<'_>);
+
+    /// `ensure` left `reference` alone; `note` says why and what removes the declaration.
+    fn skipped(&mut self, _reference: &str, _note: &str) {}
 }
 
 pub trait GitClient {
@@ -218,6 +221,16 @@ pub trait ProviderCatalog {
         include_archived: bool,
     ) -> Result<Vec<crate::domain::repository::RepositorySummary>, String>;
 
+    /// Whether one repository exists and in which state, following a redirect from a former
+    /// name; `None` when the provider has no repository there or does not show it. An error
+    /// means the state is unknown, also for a provider without lookups.
+    fn lookup(
+        &self,
+        _reference: &crate::domain::repository::RepositoryRef,
+    ) -> Result<Option<RemoteState>, String> {
+        Err("this provider has no repository lookup".to_owned())
+    }
+
     fn catalog_with_failures(
         &self,
         include_archived: bool,
@@ -269,23 +282,7 @@ pub trait ProviderSource: Send + Sync + 'static {
     ) -> ProviderAnswer;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Visibility {
-    Public,
-    Private,
-    /// Visible to an enterprise's members; lager never sets it.
-    Internal,
-}
-
-impl Visibility {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Public => "public",
-            Self::Private => "private",
-            Self::Internal => "internal",
-        }
-    }
-}
+pub use crate::domain::repository::Visibility;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteState {

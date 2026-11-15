@@ -1,14 +1,15 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use ratatui::text::Line;
 use serde::Serialize;
 
-use super::{WIDE_HEADINGS, home_relative, short_names, wide_cells};
+use super::{HEADINGS, home_relative, short_names, table_cells};
 use crate::application::inventory::{
     self as model, InventoryRow, ObservationField, OriginFact, RegistrationState, RowKey,
 };
-use crate::application::ports::ConfigStore;
+use crate::application::ports::{ConfigStore, ProviderCatalog};
 use crate::cli::args::StatusArgs;
 use crate::domain::config::Config;
 use crate::infrastructure::config::CommandConfigStore;
@@ -83,12 +84,39 @@ pub(crate) fn run(config_path: &Path, args: StatusArgs) -> i32 {
         ) {
             Ok(failures) => {
                 complete &= failures.is_empty();
+                let failed = failures
+                    .iter()
+                    .map(|failure| failure.provider.to_ascii_lowercase())
+                    .collect::<Vec<_>>();
                 problems.extend(failures.into_iter().map(|failure| Problem {
                     source: "provider",
                     subject: failure.provider,
                     message: failure.error,
                     path: None,
-                }))
+                }));
+                // A declared repository its catalog did not list may still exist, or be gone.
+                let mut lookups = HashMap::new();
+                let ready = |host: &str| !failed.iter().any(|failed| failed == host);
+                for reference in model::unlisted(&report, &config, ready) {
+                    match providers.lookup(&reference) {
+                        Ok(state) => {
+                            lookups.insert(
+                                reference.identity(),
+                                model::RemoteStatus::looked_up(Ok(state)),
+                            );
+                        }
+                        Err(error) => {
+                            complete = false;
+                            problems.push(Problem {
+                                source: "lookup",
+                                subject: reference.identity(),
+                                message: error,
+                                path: None,
+                            });
+                        }
+                    }
+                }
+                model::apply_lookups(&mut report, &lookups);
             }
             Err(error) => return fail(error),
         }
@@ -113,10 +141,10 @@ pub(crate) fn run(config_path: &Path, args: StatusArgs) -> i32 {
             Err(error) => return fail(format!("could not render status: {error}")),
         }
     } else {
-        table(
-            rows.iter()
-                .map(|row| wide_cells(row, names[&row.key].clone(), &home).map(|(cell, _)| cell)),
-        )
+        table(rows.iter().map(|row| {
+            table_cells(row, names[&row.key].clone(), &home, false, args.remote)
+                .map(|(cell, _)| cell)
+        }))
     };
     let written = std::io::stdout().lock().write_all(stdout.as_bytes());
     for problem in notes.iter().chain(&problems) {
@@ -133,12 +161,12 @@ pub(crate) fn run(config_path: &Path, args: StatusArgs) -> i32 {
 }
 
 /// Aligns the cells under the wide grid's headings, two spaces apart, never truncated.
-fn table(rows: impl Iterator<Item = [String; 7]>) -> String {
-    let lines = std::iter::once(WIDE_HEADINGS.map(str::to_owned))
+fn table(rows: impl Iterator<Item = [String; 5]>) -> String {
+    let lines = std::iter::once(HEADINGS.map(str::to_owned))
         .chain(rows)
         .collect::<Vec<_>>();
     let width = |cell: &String| Line::raw(cell.as_str()).width();
-    let widths = (0..WIDE_HEADINGS.len())
+    let widths = (0..HEADINGS.len())
         .map(|column| lines.iter().map(|line| width(&line[column])).max())
         .collect::<Vec<_>>();
     let mut text = String::new();
@@ -202,6 +230,8 @@ struct JsonRow<'a> {
     branch: Fact,
     changes: Fact,
     archived: Option<bool>,
+    /// `public`, `private`, `archived` or `missing`; `None` while the provider has not said.
+    remote: Option<&'static str>,
     warnings: &'a [String],
 }
 
@@ -274,6 +304,10 @@ impl<'a> JsonRow<'a> {
             branch: observation(&row.branch),
             changes: observation(&row.changes),
             archived: row.archived,
+            remote: row
+                .remote_status
+                .filter(|status| *status != model::RemoteStatus::Pending)
+                .map(model::RemoteStatus::label),
             warnings: &row.warnings,
         }
     }

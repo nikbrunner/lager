@@ -24,6 +24,26 @@ pub struct RepositoryRef {
 pub struct RepositorySummary {
     pub reference: RepositoryRef,
     pub archived: bool,
+    /// `None` when the provider does not report it.
+    pub visibility: Option<Visibility>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    Public,
+    Private,
+    /// Visible to an enterprise's members; lager never sets it.
+    Internal,
+}
+
+impl Visibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Private => "private",
+            Self::Internal => "internal",
+        }
+    }
 }
 
 impl RepositoryRef {

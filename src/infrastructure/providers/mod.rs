@@ -176,6 +176,10 @@ impl ProviderCatalog for ConfiguredProviders {
             .map(|item| apply_prefix(item, adapter))
             .collect())
     }
+
+    fn lookup(&self, reference: &RepositoryRef) -> Result<Option<RemoteState>, String> {
+        self.remote(&reference.host)?.lookup(&reference.path)
+    }
 }
 
 impl ProviderSource for ConfiguredProviders {
