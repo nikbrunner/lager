@@ -422,8 +422,9 @@ pub trait WorktreeGit {
     fn commit(&self, repository: &Path, revision: &str) -> Option<String>;
     /// The names of the repository's remotes.
     fn remotes(&self, repository: &Path) -> Result<Vec<String>, String>;
-    /// The origin URL as written.
-    fn origin_url(&self, repository: &Path) -> Result<String, String>;
+    /// The origin URL as written, before `url.<base>.insteadOf` rewrites; `None` without an
+    /// origin.
+    fn origin_url(&self, repository: &Path) -> Result<Option<String>, String>;
     fn set_origin_url(&self, repository: &Path, url: &str) -> Result<(), String>;
     fn branch_exists(&self, repository: &Path, name: &str) -> Result<bool, String>;
     fn valid_branch_name(&self, name: &str) -> bool;

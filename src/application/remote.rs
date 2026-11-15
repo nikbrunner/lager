@@ -18,7 +18,7 @@ use crate::application::ports::{
 use crate::application::warehouse::{self, ExactRemovalError};
 use crate::domain::config::{Config, RemoteAction};
 use crate::domain::repository::{
-    RepositoryRef, RepositorySummary, renamed_url, validate_reference_safety,
+    RepositoryRef, RepositorySummary, normalize_remote, renamed_url, validate_reference_safety,
 };
 use crate::domain::state::LocalState;
 
@@ -456,9 +456,24 @@ fn prepare(
     action: RemoteAction,
 ) -> Result<RemoteState, ActionError> {
     ready(config, remote, reference, action)?;
-    remote
+    existing(remote, reference, String::new())
+}
+
+/// The provider's state of `reference`, refused when missing (with `hint` appended) or when
+/// spelled differently: the provider matches names case-insensitively, the declaration and
+/// checkout do not.
+fn existing(
+    remote: &dyn RemoteRepositories,
+    reference: &RepositoryRef,
+    hint: String,
+) -> Result<RemoteState, ActionError> {
+    let state = remote
         .state(reference)?
-        .ok_or_else(|| format!("not found on {}", reference.host).into())
+        .ok_or_else(|| format!("not found on {}{hint}", reference.host))?;
+    if state.name != reference.path {
+        return Err(format!("use the exact name {}", state.name).into());
+    }
+    Ok(state)
 }
 
 /// One `owner/name` repository whose provider allows `action` and whose CLI is logged in.
@@ -468,16 +483,28 @@ fn ready(
     reference: &RepositoryRef,
     action: RemoteAction,
 ) -> Result<(), ActionError> {
+    eligible(config, reference, action)?;
+    remote.check(&reference.host)?;
+    Ok(())
+}
+
+/// One `owner/name` repository whose provider allows `action`; asks nothing of the provider.
+pub fn eligible(
+    config: &Config,
+    reference: &RepositoryRef,
+    action: RemoteAction,
+) -> Result<(), String> {
     // A leading dash would reach gh as a flag.
     if reference.is_wildcard()
         || reference.path.split('/').count() != 2
         || reference.path.starts_with('-')
     {
-        return Err(format!("{} needs one repository as owner/name", action.as_str()).into());
+        return Err(format!(
+            "{} needs one repository as owner/name",
+            action.as_str()
+        ));
     }
-    allowed(config, reference, action)?;
-    remote.check(&reference.host)?;
-    Ok(())
+    allowed(config, reference, action)
 }
 
 /// Creates `reference` on its provider once neither its checkout path nor its name is taken,
@@ -743,13 +770,11 @@ pub fn delete<S: ConfigStore, G: GitRemoval, F: RemovalFilesystem>(
     remote.check_delete_scope(&reference.host)?;
     let identity = reference.identity();
     let finish = format!("`lager remove {identity} --unregister`");
-    if remote.state(reference)?.is_none() {
-        return Err(format!(
-            "not found on {}; run {finish} for the local side",
-            reference.host
-        )
-        .into());
-    }
+    existing(
+        remote,
+        reference,
+        format!("; run {finish} for the local side"),
+    )?;
     let untouched = |error: String| ActionError::from(format!("{error}; GitHub was not touched"));
     let root = config
         .resolve_root(home)
@@ -871,6 +896,57 @@ pub struct Renamed {
     pub redeclared: bool,
 }
 
+/// What a finished action did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Done {
+    /// Whether the action archived, and what changed.
+    Archived(bool, Mutation),
+    Visibility(Visibility, Mutation),
+    Renamed(Renamed),
+    Deleted(Deleted),
+    /// Created; `register` declares it once cloned.
+    Created {
+        register: bool,
+    },
+}
+
+impl Done {
+    /// The outcome as the CLI and the inventory report it after `<repository>: `.
+    pub fn outcome(&self) -> String {
+        match self {
+            Self::Archived(true, Mutation::Changed) => "archived".to_owned(),
+            Self::Archived(true, Mutation::Noop) => "already archived".to_owned(),
+            Self::Archived(false, Mutation::Changed) => "unarchived".to_owned(),
+            Self::Archived(false, Mutation::Noop) => "not archived".to_owned(),
+            Self::Visibility(Visibility::Public, Mutation::Changed) => "made public".to_owned(),
+            Self::Visibility(Visibility::Public, Mutation::Noop) => "already public".to_owned(),
+            Self::Visibility(_, Mutation::Changed) => "made private".to_owned(),
+            Self::Visibility(_, Mutation::Noop) => "already private".to_owned(),
+            Self::Renamed(renamed) => {
+                let mut outcome = format!("renamed to {}", renamed.reference.path);
+                if renamed.moved {
+                    outcome.push_str(", moved");
+                }
+                if renamed.redeclared {
+                    outcome.push_str(", redeclared");
+                }
+                outcome
+            }
+            Self::Deleted(deleted) => {
+                let mut outcome = "deleted remote".to_owned();
+                if deleted.removed {
+                    outcome.push_str(", removed");
+                }
+                if deleted.unregistered {
+                    outcome.push_str(", unregistered");
+                }
+                outcome
+            }
+            Self::Created { .. } => "created".to_owned(),
+        }
+    }
+}
+
 /// Renames `reference` to `name` under the same owner on its provider, then repoints the
 /// checkout's origin, moves the checkout and rewrites the declaration. Every refusal and the
 /// confirmation, skipped with `yes`, come before the provider is touched.
@@ -888,7 +964,7 @@ pub fn rename<S: RenamingStore>(
     yes: bool,
     home: &Path,
 ) -> Result<Renamed, ActionError> {
-    ready(config, remote, reference, RemoteAction::Rename)?;
+    eligible(config, reference, RemoteAction::Rename)?;
     let (owner, old_name) = reference
         .path
         .split_once('/')
@@ -899,17 +975,11 @@ pub fn rename<S: RenamingStore>(
         .filter(|renamed| valid_name(name) && renamed.path == new_path)
         .ok_or_else(|| format!("invalid repository name `{name}`"))?;
     if name.eq_ignore_ascii_case(old_name) {
-        return Err(format!("{} is already named {name}", reference.identity()).into());
+        return Err(format!("already named {name}").into());
     }
+    remote.check(&reference.host)?;
     let (identity, new_identity) = (reference.identity(), renamed.identity());
-    let current = remote
-        .state(reference)?
-        .ok_or_else(|| format!("not found on {}", reference.host))?;
-    // The declaration and checkout match the exact spelling, so a differently cased one would
-    // be left behind.
-    if current.name != reference.path {
-        return Err(format!("use the exact name {}", current.name).into());
-    }
+    existing(remote, reference, String::new())?;
     if remote.state(&renamed)?.is_some() {
         return Err(format!("{new_identity} already exists on {}", reference.host).into());
     }
@@ -961,10 +1031,11 @@ pub fn rename<S: RenamingStore>(
                     linked.join(", ")
                 )));
             }
-            if git.origin_identity(&canonical).map_err(refuse)?.as_deref() != Some(&identity) {
-                return Err(refuse(format!("its origin is not {identity}")));
-            }
-            let origin = git.origin_url(&canonical).map_err(refuse)?;
+            let origin = git
+                .origin_url(&canonical)
+                .map_err(refuse)?
+                .filter(|origin| normalize_remote(origin).is_ok_and(|origin| origin == identity))
+                .ok_or_else(|| refuse(format!("its origin is not {identity}")))?;
             let url = renamed_url(&origin, old_name, name)
                 .filter(|url| {
                     RepositoryRef::parse(url).is_ok_and(|url| url.identity() == new_identity)

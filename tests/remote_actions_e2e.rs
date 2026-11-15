@@ -1264,10 +1264,6 @@ fn rename_refuses_an_invalid_or_unchanged_name_as_usage() {
             &["rename", "--yes", "org/demo", "--", "-demo"],
             "invalid repository name `-demo`",
         ),
-        (
-            &["rename", "org/demo", "Demo", "--yes"],
-            "org/demo: already named Demo",
-        ),
     ] {
         let output = fixture.run(args);
         assert_outcome(&output, 2, "");
@@ -1277,6 +1273,13 @@ fn rename_refuses_an_invalid_or_unchanged_name_as_usage() {
             text(&output.stderr)
         );
     }
+    let output = fixture.run(&["rename", "org/demo", "Demo", "--yes"]);
+    assert_outcome(&output, 1, "");
+    assert!(
+        text(&output.stderr).contains("org/demo: already named Demo"),
+        "{}",
+        text(&output.stderr)
+    );
     assert!(fixture.calls().is_empty());
 }
 
@@ -1344,6 +1347,55 @@ fn rename_refuses_a_differently_cased_name_before_touching_github() {
         text(&output.stderr)
     );
     assert!(!renamed(&fixture));
+}
+
+#[test]
+fn delete_refuses_a_differently_cased_name_before_touching_github() {
+    let fixture = delete_fixture();
+    fixture.set("redirects", "org/demo org/Demo\n");
+    let checkout = declared_checkout(&fixture);
+    let output = fixture.run(&["remove", "org/demo", "--remote", "--yes"]);
+    assert_outcome(&output, 1, "");
+    assert!(
+        text(&output.stderr).contains("use the exact name org/Demo"),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(!deleted(&fixture));
+    assert!(checkout.exists());
+    assert!(declared(&fixture));
+}
+
+#[test]
+fn rename_reads_origin_as_written_past_an_insteadof_rewrite() {
+    let fixture = rename_fixture();
+    declared_checkout(&fixture);
+    let gitconfig = fixture.home.join("gitconfig");
+    std::fs::write(
+        &gitconfig,
+        "[url \"git@github-alias:\"]\n\tinsteadOf = git@github.com:\n",
+    )
+    .unwrap();
+    let output = support::lager_with_path(&fixture.home, &fixture.config, Some(&fixture.bin))
+        .env("GH_ARGS_LOG", &fixture.log)
+        .env("GH_STATE", &fixture.state)
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .args(["rename", "org/demo", "demo-cli", "--yes"])
+        .output()
+        .unwrap();
+    assert_outcome(
+        &output,
+        0,
+        "org/demo: renamed to org/demo-cli, moved, redeclared\n",
+    );
+    assert_eq!(
+        git(
+            &fixture,
+            &fixture.home.join("repos/org/demo-cli"),
+            &["config", "remote.origin.url"]
+        ),
+        "git@github.com:org/demo-cli.git"
+    );
 }
 
 #[test]

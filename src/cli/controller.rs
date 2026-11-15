@@ -268,27 +268,31 @@ fn add(
     }
     let mut register = args.register || args.post_clone.is_some();
     let mut post_clone = args.post_clone.clone();
-    // Asked before GitHub is touched, so cancelling creates nothing.
-    if args.create
-        && ask_registration
-        && let [repository] = args.repositories.as_slice()
-        && RepositoryRef::parse(repository).is_ok_and(|reference| !reference.is_wildcard())
-    {
-        (register, post_clone) = match registration_before_create(interaction, repository) {
-            Ok(choice) => choice,
-            Err(code) => return code,
-        };
-        ask_registration = false;
-    }
-    let store = CommandConfigStore::default();
-    let home = home_dir();
-    let created = if args.create {
-        match create(path, &args, &home) {
-            Ok(created) => Some(created),
+    let target = if args.create {
+        match create_target(path, &args) {
+            Ok(target) => Some(target),
             Err(code) => return code,
         }
     } else {
         None
+    };
+    // Asked before GitHub is touched, so cancelling creates nothing.
+    if target.is_some() && ask_registration {
+        (register, post_clone) =
+            match registration_before_create(interaction, &args.repositories[0]) {
+                Ok(choice) => choice,
+                Err(code) => return code,
+            };
+        ask_registration = false;
+    }
+    let store = CommandConfigStore::default();
+    let home = home_dir();
+    let created = match target {
+        Some(target) => match create(&args, target, &home) {
+            Ok(created) => Some(created),
+            Err(code) => return code,
+        },
+        None => None,
     };
     if let (Some((_, destination)), Some(source)) = (&created, &args.from) {
         let result = remote::settle_published(
@@ -450,8 +454,9 @@ fn registration_before_create(
         })
 }
 
-/// Creates the one repository `add --create` names; returns its identity and checkout path.
-fn create(path: &Path, args: &CloneArgs, home: &Path) -> Result<(String, PathBuf), i32> {
+/// The one repository `add --create` names, once its provider allows `create`; asks nothing of
+/// GitHub.
+fn create_target(path: &Path, args: &CloneArgs) -> Result<RemoteTarget, i32> {
     let [repository] = args.repositories.as_slice() else {
         eprintln!("lager: --create needs exactly one repository reference");
         return Err(2);
@@ -464,6 +469,22 @@ fn create(path: &Path, args: &CloneArgs, home: &Path) -> Result<(String, PathBuf
         eprintln!("lager: --create needs one repository, not a wildcard");
         return Err(2);
     }
+    remote::eligible(
+        &config,
+        &reference,
+        crate::domain::config::RemoteAction::Create,
+    )
+    .map_err(|error| report_remote(repository, Err(error.into())))?;
+    Ok((config, providers, reference))
+}
+
+/// Creates the repository `create_target` checked; returns its identity and checkout path.
+fn create(
+    args: &CloneArgs,
+    (config, providers, reference): RemoteTarget,
+    home: &Path,
+) -> Result<(String, PathBuf), i32> {
+    let repository = &args.repositories[0];
     let visibility = if args.public {
         ports::Visibility::Public
     } else {
@@ -500,7 +521,7 @@ fn create(path: &Path, args: &CloneArgs, home: &Path) -> Result<(String, PathBuf
     } else {
         "created"
     };
-    report_remote(repository, Ok(outcome));
+    report_remote(repository, Ok(outcome.to_owned()));
     Ok((reference.identity(), destination))
 }
 
@@ -760,17 +781,13 @@ fn home_dir() -> PathBuf {
 }
 
 /// The configuration, its providers and the parsed reference a remote action works on.
-fn remote_target(
-    path: &Path,
-    repository: &str,
-) -> Result<
-    (
-        crate::domain::config::Config,
-        ConfiguredProviders,
-        RepositoryRef,
-    ),
-    String,
-> {
+type RemoteTarget = (
+    crate::domain::config::Config,
+    ConfiguredProviders,
+    RepositoryRef,
+);
+
+fn remote_target(path: &Path, repository: &str) -> Result<RemoteTarget, String> {
     let config = CommandConfigStore::default()
         .load(path)
         .map_err(|error| error.to_string())?;
@@ -780,7 +797,7 @@ fn remote_target(
 }
 
 /// Prints `<repository>: <outcome>` and returns the exit code.
-fn report_remote(repository: &str, result: Result<&str, ActionError>) -> i32 {
+fn report_remote(repository: &str, result: Result<String, ActionError>) -> i32 {
     match result {
         Ok(outcome) => {
             println!("{}: {outcome}", escape(repository));
@@ -810,15 +827,8 @@ fn archive(path: &Path, args: ArchiveArgs) -> i32 {
             return 1;
         }
     };
-    let result =
-        remote::archive(&config, &providers, &reference, !args.undo).map(|mutation| {
-            match (mutation, args.undo) {
-                (ports::Mutation::Changed, false) => "archived",
-                (ports::Mutation::Noop, false) => "already archived",
-                (ports::Mutation::Changed, true) => "unarchived",
-                (ports::Mutation::Noop, true) => "not archived",
-            }
-        });
+    let result = remote::archive(&config, &providers, &reference, !args.undo)
+        .map(|mutation| remote::Done::Archived(!args.undo, mutation).outcome());
     report_remote(&args.repository, result)
 }
 
@@ -854,12 +864,7 @@ fn visibility(
         target,
         args.yes,
     )
-    .map(|mutation| match (mutation, target) {
-        (ports::Mutation::Changed, ports::Visibility::Public) => "made public",
-        (ports::Mutation::Noop, ports::Visibility::Public) => "already public",
-        (ports::Mutation::Changed, _) => "made private",
-        (ports::Mutation::Noop, _) => "already private",
-    });
+    .map(|mutation| remote::Done::Visibility(target, mutation).outcome());
     report_remote(&args.repository, result)
 }
 
@@ -887,20 +892,7 @@ fn rename(
             return 1;
         }
     };
-    if reference
-        .path
-        .rsplit('/')
-        .next()
-        .is_some_and(|name| name.eq_ignore_ascii_case(&args.new_name))
-    {
-        eprintln!(
-            "lager: {}: already named {}",
-            escape(&args.repository),
-            escape(&args.new_name)
-        );
-        return 2;
-    }
-    let renamed = match remote::rename(
+    let result = remote::rename(
         &config,
         &providers,
         &CommandConfigStore::default(),
@@ -912,18 +904,9 @@ fn rename(
         &args.new_name,
         args.yes,
         &home_dir(),
-    ) {
-        Ok(renamed) => renamed,
-        Err(error) => return report_remote(&args.repository, Err(error)),
-    };
-    let mut outcome = format!("renamed to {}", renamed.reference.path);
-    if renamed.moved {
-        outcome.push_str(", moved");
-    }
-    if renamed.redeclared {
-        outcome.push_str(", redeclared");
-    }
-    report_remote(&args.repository, Ok(&outcome))
+    )
+    .map(|renamed| remote::Done::Renamed(renamed).outcome());
+    report_remote(&args.repository, result)
 }
 
 fn inventory(path: &Path, args: InventoryArgs) -> i32 {
@@ -1067,7 +1050,7 @@ fn delete(
             return 1;
         }
     };
-    let deleted = match remote::delete(
+    let result = remote::delete(
         &config,
         &providers,
         &CommandConfigStore::default(),
@@ -1079,18 +1062,9 @@ fn delete(
         args.yes,
         args.force,
         &home_dir(),
-    ) {
-        Ok(deleted) => deleted,
-        Err(error) => return report_remote(repository, Err(error)),
-    };
-    let mut parts = vec!["deleted remote"];
-    if deleted.removed {
-        parts.push("removed");
-    }
-    if deleted.unregistered {
-        parts.push("unregistered");
-    }
-    report_remote(repository, Ok(&parts.join(", ")))
+    )
+    .map(|deleted| remote::Done::Deleted(deleted).outcome());
+    report_remote(repository, result)
 }
 
 #[cfg(test)]
@@ -1176,6 +1150,37 @@ mod tests {
                 .unwrap()
                 .contains("root = \"repos\"")
         );
+    }
+
+    #[test]
+    fn add_create_refuses_a_disabled_create_before_asking_anything() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "root = \"repos\"\n[providers.\"github.com\"]\npreset = \"github\"\nremote_actions = [\"archive\"]\n",
+        )
+        .unwrap();
+        let args = Args::parse_from([
+            "lager",
+            "--config",
+            config.to_str().unwrap(),
+            "add",
+            "org/demo",
+            "--create",
+        ]);
+        let mut interaction = FakeInteraction::default();
+        assert_eq!(
+            run(
+                args,
+                &UnusedSelector,
+                &mut interaction,
+                &AvailableTools,
+                true
+            ),
+            1
+        );
+        assert_eq!(interaction.calls, 0);
     }
 
     #[test]

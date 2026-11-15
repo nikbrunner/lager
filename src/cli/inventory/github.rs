@@ -19,10 +19,8 @@ use super::{
     popup_body_width, refresh, start_batch, tint, warn,
 };
 use crate::application::batch::{self, AddChoice, Batch, BatchAction, Eligibility};
-use crate::application::ports::{
-    Interaction, InteractionError, Mutation, RemovalFilesystem, Visibility,
-};
-use crate::application::remote::{self, ActionError};
+use crate::application::ports::{Interaction, InteractionError, RemovalFilesystem, Visibility};
+use crate::application::remote::{self, ActionError, Done};
 use crate::application::warehouse;
 use crate::domain::config::{Config, RemoteAction};
 use crate::domain::repository::RepositoryRef;
@@ -69,14 +67,6 @@ enum Op {
         description: Option<String>,
         register: bool,
     },
-}
-
-enum Done {
-    Archived(bool, Mutation),
-    Visibility(Visibility, Mutation),
-    Renamed(remote::Renamed),
-    Deleted(remote::Deleted),
-    Created { register: bool },
 }
 
 pub(super) enum Dialog {
@@ -167,13 +157,13 @@ fn create_hosts(config: &Config) -> Vec<&str> {
         .collect()
 }
 
-/// Why no GitHub action can start right now.
 impl Remote {
     pub(super) fn running(&self) -> bool {
         self.job.is_some()
     }
 }
 
+/// Why no GitHub action can start right now.
 fn busy(session: &InventorySession) -> Option<String> {
     if session.github.job.is_some() {
         Some("a GitHub action is running".to_owned())
@@ -521,43 +511,9 @@ pub(super) fn status(session: &InventorySession) -> Option<String> {
     session.github.job.as_ref().map(|job| job.status.clone())
 }
 
-fn outcome(done: &Done) -> String {
-    match done {
-        Done::Archived(true, Mutation::Changed) => "archived".to_owned(),
-        Done::Archived(true, Mutation::Noop) => "already archived".to_owned(),
-        Done::Archived(false, Mutation::Changed) => "unarchived".to_owned(),
-        Done::Archived(false, Mutation::Noop) => "not archived".to_owned(),
-        Done::Visibility(Visibility::Public, Mutation::Changed) => "made public".to_owned(),
-        Done::Visibility(Visibility::Public, Mutation::Noop) => "already public".to_owned(),
-        Done::Visibility(_, Mutation::Changed) => "made private".to_owned(),
-        Done::Visibility(_, Mutation::Noop) => "already private".to_owned(),
-        Done::Renamed(renamed) => {
-            let mut outcome = format!("renamed to {}", renamed.reference.path);
-            if renamed.moved {
-                outcome.push_str(", moved");
-            }
-            if renamed.redeclared {
-                outcome.push_str(", redeclared");
-            }
-            outcome
-        }
-        Done::Deleted(deleted) => {
-            let mut outcome = "deleted remote".to_owned();
-            if deleted.removed {
-                outcome.push_str(", removed");
-            }
-            if deleted.unregistered {
-                outcome.push_str(", unregistered");
-            }
-            outcome
-        }
-        Done::Created { .. } => "created".to_owned(),
-    }
-}
-
 fn report(identity: &str, result: &Result<Done, ActionError>) -> String {
     match result {
-        Ok(done) => format!("{}: {}", escape(identity), outcome(done)),
+        Ok(done) => format!("{}: {}", escape(identity), done.outcome()),
         Err(ActionError::Declined | ActionError::Cancelled) => {
             format!("{}: cancelled", escape(identity))
         }

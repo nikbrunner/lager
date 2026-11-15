@@ -319,7 +319,7 @@ pub struct VisibilityArgs {
     pub repository: String,
     #[arg(value_name = "VISIBILITY")]
     pub value: VisibilityValue,
-    #[arg(long, help = "Make it public without an interactive prompt")]
+    #[arg(long, help = "Change the visibility without an interactive prompt")]
     pub yes: bool,
 }
 

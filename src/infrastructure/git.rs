@@ -1006,8 +1006,15 @@ impl WorktreeGit for NativeGit {
             .collect())
     }
 
-    fn origin_url(&self, repository: &Path) -> Result<String, String> {
-        captured_text(git_at(repository).args(["remote", "get-url", "origin"]))
+    fn origin_url(&self, repository: &Path) -> Result<Option<String>, String> {
+        if !self
+            .remotes(repository)?
+            .iter()
+            .any(|remote| remote == "origin")
+        {
+            return Ok(None);
+        }
+        captured_text(git_at(repository).args(["config", "--get", "remote.origin.url"])).map(Some)
     }
 
     fn set_origin_url(&self, repository: &Path, url: &str) -> Result<(), String> {
