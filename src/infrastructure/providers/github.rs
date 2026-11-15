@@ -288,6 +288,47 @@ impl Github {
         args.extend(["--source", source, "--remote", "origin", "--push"]);
         self.gh(&args).map(drop).map_err(gh_error)
     }
+
+    /// Classic tokens list their scopes in `X-OAuth-Scopes`; fine-grained tokens send no such
+    /// header, so `gh repo delete` reports a missing permission itself.
+    pub fn check_delete_scope(&self) -> Result<(), String> {
+        let host = self.host.as_str();
+        let response = match self.gh(&["api", "--hostname", host, "-i", "user"]) {
+            Ok(response) => response,
+            Err(ProbeError::Exit { stderr, .. }) => {
+                return Err(format!("gh api failed for {host}: {stderr}"));
+            }
+            Err(error) => return Err(gh_error(error)),
+        };
+        match oauth_scopes(&response) {
+            Some(scopes) if !scopes.contains(&"delete_repo") => Err(format!(
+                "deleting on {host} needs the delete_repo scope; run `gh auth refresh --hostname {host} --scopes delete_repo`"
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn delete(&self, path: &str) -> Result<(), String> {
+        self.gh(&["repo", "delete", path, "--yes"])
+            .map(drop)
+            .map_err(gh_error)
+    }
+}
+
+/// The scopes in the `X-OAuth-Scopes` header of a `gh api -i` response, `None` without one.
+fn oauth_scopes(response: &str) -> Option<Vec<&str>> {
+    response
+        .lines()
+        .take_while(|line| !line.trim().is_empty())
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.trim().eq_ignore_ascii_case("x-oauth-scopes"))
+        .map(|(_, value)| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|scope| !scope.is_empty())
+                .collect()
+        })
 }
 
 fn gh_error(error: ProbeError) -> String {
@@ -385,6 +426,20 @@ JSON
         );
         let error = provider.catalog(false).unwrap_err();
         assert!(error.contains("auth fixture diagnostic"));
+    }
+
+    #[test]
+    fn oauth_scopes_reads_only_the_header_block_case_insensitively() {
+        let response = "HTTP/2.0 200 OK\r\nX-Oauth-Scopes: repo, delete_repo\r\n\r\n{}";
+        assert_eq!(oauth_scopes(response), Some(vec!["repo", "delete_repo"]));
+        assert_eq!(
+            oauth_scopes("HTTP/2.0 200 OK\nx-oauth-scopes: \n\n{}"),
+            Some(vec![])
+        );
+        assert_eq!(
+            oauth_scopes("HTTP/2.0 200 OK\n\nX-OAuth-Scopes: delete_repo"),
+            None
+        );
     }
 
     #[test]

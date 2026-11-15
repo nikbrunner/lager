@@ -53,6 +53,16 @@ case "$1 $2" in
       git -C "$source" push --quiet origin HEAD || exit 1
     fi
     ;;
+  "api --hostname")
+    printf 'HTTP/2.0 200 OK\r\n'
+    [ -e "$GH_STATE/scopes" ] && printf 'X-Oauth-Scopes: %s\r\n' "$(cat "$GH_STATE/scopes")"
+    printf '\r\n{"login":"org"}\n'
+    ;;
+  "repo delete")
+    : > "$GH_STATE/deleted"
+    # Stands in for work arriving in the checkout while GitHub deletes.
+    if [ -e "$GH_STATE/dirty-on-delete" ]; then : > "$(cat "$GH_STATE/dirty-on-delete")"; fi
+    ;;
   *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 1 ;;
 esac
 "##;
@@ -872,4 +882,237 @@ fn a_post_clone_failing_after_the_move_says_what_was_done() {
     assert!(checkout.join(".git").is_dir());
     let config = std::fs::read_to_string(&fixture.config).unwrap();
     assert!(config.contains("post_clone = \"exit 3\""), "{config}");
+}
+
+/// A fixture allowing `delete` whose login holds the delete_repo scope.
+fn delete_fixture() -> Fixture {
+    let fixture = Fixture::github("\"delete\"");
+    fixture.set("scopes", "repo, delete_repo, gist");
+    fixture
+}
+
+/// Declares org/demo and checks it out cleanly, its branch level with its remote-tracking ref.
+fn declared_checkout(fixture: &Fixture) -> PathBuf {
+    let checkout = fixture.home.join("repos/org/demo");
+    source_folder(fixture, &checkout, true, true);
+    git(fixture, &checkout, &["branch", "-M", "main"]);
+    git(
+        fixture,
+        &checkout,
+        &["remote", "add", "origin", "git@github.com:org/demo.git"],
+    );
+    git(
+        fixture,
+        &checkout,
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+    );
+    git(
+        fixture,
+        &checkout,
+        &["branch", "--set-upstream-to=origin/main"],
+    );
+    declare(fixture);
+    checkout
+}
+
+fn declare(fixture: &Fixture) {
+    let mut config = std::fs::read_to_string(&fixture.config).unwrap();
+    config.push_str("\n[[repositories]]\nurl = \"org/demo\"\n");
+    std::fs::write(&fixture.config, config).unwrap();
+}
+
+fn declared(fixture: &Fixture) -> bool {
+    std::fs::read_to_string(&fixture.config)
+        .unwrap()
+        .contains("org/demo")
+}
+
+fn deleted(fixture: &Fixture) -> bool {
+    fixture
+        .calls()
+        .iter()
+        .any(|call| call.contains("repo delete"))
+}
+
+#[test]
+fn delete_with_yes_deletes_on_github_then_the_checkout_and_the_declaration() {
+    let fixture = delete_fixture();
+    let checkout = declared_checkout(&fixture);
+    let output = fixture.run(&["remove", "org/demo", "--remote", "--yes"]);
+    assert_outcome(
+        &output,
+        0,
+        "org/demo: deleted remote, removed, unregistered\n",
+    );
+    assert_eq!(
+        fixture.calls(),
+        [
+            "github.com auth status --hostname github.com",
+            "github.com api --hostname github.com -i user",
+            "github.com repo view org/demo --json isArchived,visibility",
+            "github.com repo delete org/demo --yes",
+        ]
+    );
+    assert!(!checkout.exists());
+    assert!(!declared(&fixture));
+}
+
+#[test]
+fn delete_refuses_local_work_before_touching_github_unless_forced() {
+    let fixture = delete_fixture();
+    let checkout = declared_checkout(&fixture);
+    std::fs::write(checkout.join("notes.txt"), "unsaved\n").unwrap();
+    let output = fixture.run(&["remove", "org/demo", "--remote", "--yes"]);
+    assert_outcome(&output, 1, "");
+    assert!(
+        text(&output.stderr).contains(
+            "org/demo: local work would be lost (untracked files); GitHub was not touched; rerun with --force to accept these losses"
+        ),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(!deleted(&fixture));
+    assert_eq!(state(&checkout, "notes.txt"), "unsaved\n");
+    assert!(declared(&fixture));
+
+    let output = fixture.run(&["remove", "org/demo", "--remote", "--yes", "--force"]);
+    assert_outcome(
+        &output,
+        0,
+        "org/demo: deleted remote, removed, unregistered\n",
+    );
+    assert!(
+        text(&output.stderr).contains("this is lost: untracked files"),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(!checkout.exists());
+}
+
+#[test]
+fn delete_without_the_delete_repo_scope_names_the_refresh_command() {
+    let fixture = delete_fixture();
+    fixture.set("scopes", "repo, read:org");
+    let checkout = declared_checkout(&fixture);
+    let output = fixture.run(&["remove", "org/demo", "--remote", "--yes"]);
+    assert_outcome(&output, 1, "");
+    assert!(
+        text(&output.stderr).contains(
+            "deleting on github.com needs the delete_repo scope; run `gh auth refresh --hostname github.com --scopes delete_repo`"
+        ),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(!deleted(&fixture));
+    assert!(checkout.exists());
+}
+
+#[test]
+fn delete_with_a_fine_grained_token_leaves_the_scope_to_gh() {
+    let fixture = delete_fixture();
+    std::fs::remove_file(fixture.state.join("scopes")).unwrap();
+    let output = fixture.run(&["remove", "org/demo", "--remote", "--yes"]);
+    assert_outcome(&output, 0, "org/demo: deleted remote\n");
+    assert!(deleted(&fixture));
+}
+
+#[test]
+fn delete_of_a_repository_without_checkout_unregisters_only() {
+    let fixture = delete_fixture();
+    declare(&fixture);
+    let output = fixture.run(&["remove", "org/demo", "--remote", "--yes"]);
+    assert_outcome(&output, 0, "org/demo: deleted remote, unregistered\n");
+    assert!(deleted(&fixture));
+    assert!(!declared(&fixture));
+}
+
+#[test]
+fn delete_outside_a_tty_needs_yes() {
+    let fixture = delete_fixture();
+    let checkout = declared_checkout(&fixture);
+    let output = fixture.run(&["remove", "org/demo", "--remote"]);
+    assert_outcome(&output, 2, "");
+    assert!(
+        text(&output.stderr).contains("remove --remote requires --yes outside a TTY"),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(fixture.calls().is_empty());
+    assert!(checkout.exists());
+}
+
+#[test]
+fn delete_needs_delete_in_remote_actions() {
+    let fixture = Fixture::github("\"archive\"");
+    let checkout = declared_checkout(&fixture);
+    let output = fixture.run(&["remove", "org/demo", "--remote", "--yes"]);
+    assert_outcome(&output, 1, "");
+    assert!(text(&output.stderr).contains("`delete` is not enabled for github.com"));
+    assert!(fixture.calls().is_empty());
+    assert!(checkout.exists());
+    assert!(declared(&fixture));
+}
+
+#[test]
+fn delete_conflicts_with_keep_registered_and_takes_one_repository() {
+    let fixture = delete_fixture();
+    for args in [
+        &[
+            "remove",
+            "org/demo",
+            "--remote",
+            "--yes",
+            "--keep-registered",
+        ][..],
+        &["remove", "org/demo", "org/other", "--remote", "--yes"][..],
+        &["remove", "--remote", "--yes"][..],
+    ] {
+        let output = fixture.run(args);
+        assert_outcome(&output, 2, "");
+    }
+    assert!(fixture.calls().is_empty());
+}
+
+#[test]
+fn delete_of_a_repository_missing_on_github_names_the_local_cleanup() {
+    let fixture = delete_fixture();
+    fixture.set("missing", "");
+    let checkout = declared_checkout(&fixture);
+    let output = fixture.run(&["remove", "org/demo", "--remote", "--yes"]);
+    assert_outcome(&output, 1, "");
+    assert!(
+        text(&output.stderr).contains(
+            "org/demo: not found on github.com; run `lager remove github.com/org/demo --unregister` for the local side"
+        ),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(!deleted(&fixture));
+    assert!(checkout.exists());
+}
+
+#[test]
+fn a_checkout_changing_after_the_github_delete_says_what_remains_and_how_to_finish() {
+    let fixture = delete_fixture();
+    let checkout = declared_checkout(&fixture);
+    fixture.set(
+        "dirty-on-delete",
+        checkout.join("late.txt").to_str().unwrap(),
+    );
+    let output = fixture.run(&["remove", "org/demo", "--remote", "--yes"]);
+    assert_outcome(&output, 1, "");
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("org/demo: deleted github.com/org/demo; local removal failed:"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "and its declaration remain; finish with `lager remove github.com/org/demo --unregister`"
+        ),
+        "{stderr}"
+    );
+    assert!(deleted(&fixture));
+    assert!(checkout.join("late.txt").exists());
+    assert!(declared(&fixture));
 }

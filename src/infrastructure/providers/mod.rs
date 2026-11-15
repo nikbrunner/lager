@@ -107,6 +107,14 @@ impl RemoteRepositories for ConfiguredProviders {
         self.remote(&reference.host)?
             .publish(&reference.path, visibility, description, source)
     }
+
+    fn check_delete_scope(&self, host: &str) -> Result<(), String> {
+        self.remote(host)?.check_delete_scope()
+    }
+
+    fn delete(&self, reference: &RepositoryRef) -> Result<(), String> {
+        self.remote(&reference.host)?.delete(&reference.path)
+    }
 }
 
 impl ProviderCatalog for ConfiguredProviders {

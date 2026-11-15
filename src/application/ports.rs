@@ -312,6 +312,9 @@ pub trait RemoteRepositories {
         description: Option<&str>,
         source: &Path,
     ) -> Result<(), String>;
+    /// Whether the login for `host` may delete repositories; the error names the fix.
+    fn check_delete_scope(&self, host: &str) -> Result<(), String>;
+    fn delete(&self, reference: &RepositoryRef) -> Result<(), String>;
 }
 
 pub fn config_path(override_path: Option<&Path>) -> PathBuf {

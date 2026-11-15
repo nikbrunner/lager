@@ -869,6 +869,9 @@ fn remove(
     interaction: &mut dyn Interaction,
     interactive: bool,
 ) -> i32 {
+    if args.remote {
+        return delete(path, args, interaction, interactive);
+    }
     if !interactive && (!args.unregister && !args.keep_registered || !args.yes) {
         eprintln!(
             "lager: remove requires exactly one of --unregister or --keep-registered and --yes outside a TTY"
@@ -972,6 +975,54 @@ fn remove(
             1
         }
     }
+}
+
+/// `remove --remote`: deletes one repository on GitHub, then its checkout and declaration.
+fn delete(
+    path: &Path,
+    args: RemoveArgs,
+    interaction: &mut dyn Interaction,
+    interactive: bool,
+) -> i32 {
+    let [repository] = args.repositories.as_slice() else {
+        eprintln!("lager: --remote needs exactly one repository reference");
+        return 2;
+    };
+    if !interactive && !args.yes {
+        eprintln!("lager: remove --remote requires --yes outside a TTY");
+        return 2;
+    }
+    let (config, providers, reference) = match remote_target(path, repository) {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("lager: {}", escape(error));
+            return 1;
+        }
+    };
+    let deleted = match remote::delete(
+        &config,
+        &providers,
+        &CommandConfigStore::default(),
+        &NativeGit,
+        &Filesystem,
+        interaction,
+        path,
+        &reference,
+        args.yes,
+        args.force,
+        &home_dir(),
+    ) {
+        Ok(deleted) => deleted,
+        Err(error) => return report_remote(repository, Err(error)),
+    };
+    let mut parts = vec!["deleted remote"];
+    if deleted.removed {
+        parts.push("removed");
+    }
+    if deleted.unregistered {
+        parts.push("unregistered");
+    }
+    report_remote(repository, Ok(&parts.join(", ")))
 }
 
 #[cfg(test)]

@@ -246,7 +246,7 @@ pub struct CloneArgs {
 
 #[derive(Debug, ClapArgs)]
 #[command(
-    after_help = "Example:\n  lager remove github.com/org/project --unregister --yes --force\n\n--force bypasses local-state warnings only; root, symlink, and origin checks remain active."
+    after_help = "Examples:\n  lager remove github.com/org/project --unregister --yes --force\n  lager remove github.com/org/project --remote --yes\n\n--force bypasses local-state warnings only; root, symlink, and origin checks remain active."
 )]
 pub struct RemoveArgs {
     #[arg(
@@ -270,6 +270,12 @@ pub struct RemoveArgs {
     pub yes: bool,
     #[arg(long, help = "Bypass local-state warnings; safety checks still apply")]
     pub force: bool,
+    #[arg(
+        long,
+        conflicts_with = "keep_registered",
+        help = "Delete the repository on GitHub too; implies --unregister"
+    )]
+    pub remote: bool,
 }
 
 #[derive(Debug, ClapArgs)]

@@ -9,12 +9,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::application::git_dir;
 use crate::application::ports::{
-    ConfigStore, GitState, HookRunner, Interaction, InteractionError, Mutation, PathKind,
-    ProviderAnswer, ProviderFailure, ProviderSource, RemoteRepositories, RemoteState, Visibility,
-    WorktreeFilesystem, WorktreeGit,
+    ConfigStore, GitRemoval, GitState, HookRunner, Interaction, InteractionError, Mutation,
+    PathKind, ProviderAnswer, ProviderFailure, ProviderSource, RemoteRepositories, RemoteState,
+    RemovalFilesystem, Visibility, WorktreeFilesystem, WorktreeGit,
 };
-use crate::application::warehouse;
+use crate::application::warehouse::{self, ExactRemovalError};
 use crate::domain::config::{Config, RemoteAction};
 use crate::domain::repository::{RepositoryRef, RepositorySummary, validate_reference_safety};
 use crate::domain::state::LocalState;
@@ -699,6 +700,141 @@ pub fn visibility(
     Ok(Mutation::Changed)
 }
 
+/// What `delete` did after deleting the repository on its provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deleted {
+    /// A checkout existed and was removed.
+    pub removed: bool,
+    /// A declaration changed.
+    pub unregistered: bool,
+}
+
+/// Deletes `reference` on its provider, then its checkout and its declaration. The guards of
+/// `remove` run before the provider is touched, and local losses refuse unless `force`. Without
+/// `yes` the user types `owner/name` to confirm.
+#[allow(clippy::too_many_arguments)]
+pub fn delete<S: ConfigStore, G: GitRemoval, F: RemovalFilesystem>(
+    config: &Config,
+    remote: &dyn RemoteRepositories,
+    store: &S,
+    git: &G,
+    filesystem: &F,
+    interaction: &mut dyn Interaction,
+    config_path: &Path,
+    reference: &RepositoryRef,
+    yes: bool,
+    force: bool,
+    home: &Path,
+) -> Result<Deleted, ActionError> {
+    ready(config, remote, reference, RemoteAction::Delete)?;
+    remote.check_delete_scope(&reference.host)?;
+    let identity = reference.identity();
+    let finish = format!("`lager remove {identity} --unregister`");
+    if remote.state(reference)?.is_none() {
+        return Err(format!(
+            "not found on {}; run {finish} for the local side",
+            reference.host
+        )
+        .into());
+    }
+    let untouched = |error: String| ActionError::from(format!("{error}; GitHub was not touched"));
+    let root = config
+        .resolve_root(home)
+        .map_err(|error| error.to_string())?;
+    let destination = warehouse::destination(config, reference, home)?;
+    let inspect = || {
+        warehouse::inspect_exact_removal(git, filesystem, &root, &destination, &reference.clone_url)
+    };
+    let exists = filesystem
+        .metadata_exists(&destination)
+        .map_err(|error| error.to_string())?;
+    let checkout = if exists {
+        let confirmed = inspect().map_err(untouched)?;
+        if !confirmed.losses.is_empty() && !force {
+            return Err(format!(
+                "local work would be lost ({}); GitHub was not touched; rerun with --force to accept these losses",
+                confirmed.losses.join("; ")
+            )
+            .into());
+        }
+        Some(confirmed)
+    } else {
+        None
+    };
+    if !yes {
+        confirm_name(interaction, reference)?;
+        // The prompt can stay open for a while; what it confirmed must still hold.
+        if let Some(confirmed) = &checkout
+            && inspect().map_err(untouched)? != *confirmed
+        {
+            return Err(untouched(
+                "the checkout changed while confirming".to_owned(),
+            ));
+        }
+    }
+    if let Some(confirmed) = checkout
+        .as_ref()
+        .filter(|checkout| !checkout.losses.is_empty())
+    {
+        // The hints name commands that stop applying once the checkout is gone.
+        let lost = confirmed
+            .losses
+            .iter()
+            .map(|loss| git_dir::without_hint(loss))
+            .collect::<Vec<_>>();
+        interaction.notice(&format!(
+            "{}: deleting with --force; this is lost: {}",
+            reference.path,
+            lost.join("; ")
+        ));
+    }
+    remote.delete(reference)?;
+    let shown = destination.display();
+    if let Some(confirmed) = &checkout {
+        warehouse::remove_exact(git, filesystem, &root, &destination, &reference.clone_url, confirmed)
+            .map_err(|error| match error {
+                ExactRemovalError::Stale(error) => format!(
+                    "deleted {identity}; local removal failed: {error}; {shown} and its declaration remain; finish with {finish}"
+                ),
+                ExactRemovalError::Failed(error) => format!(
+                    "deleted {identity}; local removal failed: {error}; {shown} may be partly removed and its declaration remains; finish with {finish}"
+                ),
+            })?;
+    }
+    let mutations = store
+        .remove(config_path, std::slice::from_ref(&identity))
+        .map_err(|error| {
+            let removed = if checkout.is_some() {
+                format!("removed {shown}; ")
+            } else {
+                String::new()
+            };
+            format!("deleted {identity}; {removed}could not remove the declaration: {error}; finish with {finish}")
+        })?;
+    Ok(Deleted {
+        removed: checkout.is_some(),
+        unregistered: mutations.contains(&Mutation::Changed),
+    })
+}
+
+/// Asks the user to type `owner/name` of `reference`; any other answer declines.
+pub fn confirm_name(
+    interaction: &mut dyn Interaction,
+    reference: &RepositoryRef,
+) -> Result<(), ActionError> {
+    let question = format!(
+        "Delete {} on GitHub for good, with its checkout and declaration? Type {} to confirm",
+        reference.identity(),
+        reference.path
+    );
+    match interaction.input(&question, &reference.path, Some("")) {
+        Ok(answer) if answer == reference.path => Ok(()),
+        Ok(_) => Err(ActionError::Declined),
+        Err(InteractionError::Cancelled) => Err(ActionError::Cancelled),
+        Err(InteractionError::Failed(error)) => Err(ActionError::Failed(error)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Condvar, Mutex};
@@ -1201,6 +1337,12 @@ mod tests {
         ) -> Result<(), String> {
             unreachable!()
         }
+        fn check_delete_scope(&self, _: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn delete(&self, _: &RepositoryRef) -> Result<(), String> {
+            unreachable!()
+        }
     }
 
     struct Answer(Result<bool, InteractionError>, usize);
@@ -1251,5 +1393,217 @@ mod tests {
             *remote.changed.lock().unwrap(),
             [Visibility::Public, Visibility::Public]
         );
+    }
+
+    /// A provider that holds every repository and counts deletions.
+    #[derive(Default)]
+    struct DeletingRemote(Mutex<usize>);
+
+    impl RemoteRepositories for DeletingRemote {
+        fn check(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn state(&self, _: &RepositoryRef) -> Result<Option<RemoteState>, String> {
+            Ok(Some(RemoteState {
+                archived: false,
+                visibility: Visibility::Private,
+            }))
+        }
+        fn archive(&self, _: &RepositoryRef, _: bool) -> Result<(), String> {
+            unreachable!()
+        }
+        fn set_visibility(&self, _: &RepositoryRef, _: Visibility) -> Result<(), String> {
+            unreachable!()
+        }
+        fn create(&self, _: &RepositoryRef, _: Visibility, _: Option<&str>) -> Result<(), String> {
+            unreachable!()
+        }
+        fn publish(
+            &self,
+            _: &RepositoryRef,
+            _: Visibility,
+            _: Option<&str>,
+            _: &Path,
+        ) -> Result<(), String> {
+            unreachable!()
+        }
+        fn check_delete_scope(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn delete(&self, _: &RepositoryRef) -> Result<(), String> {
+            *self.0.lock().unwrap() += 1;
+            Ok(())
+        }
+    }
+
+    /// One existing checkout whose losses the test changes, and a config store behind it.
+    #[derive(Default)]
+    struct Checkout {
+        losses: Arc<Mutex<Vec<String>>>,
+        removed: Mutex<bool>,
+    }
+
+    impl GitRemoval for Checkout {
+        fn inspect_removal(&self, _: &Path, _: &str) -> Result<Vec<String>, String> {
+            Ok(self.losses.lock().unwrap().clone())
+        }
+        fn origin_identity(&self, _: &Path) -> Result<String, String> {
+            unreachable!()
+        }
+    }
+
+    impl RemovalFilesystem for Checkout {
+        type Error = String;
+        fn canonicalize(&self, path: &Path) -> Result<PathBuf, String> {
+            Ok(path.to_path_buf())
+        }
+        fn is_symlink(&self, _: &Path) -> Result<bool, String> {
+            Ok(false)
+        }
+        fn exists(&self, _: &Path) -> bool {
+            true
+        }
+        fn contains_symlink(&self, _: &Path) -> Result<bool, String> {
+            Ok(false)
+        }
+        fn remove_dir_all(&self, _: &Path) -> Result<(), String> {
+            *self.removed.lock().unwrap() = true;
+            Ok(())
+        }
+        fn discover_checkouts(&self, _: &Path) -> Result<Vec<PathBuf>, String> {
+            unreachable!()
+        }
+    }
+
+    impl ConfigStore for Checkout {
+        type Error = String;
+        fn exists(&self, _: &Path) -> bool {
+            unreachable!()
+        }
+        fn load(&self, _: &Path) -> Result<Config, String> {
+            unreachable!()
+        }
+        fn init(&self, _: &Path, _: &str, _: bool) -> Result<(), String> {
+            unreachable!()
+        }
+        fn register(
+            &self,
+            _: &Path,
+            _: &[String],
+            _: Option<&str>,
+        ) -> Result<Vec<Mutation>, String> {
+            unreachable!()
+        }
+        fn remove(&self, _: &Path, _: &[String]) -> Result<Vec<Mutation>, String> {
+            Ok(vec![Mutation::Changed])
+        }
+    }
+
+    /// Types `typed` at the prompt, after adding `appears` to the checkout's losses.
+    struct Typing {
+        typed: Result<String, InteractionError>,
+        losses: Arc<Mutex<Vec<String>>>,
+        appears: Option<&'static str>,
+    }
+
+    impl Typing {
+        fn new(typed: &str) -> Self {
+            Self {
+                typed: Ok(typed.to_owned()),
+                losses: Arc::default(),
+                appears: None,
+            }
+        }
+    }
+
+    impl Interaction for Typing {
+        fn confirm(&mut self, _: &str, _: bool) -> Result<bool, InteractionError> {
+            unreachable!()
+        }
+        fn input(&mut self, _: &str, _: &str, _: Option<&str>) -> Result<String, InteractionError> {
+            if let Some(loss) = self.appears {
+                self.losses.lock().unwrap().push(loss.to_owned());
+            }
+            self.typed.clone()
+        }
+    }
+
+    #[test]
+    fn deleting_on_github_needs_the_exact_owner_and_name() {
+        let reference = RepositoryRef::parse("github.com/org/demo").unwrap();
+        let answer = |typed: Result<String, InteractionError>| {
+            let mut interaction = Typing {
+                typed,
+                ..Typing::new("")
+            };
+            confirm_name(&mut interaction, &reference)
+        };
+        assert_eq!(answer(Ok("org/demo".to_owned())), Ok(()));
+        for typed in ["", "demo", "github.com/org/demo", "org/demo ", "Org/Demo"] {
+            assert_eq!(answer(Ok(typed.to_owned())), Err(ActionError::Declined));
+        }
+        assert_eq!(
+            answer(Err(InteractionError::Cancelled)),
+            Err(ActionError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn delete_refuses_when_the_checkout_changes_during_the_prompt() {
+        let config: Config = toml_edit::de::from_str(
+            "root = \"repos\"\n[providers.\"github.com\"]\npreset = \"github\"\nremote_actions = [\"delete\"]\n",
+        )
+        .unwrap();
+        let reference = RepositoryRef::parse("org/demo").unwrap();
+        let run = |mut interaction: Typing| {
+            let remote = DeletingRemote::default();
+            let checkout = Checkout {
+                losses: Arc::clone(&interaction.losses),
+                ..Checkout::default()
+            };
+            let result = delete(
+                &config,
+                &remote,
+                &checkout,
+                &checkout,
+                &checkout,
+                &mut interaction,
+                Path::new("/config.toml"),
+                &reference,
+                false,
+                false,
+                Path::new("/home"),
+            );
+            let deleted = *remote.0.lock().unwrap();
+            let removed = *checkout.removed.lock().unwrap();
+            (result, deleted, removed)
+        };
+
+        assert_eq!(
+            run(Typing::new("org/demo")),
+            (
+                Ok(Deleted {
+                    removed: true,
+                    unregistered: true
+                }),
+                1,
+                true
+            )
+        );
+        assert_eq!(
+            run(Typing::new("org/other")),
+            (Err(ActionError::Declined), 0, false)
+        );
+        let (result, deleted, removed) = run(Typing {
+            appears: Some("untracked files"),
+            ..Typing::new("org/demo")
+        });
+        assert_eq!(
+            result,
+            Err(ActionError::Failed(
+                "the checkout changed while confirming; GitHub was not touched".to_owned()
+            ))
+        );
+        assert_eq!((deleted, removed), (0, false));
     }
 }
