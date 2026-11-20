@@ -58,13 +58,13 @@ pub fn run(
         Command::Register(command) => {
             register(&config_path, command, selector, interaction, interactive)
         }
-        Command::Unregister(command) => unregister(&config_path, command, selector),
+        Command::Unregister(command) => unregister(&config_path, command, selector, interactive),
         Command::Add(command) => add(&config_path, command, selector, interaction, interactive),
         Command::Remove(command) => {
             remove(&config_path, command, selector, interaction, interactive)
         }
         Command::Ensure(command) => ensure(&config_path, command),
-        Command::Hook(command) => hook(&config_path, command, selector),
+        Command::Hook(command) => hook(&config_path, command, selector, interactive),
         Command::Archive(command) => archive(&config_path, command),
         Command::Rename(command) => rename(&config_path, command, interaction, interactive),
         Command::Visibility(command) => visibility(&config_path, command, interaction, interactive),
@@ -156,6 +156,7 @@ fn register(
             args.include_archived,
             &home,
             selector,
+            interactive,
         ) {
             Ok((references, failed)) => (
                 references
@@ -203,7 +204,12 @@ fn register(
     }
 }
 
-fn unregister(path: &Path, args: UnregisterArgs, selector: &dyn RepositorySelector) -> i32 {
+fn unregister(
+    path: &Path,
+    args: UnregisterArgs,
+    selector: &dyn RepositorySelector,
+    interactive: bool,
+) -> i32 {
     let store = CommandConfigStore::default();
     let home = home_dir();
     let (repositories, provider_failed) = if args.repositories.is_empty() {
@@ -214,6 +220,7 @@ fn unregister(path: &Path, args: UnregisterArgs, selector: &dyn RepositorySelect
             args.include_archived,
             &home,
             selector,
+            interactive,
         ) {
             Ok((references, failed)) => (
                 references
@@ -319,6 +326,7 @@ fn add(
             args.include_archived,
             &home,
             selector,
+            interactive,
         ) {
             Ok(result) => Some(result),
             Err(code) => return code,
@@ -667,7 +675,7 @@ fn print_ensure_summary(outcome: &warehouse::BatchOutcome, skipped: usize) {
     };
 }
 
-fn hook(path: &Path, args: HookArgs, selector: &dyn RepositorySelector) -> i32 {
+fn hook(path: &Path, args: HookArgs, selector: &dyn RepositorySelector, interactive: bool) -> i32 {
     let store = CommandConfigStore::default();
     let home = home_dir();
     let (repositories, picker_failed) = if args.repositories.is_empty() {
@@ -678,6 +686,7 @@ fn hook(path: &Path, args: HookArgs, selector: &dyn RepositorySelector) -> i32 {
             false,
             &home,
             selector,
+            interactive,
         ) {
             Ok((references, failed)) => (
                 references
@@ -733,7 +742,18 @@ fn pick(
     include_archived: bool,
     home: &Path,
     selector: &dyn RepositorySelector,
+    interactive: bool,
 ) -> Result<(Vec<RepositoryRef>, bool), i32> {
+    if !interactive {
+        let command = match context {
+            warehouse::PickerContext::Register => "register",
+            warehouse::PickerContext::Add => "add",
+            warehouse::PickerContext::Unregister => "unregister",
+            warehouse::PickerContext::Hook => "hook",
+        };
+        eprintln!("lager: {command} requires a repository outside a TTY");
+        return Err(2);
+    }
     let git = NativeGit;
     let config = store.load(path).map_err(|error| {
         eprintln!("lager: {}", escape(error));
@@ -937,6 +957,10 @@ fn remove(
         eprintln!(
             "lager: remove requires exactly one of --unregister or --keep-registered and --yes outside a TTY"
         );
+        return 2;
+    }
+    if !interactive && args.repositories.is_empty() {
+        eprintln!("lager: remove requires a repository outside a TTY");
         return 2;
     }
     let unregister = if args.unregister || args.keep_registered {

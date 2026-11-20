@@ -432,9 +432,9 @@ fn hook_without_repositories_reports_a_selected_repository_without_a_hook() -> T
     )?;
     fs::set_permissions(&fzf, fs::Permissions::from_mode(0o755))?;
 
-    let hook = support::lager_with_path(&fixture.home, &fixture.config, Some(&bin))
-        .args(["hook"])
-        .output()?;
+    let mut command = support::lager_with_path(&fixture.home, &fixture.config, Some(&bin));
+    command.arg("hook");
+    let hook = support::terminal_output(command);
     assert!(
         hook.status.success(),
         "{}",
@@ -469,9 +469,9 @@ fn hook_without_repositories_runs_the_selected_hook() -> TestResult {
     )?;
     fs::set_permissions(&fzf, fs::Permissions::from_mode(0o755))?;
 
-    let hook = support::lager_with_path(&fixture.home, &fixture.config, Some(&bin))
-        .args(["hook"])
-        .output()?;
+    let mut command = support::lager_with_path(&fixture.home, &fixture.config, Some(&bin));
+    command.arg("hook");
+    let hook = support::terminal_output(command);
     assert!(
         hook.status.success(),
         "{}",

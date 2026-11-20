@@ -144,6 +144,67 @@ fn bare_remote(temp: &Path, name: &str) -> std::io::Result<std::path::PathBuf> {
 
 #[cfg(unix)]
 #[test]
+fn picker_commands_without_a_repository_fail_outside_a_tty_before_fzf()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&bin)?;
+    executable(
+        &bin.join("gh"),
+        r##"#!/bin/sh
+printf 'called\n' >> "$GH_LOG"
+printf '%s' '[{"data":{"viewer":{"repositories":{"nodes":[{"name":"one","isArchived":false,"sshUrl":"git@github.com:org/one.git","owner":{"login":"org"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]'
+"##,
+    )?;
+    executable(
+        &bin.join("fzf"),
+        "#!/bin/sh\nprintf 'started\\n' >> \"$FZF_LOG\"\nexit 130\n",
+    )?;
+    let config = temp.path().join("config.toml");
+    let original = "root = \"repos\"\n\n[providers.\"github.com\"]\npreset = \"github\"\n\n[[repositories]]\nurl = \"github.com/org/two\"\n";
+    std::fs::write(&config, original)?;
+    let log = temp.path().join("fzf-log");
+    let gh_log = temp.path().join("gh-log");
+    let checkout = home.join("repos/org/two");
+    std::fs::create_dir_all(&checkout)?;
+    git(&checkout, &["init", "-q"])?;
+    git(
+        &checkout,
+        &["remote", "add", "origin", "git@github.com:org/two.git"],
+    )?;
+    for (args, command) in [
+        (&["register"][..], "register"),
+        (&["unregister"][..], "unregister"),
+        (&["hook"][..], "hook"),
+        (&["add", "--register"][..], "add"),
+        (&["remove", "--keep-registered", "--yes"][..], "remove"),
+    ] {
+        let started = std::time::Instant::now();
+        let output = support::lager_with_path(&home, &config, Some(&bin))
+            .env("FZF_LOG", &log)
+            .env("GH_LOG", &gh_log)
+            .args(args)
+            .output()?;
+        assert!(started.elapsed() < Duration::from_secs(5), "{args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!("lager: {command} requires a repository outside a TTY\n"),
+            "{args:?}"
+        );
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(!log.exists(), "fzf started for {args:?}");
+        assert!(!gh_log.exists(), "gh called for {args:?}");
+    }
+    assert_eq!(std::fs::read_to_string(&config)?, original);
+    assert!(checkout.join(".git").is_dir());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn github_catalog_drives_register_add_multi_selection_and_cancellation()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -189,11 +250,12 @@ fi
         &config,
         "root = \"repos\"\n\n[providers.\"github.com\"]\npreset = \"github\"\n",
     )?;
-    let registered = support::lager_with_path(&home, &config, Some(&bin))
+    let mut command = support::lager_with_path(&home, &config, Some(&bin));
+    command
         .env("FZF_MODE", "all")
         .env("GH_ARGS_LOG", temp.path().join("gh-args"))
-        .args(["register"])
-        .output()?;
+        .args(["register", "--post-clone", "true"]);
+    let registered = support::terminal_output(command);
     assert!(
         registered.status.success(),
         "{}",
@@ -212,11 +274,12 @@ fi
         &add_config,
         "root = \"repos\"\n\n[providers.\"github.com\"]\npreset = \"github\"\nprefix = \"forge/team\"\n\n[[repositories]]\nurl = \"github.com/org/*\"\n",
     )?;
-    let added = support::lager_with_path(&home, &add_config, Some(&bin))
+    let mut command = support::lager_with_path(&home, &add_config, Some(&bin));
+    command
         .env("FZF_MODE", "one")
         .env("GIT_CONFIG_GLOBAL", &git_config)
-        .args(["add", "--no-register"])
-        .output()?;
+        .args(["add", "--no-register"]);
+    let added = support::terminal_output(command);
     assert!(
         added.status.success(),
         "{}",
@@ -225,11 +288,12 @@ fi
     assert!(home.join("repos/forge/team/org/one/README.md").is_file());
     std::fs::create_dir_all(home.join("repos/forge/team/org/two"))?;
     std::fs::write(home.join("repos/forge/team/org/two/untracked.txt"), "keep")?;
-    let conflict = support::lager_with_path(&home, &add_config, Some(&bin))
+    let mut command = support::lager_with_path(&home, &add_config, Some(&bin));
+    command
         .env("FZF_MODE", "all")
         .env("GIT_CONFIG_GLOBAL", &git_config)
-        .args(["add", "--no-register"])
-        .output()?;
+        .args(["add", "--no-register"]);
+    let conflict = support::terminal_output(command);
     assert_eq!(conflict.status.code(), Some(1));
     assert!(
         home.join("repos/forge/team/org/two/untracked.txt")
@@ -240,10 +304,9 @@ fi
         &add_config,
         "root = \"repos\"\n\n[providers.\"github.com\"]\npreset = \"github\"\nprefix = \"forge/team\"\n",
     )?;
-    let cancelled = support::lager_with_path(&home, &add_config, Some(&bin))
-        .env("FZF_MODE", "cancel")
-        .args(["register"])
-        .output()?;
+    let mut command = support::lager_with_path(&home, &add_config, Some(&bin));
+    command.env("FZF_MODE", "cancel").args(["register"]);
+    let cancelled = support::terminal_output(command);
     assert_eq!(cancelled.status.code(), Some(130));
     Ok(())
 }
@@ -685,10 +748,11 @@ esac
         "root = \"repos\"\n\n[providers.\"github.com\"]\npreset = \"github\"\n\n[providers.\"dc.example\"]\npreset = \"bitbucket-data-center\"\napi_url = \"http://127.0.0.1:9\"\n\n[[repositories]]\nurl = \"github.com/org/*\"\n\n[[repositories]]\nurl = \"dc.example/project/*\"\n",
     )?;
 
-    let output = support::lager_with_path(&home, &config, Some(&bin))
+    let mut command = support::lager_with_path(&home, &config, Some(&bin));
+    command
         .env("GIT_CONFIG_GLOBAL", &git_config)
-        .args(["add", "--no-register"])
-        .output()?;
+        .args(["add", "--no-register"]);
+    let output = support::terminal_output(command);
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("dc.example"));
     assert!(home.join("repos/org/active/README.md").is_file());
@@ -790,10 +854,11 @@ fn provider_failures_preserve_successful_rows_and_skip_fzf_when_all_fail()
         "root = \"repos\"\n\n[providers.\"dc.example\"]\npreset = \"bitbucket-data-center\"\napi_url = \"http://127.0.0.1:9\"\n\n[[repositories]]\nurl = \"dc.example/project/*\"\n",
     )?;
     let marker = temp.path().join("fzf-used");
-    let picked = support::lager_with_path(&home, &config, Some(&bin))
+    let mut command = support::lager_with_path(&home, &config, Some(&bin));
+    command
         .env("FZF_MARKER", &marker)
-        .args(["add", "--no-register"])
-        .output()?;
+        .args(["add", "--no-register"]);
+    let picked = support::terminal_output(command);
     assert_eq!(picked.status.code(), Some(1));
     assert!(
         !marker.exists(),

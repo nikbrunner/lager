@@ -29,7 +29,11 @@ fn provider_and_config_diagnostics_are_one_safe_line_but_json_errors_are_raw() {
         if command == "list" {
             process.args(["--remote", "--json"]);
         }
-        let output = process.output().unwrap();
+        let output = if command == "register" {
+            support::terminal_output(process)
+        } else {
+            process.output().unwrap()
+        };
         assert_eq!(output.status.code(), Some(1), "{output:?}");
         assert_safe_fields(&output.stderr);
         assert!(String::from_utf8_lossy(&output.stderr).contains("\\x1b"));
@@ -173,11 +177,11 @@ fn removal_picker_uses_safe_fields_and_deletes_only_the_exact_selected_checkout(
         &bin.join("fzf"),
         "#!/bin/sh\ncat > \"$CAPTURE\"\nsed -n '2p' \"$CAPTURE\"\n",
     );
-    let output = support::lager_with_path(temp.path(), &config, Some(&bin))
+    let mut command = support::lager_with_path(temp.path(), &config, Some(&bin));
+    command
         .args(["remove", "--yes", "--force", "--keep-registered"])
-        .env("CAPTURE", &captured)
-        .output()
-        .unwrap();
+        .env("CAPTURE", &captured);
+    let output = support::terminal_output(command);
     assert!(output.status.success(), "{output:?}");
     assert!(!checkout.exists(), "{output:?}");
     assert!(unselected.join(".git").exists(), "{output:?}");

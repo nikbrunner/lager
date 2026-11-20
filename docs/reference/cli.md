@@ -60,8 +60,9 @@ of embedding credentials. See [configuration](config.md) for loaded-config behav
 | `init` in a terminal without `--root` | Prompts with `repos`. |
 | `init` without a root-creation choice | Prompts to create the root, default yes. |
 | `init` without a GitHub choice | Prompts to configure GitHub, default yes. |
-| `register`, `unregister`, `add`, or `hook` without repositories | Uses `fzf --multi` to select candidates. |
-| `remove` without repositories | Uses `fzf` to select local checkouts that have an `origin`; guards run after selection. |
+| `register`, `unregister`, `add`, or `hook` without repositories | Uses `fzf --multi` to select candidates. Outside a TTY it exits `2` with `lager: COMMAND requires a repository outside a TTY` and starts no `fzf`. |
+| `session open` or `session close` without `REPOSITORY` | Uses `fzf` to pick one checkout; see [Picking the checkout](#picking-the-checkout). |
+| `remove` without repositories | Uses `fzf` to select local checkouts that have an `origin`; guards run after selection. Outside a TTY, after the flag check, it exits `2` with `lager: remove requires a repository outside a TTY` and starts no `fzf`. |
 | Interactive `register` without `--post-clone` | Asks whether to add a hook for each repository, default no. |
 | Interactive `add` without a registration choice | Asks whether to register each successful checkout, default yes, then offers its hook. |
 | Interactive `remove` without `--yes` | Asks to remove each existing checkout, default no. |

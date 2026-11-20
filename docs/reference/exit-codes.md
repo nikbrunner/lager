@@ -2,7 +2,7 @@
 
 - `0`: success, no-op, empty candidate set, or an explicitly skipped removal.
 - `1`: configuration, provider, Git, hook, filesystem, or aggregate operation failure.
-- `2`: invalid usage, missing non-TTY confirmation/registration choice, or unsupported command/flag.
+- `2`: invalid usage, missing non-TTY confirmation/registration choice, a picker command without repositories outside a TTY, or unsupported command/flag.
 - `130`: picker or repository interaction cancellation (Esc or Ctrl-C), or a completed
   native Git/hook child reported as interrupted by SIGINT or exiting with
   status `130`.

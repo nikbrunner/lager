@@ -461,10 +461,11 @@ fn no_argument_remove_deletes_the_exact_custom_clone_selected_by_path() -> TestR
     )?;
     fs::set_permissions(&fzf, fs::Permissions::from_mode(0o755))?;
 
-    let output = support::lager_with_path(&home, &config, Some(&bin))
+    let mut command = support::lager_with_path(&home, &config, Some(&bin));
+    command
         .env("FZF_LOG", &fzf_log)
-        .args(["remove", "--keep-registered", "--yes", "--force"])
-        .output()?;
+        .args(["remove", "--keep-registered", "--yes", "--force"]);
+    let output = support::terminal_output(command);
     assert!(
         output.status.success(),
         "{}",

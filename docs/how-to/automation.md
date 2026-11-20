@@ -9,7 +9,7 @@ lager ensure --include-archived
 lager status --remote --json > repositories.json
 ```
 
-`register` and `unregister` accept repeated repository arguments. `add` requires exactly `--register` or `--no-register` outside a TTY; `--post-clone` implies registration and conflicts with `--no-register`. `remove` similarly requires exactly one of `--unregister`/`--keep-registered` plus `--yes` outside a TTY. Invalid choices fail before disk or config mutation.
+`register` and `unregister` accept repeated repository arguments. `add` requires exactly `--register` or `--no-register` outside a TTY; `--post-clone` implies registration and conflicts with `--no-register`. `remove` similarly requires exactly one of `--unregister`/`--keep-registered` plus `--yes` outside a TTY. Invalid choices fail before disk or config mutation. Without a repository, `register`, `unregister`, `add`, `hook`, `remove`, `session open` and `session close` exit `2` outside a TTY and start no picker, so pass the repository.
 
 Use `status --json` as the automation boundary. It prints the rows `lager tui`
 shows, as one [JSON document](../reference/status-json.md) on stdout. With `--remote`, `tui` adds the providers' unregistered and excluded repositories as candidates that `status` does not print; warnings and

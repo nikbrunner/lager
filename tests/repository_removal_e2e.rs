@@ -284,13 +284,13 @@ fn vanished_exact_picker_checkout_never_falls_back_or_unregisters_same_origin() 
     );
     let moved = fixture.temp.path().join("moved");
     let labels = fixture.temp.path().join("labels");
-    let output = support::lager_with_path(&fixture.home, &fixture.config, Some(&bin))
+    let mut command = support::lager_with_path(&fixture.home, &fixture.config, Some(&bin));
+    command
         .args(["remove", "--yes", "--force", "--unregister"])
         .env("SELECTED", &selected)
         .env("MOVED", &moved)
-        .env("LABELS", &labels)
-        .output()
-        .unwrap();
+        .env("LABELS", &labels);
+    let output = support::terminal_output(command);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("selected clone path no longer exists"),
@@ -364,14 +364,14 @@ fn picker_selection_revalidates_worktree_dependencies() {
         "#!/bin/sh\n\"$REAL_GIT\" -C \"$PRIMARY\" worktree add -q --detach \"$DEPENDENT\" || exit 99\nprintf selected > \"$MARKER\"\ncat\n",
     );
     let before = fs::read(&fixture.config).unwrap();
-    let output = support::lager_with_path(&fixture.home, &fixture.config, Some(&bin))
+    let mut command = support::lager_with_path(&fixture.home, &fixture.config, Some(&bin));
+    command
         .args(["remove", "--yes", "--force", "--unregister"])
         .env("REAL_GIT", support::real_tool("git"))
         .env("PRIMARY", &fixture.primary)
         .env("DEPENDENT", &dependent)
-        .env("MARKER", &marker)
-        .output()
-        .unwrap();
+        .env("MARKER", &marker);
+    let output = support::terminal_output(command);
     assert!(marker.is_file());
     fixture.assert_blocked(output, &before);
     git(&dependent, &["status", "--porcelain"]);
@@ -396,13 +396,13 @@ fn picker_lists_checkout_roots_without_inspecting_them() {
     let calls = fixture.temp.path().join("calls");
     let labels = fixture.temp.path().join("labels");
     let before = fs::read(&fixture.config).unwrap();
-    let output = support::lager_with_path(&fixture.home, &fixture.config, Some(&bin))
+    let mut command = support::lager_with_path(&fixture.home, &fixture.config, Some(&bin));
+    command
         .args(["remove", "--yes", "--force", "--unregister"])
         .env("REAL_GIT", support::real_tool("git"))
         .env("CALLS", &calls)
-        .env("LABELS", &labels)
-        .output()
-        .unwrap();
+        .env("LABELS", &labels);
+    let output = support::terminal_output(command);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let primary = fs::canonicalize(&fixture.primary).unwrap();
     assert_eq!(

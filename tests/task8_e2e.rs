@@ -12,10 +12,9 @@ fn lager_with_path(
     path: &std::path::Path,
     args: &[&str],
 ) -> std::process::Output {
-    support::lager_with_path(home, config, Some(path))
-        .args(args)
-        .output()
-        .unwrap()
+    let mut command = support::lager_with_path(home, config, Some(path));
+    command.args(args);
+    support::terminal_output(command)
 }
 
 #[test]
@@ -39,7 +38,9 @@ fn no_argument_remove_has_empty_success_and_picker_cancellation_exit() {
     let config = temp.path().join("config.toml");
     fs::create_dir_all(&home).unwrap();
     fs::write(&config, "root = \"repos\"\n").unwrap();
-    let empty = lager(&config, &home, &["remove", "--keep-registered", "--yes"]);
+    let mut command = support::lager(&home, &config);
+    command.args(["remove", "--keep-registered", "--yes"]);
+    let empty = support::terminal_output(command);
     assert_eq!(empty.status.code(), Some(0));
 
     let source = temp.path().join("source");

@@ -276,6 +276,62 @@ pub fn lager_with_exact_path(home: &Path, config: &Path, path: &Path) -> Command
     command
 }
 
+/// Runs `command` with stdin and stderr on a terminal, so it may ask; stdout stays a pipe.
+/// The terminal's text comes back as stderr, with `\r\n` read as `\n`. Nothing answers on the
+/// terminal, so a command still running after 30 s fails the test.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub fn terminal_output(mut command: Command) -> std::process::Output {
+    use std::process::Stdio;
+    let pty = rustix_openpty::openpty(None, None).expect("open a terminal");
+    let mut controller = std::fs::File::from(pty.controller);
+    let terminal = std::fs::File::from(pty.user);
+    command
+        .env("TERM", "xterm")
+        .stdin(Stdio::from(
+            terminal.try_clone().expect("terminal for stdin"),
+        ))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(terminal));
+    let mut child = command.spawn().expect("start in a terminal");
+    drop(command);
+    let mut stdout = child.stdout.take().expect("stdout pipe");
+    let output = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        bytes
+    });
+    let reader = thread::spawn(move || {
+        let mut text = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        // The terminal ends with EOF or EIO once the last process holding it exits.
+        while let Ok(length @ 1..) = controller.read(&mut buffer) {
+            text.extend_from_slice(&buffer[..length]);
+        }
+        text
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll the command") {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the command ran past 30 s on the terminal; it may be waiting for an answer");
+        }
+        thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let text = reader.join().expect("terminal reader");
+    std::process::Output {
+        status,
+        stdout: output.join().expect("stdout reader"),
+        stderr: String::from_utf8_lossy(&text)
+            .replace("\r\n", "\n")
+            .into_bytes(),
+    }
+}
+
 #[allow(dead_code)]
 pub fn external(scope: &Path, program: impl AsRef<OsStr>) -> Command {
     let home = scope.join(".lager-command-home");
