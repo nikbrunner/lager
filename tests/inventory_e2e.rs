@@ -5817,10 +5817,10 @@ fn inventory_registers_every_marked_row_including_hidden_ones_and_reports_each_o
                     "~/repos/org/beta · github.com/org/beta",
                     "BLOCKED local (hidden by filter)",
                     "~/repos/scratch/local · no identity · no supported origin observed",
-                    "pair: Cancel default",
+                    "absent: default",
                     "Register 1 target",
-                    "1 no-op · 1 blocked stay unchanged",
-                    "Nothing changes until you confirm",
+                    "absent: stay unchanged",
+                    "No active operation",
                 ],
                 b"j\r".to_vec(),
             ),
@@ -6978,9 +6978,9 @@ fn inventory_clone_batch_reports_each_target_and_continues_past_a_failed_and_a_s
                     "ELIGIBLE delta",
                     "ELIGIBLE gamma",
                     "~/repos/delta",
-                    "pair: Cancel default",
+                    "absent: default",
                     "Clone only 4 targets",
-                    "Nothing changes until you confirm",
+                    "No active operation",
                 ],
                 b"j\r".to_vec(),
             ),
@@ -7645,7 +7645,7 @@ fn inventory_long_preview_scrolls_its_targets_while_the_choices_stay_in_view() {
         );
     }
     let tree = checkout_tree(&root);
-    let choices = ["pair: Cancel default", "Register 12 targets"];
+    let choices = ["Cancel", "Register 12 targets"];
 
     run_inventory_pty_actions(
         support::lager(&home, &config).arg("tui"),
@@ -7909,18 +7909,18 @@ fn inventory_removal_confirmation_lists_clean_loss_and_blocked_targets_and_cance
                     "~/repos/org/alpha · github.com/org/alpha · clean",
                     "BLOCKED core (hidden by filter)",
                     "dependent worktree metadata",
-                    "force cannot waive this",
+                    "absent: force cannot waive",
                     "LOSS ACKNOWLEDGMENT REQUIRED draft",
                     "  - unstaged changes",
                     "  - untracked files",
                     "BLOCKED local (hidden by filter)",
                     "~/repos/scratch/local · no identity · no supported origin observed",
                     "[ ] Also remove draft and accept its listed losses",
-                    "pair: losses Space",
-                    "pair: Cancel default",
+                    "absent: losses  Space",
+                    "absent: default",
                     "Remove 1 checkout",
-                    "alpha · cannot be undone",
-                    "Nothing changes until you confirm",
+                    "pair: checkout cannot",
+                    "No active operation",
                     "Space acknowledge",
                     "pair: Esc cancel",
                 ],
@@ -7938,8 +7938,8 @@ fn inventory_removal_confirmation_lists_clean_loss_and_blocked_targets_and_cance
                 vec![
                     "[x] Also remove draft and accept its listed losses",
                     "Remove 2 checkouts",
-                    "alpha, draft · cannot be undone",
-                    "pair: Cancel default",
+                    "pair: checkouts cannot",
+                    "absent: alpha, draft",
                 ],
                 b"\r".to_vec(),
             ),
@@ -8034,7 +8034,8 @@ fn inventory_removal_confirmation_at_80_by_24_shows_every_loss_before_it_arms() 
     overflowing_losses(&root);
     let tree = checkout_tree(&root);
 
-    run_inventory_pty_actions(
+    let mut refused = String::new();
+    run_inventory_pty_with_exit_observing(
         support::lager(&home, &config).arg("tui"),
         &[
             (vec!["NORMAL · 1 row", "absent: Scanning"], b"r".to_vec()),
@@ -8044,7 +8045,7 @@ fn inventory_removal_confirmation_at_80_by_24_shows_every_loss_before_it_arms() 
                     "LOSS ACKNOWLEDGMENT REQUIRED planted",
                     "  - untracked files",
                     "more lines · PageDown",
-                    "PageUp/PageDown scroll · Space acknowledge · Enter choose · Esc cancel",
+                    "j/k focus · Space acknowledge · Enter choose · Esc cancel",
                     "absent: unknown entries in .git: toolstate",
                 ],
                 b" ".to_vec(),
@@ -8079,6 +8080,30 @@ fn inventory_removal_confirmation_at_80_by_24_shows_every_loss_before_it_arms() 
         ],
         24,
         80,
+        0,
+        |action, _, frame| {
+            if action == 2 {
+                refused = frame.to_owned();
+            }
+        },
+    );
+    let screen = screen_text(&refused, 24, 80);
+    let lines = screen.split('\n').collect::<Vec<_>>();
+    // The keys that act come first, so the narrow popup cuts only the scroll keys.
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.split('│').nth(1).is_some_and(|body| body
+                .trim()
+                .starts_with("j/k focus · Space acknowledge · Enter choose · Esc cancel"))),
+        "{screen}"
+    );
+    assert_eq!(lines[23], "", "{screen}");
+    assert!(
+        styled_screen(&refused, 24, 80)[23]
+            .iter()
+            .all(|(_, reversed)| *reversed),
+        "the empty hint bar stays a bar:\n{screen}"
     );
     assert_eq!(checkout_tree(&root), tree);
 }
@@ -8378,7 +8403,7 @@ fn inventory_acknowledged_losses_are_removed_while_a_blocker_and_a_new_loss_stay
                 vec![
                     "[x] Also remove 2 checkouts and accept their listed losses",
                     "Remove 2 checkouts",
-                    "draft, shifty · cannot be undone",
+                    "pair: checkouts cannot",
                 ],
                 b"j\r".to_vec(),
             ),
@@ -8605,7 +8630,7 @@ fn inventory_remove_unregister_writes_once_per_identity_and_previews_the_unselec
                     "~/repos/org/beta · github.com/org/beta · clean",
                     "~/repos/keep/beta · also unregistered · not selected, its files stay",
                     "ELIGIBLE gone",
-                    "~/repos/org/gone · github.com/org/gone · known missing · absence is rechecked first",
+                    "~/repos/org/gone · github.com/org/gone · known missing",
                     "ELIGIBLE beta (copy)",
                     "~/repos/archive/beta · github.com/org/beta · clean",
                     "Remove + unregister 3 targets",
@@ -8777,7 +8802,8 @@ fn inventory_remove_unregister_rechecks_that_a_known_missing_destination_is_stil
                 vec![
                     "Remove checkouts / unregister",
                     "ELIGIBLE gone",
-                    "known missing · absence is rechecked first",
+                    "known missing",
+                    "absent: rechecked",
                     "Remove + unregister 1 target",
                 ],
                 b"j\r".to_vec(),
@@ -8840,7 +8866,7 @@ fn inventory_keys_typed_before_a_confirmation_is_drawn_never_answer_it() {
                     "Remove checkouts / keep registration",
                     "LOSS ACKNOWLEDGMENT REQUIRED alpha",
                     "[ ] Also remove alpha and accept its listed losses",
-                    "pair: Cancel default",
+                    "absent: default",
                     "absent: Batch /",
                 ],
                 b"\r".to_vec(),
@@ -8863,11 +8889,7 @@ fn inventory_keys_typed_before_a_confirmation_is_drawn_never_answer_it() {
                 b"kk m\rj\rj\r".to_vec(),
             ),
             (
-                vec![
-                    "Unregister / preview",
-                    "ELIGIBLE alpha",
-                    "pair: Cancel default",
-                ],
+                vec!["Unregister / preview", "ELIGIBLE alpha", "absent: default"],
                 b"\r".to_vec(),
             ),
             (

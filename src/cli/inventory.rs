@@ -1815,7 +1815,7 @@ impl TerminalSession {
         selection.preview.as_ref().map_or(0, |batch| {
             let width = popup_body_width(self.area(), WIDE_POPUP);
             let lines = preview_lines(batch, &session.home, width);
-            let choices = preview_choices(batch, selection.preview_focus, &session.bindings);
+            let choices = preview_choices(batch, selection.preview_focus);
             let (_, list, _, _) = preview_regions(self.area(), &lines, choices.len() as u16);
             Paragraph::new(lines)
                 .wrap(Wrap { trim: false })
@@ -1830,7 +1830,7 @@ impl TerminalSession {
         selection.preview.as_ref().map_or(1, |batch| {
             let width = popup_body_width(self.area(), WIDE_POPUP);
             let lines = preview_lines(batch, &session.home, width);
-            let choices = preview_choices(batch, selection.preview_focus, &session.bindings);
+            let choices = preview_choices(batch, selection.preview_focus);
             preview_regions(self.area(), &lines, choices.len() as u16)
                 .1
                 .height
@@ -2176,8 +2176,7 @@ impl TerminalSession {
                         if let Some(batch) = &shown.preview {
                             let lines =
                                 preview_lines(batch, home, popup_body_width(area, WIDE_POPUP));
-                            let choice_lines =
-                                preview_choices(batch, shown.preview_focus, bindings);
+                            let choice_lines = preview_choices(batch, shown.preview_focus);
                             let ([popup, title, _, footer], list, more, choices) =
                                 preview_regions(area, &lines, choice_lines.len() as u16);
                             let below = Paragraph::new(lines.clone())
@@ -2237,18 +2236,18 @@ impl TerminalSession {
                                 first_key_hint(bindings, Mode::Confirmation, action, label)
                             };
                             let focus_hint =
-                                format!("{} focus", rows_hint(bindings, Mode::Confirmation, true));
+                                format!("{} focus", rows_hint(bindings, Mode::Confirmation, false));
                             let scroll = format!("{pages} scroll");
                             let (choose, cancel) = (
                                 hint(Action::Accept, "choose"),
                                 hint(Action::Cancel, "cancel"),
                             );
-                            // A narrow popup cuts the end of the line: in a removal
-                            // confirmation scrolling comes first, since every loss has to be
-                            // seen, then the exit routes.
+                            // A narrow popup cuts the end of the line, so in a removal
+                            // confirmation the keys that act come before scrolling; the row
+                            // above the choices names the paging key while lines are left.
                             let hints = if acknowledges {
                                 let acknowledge = hint(Action::Acknowledge, "acknowledge");
-                                [scroll, acknowledge, choose, cancel, focus_hint]
+                                [focus_hint, acknowledge, choose, cancel, scroll]
                             } else {
                                 [focus_hint, scroll, choose, cancel, String::new()]
                             };
@@ -3010,7 +3009,6 @@ fn status_lines(
         && !matches!(
             view,
             View::Search
-                | View::Preview
                 | View::WorktreeConfirm
                 | View::WorktreeInput
                 | View::WorktreePlan
@@ -3039,10 +3037,9 @@ fn status_lines(
         ),
         _ if message.is_some() && complete => message.unwrap_or_default().to_owned(),
         _ if message.is_some() => format!("{state} · {}", message.unwrap_or_default()),
-        View::Preview
-        | View::WorktreeConfirm
-        | View::RemoteDeleteConfirm
-        | View::RemoteVisibilityConfirm => "Nothing changes until you confirm".to_owned(),
+        View::WorktreeConfirm | View::RemoteDeleteConfirm | View::RemoteVisibilityConfirm => {
+            "Nothing changes until you confirm".to_owned()
+        }
         View::RemoteCreateInput | View::RemoteRenameInput => {
             "Ordinary keys type text · nothing changes on GitHub yet".to_owned()
         }
@@ -3050,6 +3047,7 @@ fn status_lines(
         View::WorktreePlan => "Nothing changes until you choose".to_owned(),
         View::Worktrees => "Worktrees target the current row · marks are not used".to_owned(),
         View::Inspect
+        | View::Preview
         | View::AddInput
         | View::AddPreview
         | View::Menu
@@ -5250,14 +5248,15 @@ fn preview_lines(batch: &Batch, home: &Path, width: u16) -> Vec<Line<'static>> {
             && target.blocked.is_none()
             && target.found
             && !target.removal.losses.is_empty();
-        if batch.action.removes() && !lossy {
-            detail.push(if target.blocked.is_some() {
-                "force cannot waive this".to_owned()
-            } else if !target.found {
-                "known missing · absence is rechecked first".to_owned()
-            } else {
-                "clean".to_owned()
-            });
+        if batch.action.removes() && !lossy && target.blocked.is_none() {
+            detail.push(
+                if target.found {
+                    "clean"
+                } else {
+                    "known missing"
+                }
+                .to_owned(),
+            );
         }
         if !lines.is_empty() {
             lines.push(Line::default());
@@ -5305,21 +5304,12 @@ fn preview_lines(batch: &Batch, home: &Path, width: u16) -> Vec<Line<'static>> {
 
 /// The preview's choices with one cursor at `focus`: the loss acknowledgment when a removal
 /// lists losses, then Cancel, then the action.
-fn preview_choices(batch: &Batch, focus: usize, bindings: &Bindings) -> Vec<Line<'static>> {
-    let count = |noop: bool| {
-        batch
-            .targets
-            .iter()
-            .filter(|target| target.blocked.is_none() && target.noop.is_some() == noop)
-            .count()
-    };
-    let (changing, noop) = (count(false), count(true));
-    let blocked = batch.targets.len() - changing - noop;
-    let unchanged = [(noop, "no-op"), (blocked, "blocked")]
-        .into_iter()
-        .filter(|(count, _)| *count > 0)
-        .map(|(count, label)| format!("{count} {label}"))
-        .collect::<Vec<_>>();
+fn preview_choices(batch: &Batch, focus: usize) -> Vec<Line<'static>> {
+    let changing = batch
+        .targets
+        .iter()
+        .filter(|target| target.blocked.is_none() && target.noop.is_none())
+        .count();
     let choice = |label: String, hint: String, focused: bool| {
         let style = if focused {
             Style::default().add_modifier(Modifier::REVERSED)
@@ -5343,20 +5333,12 @@ fn preview_choices(batch: &Batch, focus: usize, bindings: &Bindings) -> Vec<Line
                 },
                 if names.len() == 1 { "its" } else { "their" }
             ),
-            bindings
-                .keys(Mode::Confirmation, Action::Acknowledge)
-                .first()
-                .map(|key| (*key).to_owned())
-                .unwrap_or_default(),
+            String::new(),
             focus == 0,
         ));
     }
     let cancel = lines.len();
-    lines.push(choice(
-        "Cancel".to_owned(),
-        "default".to_owned(),
-        focus == cancel,
-    ));
+    lines.push(choice("Cancel".to_owned(), String::new(), focus == cancel));
     lines.push(if batch.action.removes() {
         let run = batch
             .targets
@@ -5378,16 +5360,11 @@ fn preview_choices(batch: &Batch, focus: usize, bindings: &Bindings) -> Vec<Line
                 )
             },
             if run.is_empty() {
-                "nothing is eligible".to_owned()
+                "nothing is eligible"
             } else {
-                format!(
-                    "{} · cannot be undone",
-                    run.iter()
-                        .map(|target| target.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            },
+                "cannot be undone"
+            }
+            .to_owned(),
             focus > cancel,
         )
     } else {
@@ -5397,16 +5374,7 @@ fn preview_choices(batch: &Batch, focus: usize, bindings: &Bindings) -> Vec<Line
                 batch.action.label(),
                 if changing == 1 { "target" } else { "targets" }
             ),
-            if unchanged.is_empty() {
-                match batch.action {
-                    BatchAction::Clone => "files only",
-                    BatchAction::CloneRegister => "files, then configuration",
-                    _ => "configuration only",
-                }
-                .to_owned()
-            } else {
-                format!("{} stay unchanged", unchanged.join(" · "))
-            },
+            String::new(),
             focus > cancel,
         )
     });

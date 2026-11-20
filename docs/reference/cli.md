@@ -235,7 +235,7 @@ every target's exact found path, never on the configured destination of a
 checkout found elsewhere, and fixes the targets, their identities and what the
 guards answered. The confirmation lists each target as `ELIGIBLE` (`clean`),
 `LOSS ACKNOWLEDGMENT REQUIRED` with its named local-state losses, or `BLOCKED`
-with the guard that forbids it and `force cannot waive this`. A checkout found
+with the guard that forbids it, which force cannot waive. A checkout found
 at the configured destination of another identity's declaration is removed at
 that found path, and the confirmation names the declaration, which stays.
 Cancel is the default and changes nothing. A confirmation, like the batch
