@@ -38,7 +38,6 @@ pub(super) struct Popup {
     /// Git reports real paths, so `~` stands for the real HOME here.
     home: PathBuf,
     repository: Repository,
-    identity: Option<String>,
     /// Git's list as of the last change, each working tree with its state label.
     rows: Vec<(WorktreeRecord, String)>,
     faults: Vec<String>,
@@ -106,10 +105,6 @@ impl Popup {
     /// Reads Git's list and every working tree's local changes once; frames draw this snapshot.
     fn reload(&mut self) {
         let listing = worktrees::list(&GIT, &FILES, &self.repository);
-        self.identity = listing
-            .worktrees
-            .first()
-            .and_then(|record| record.repository_identity.clone());
         self.faults = listing
             .errors
             .iter()
@@ -209,7 +204,6 @@ pub(super) fn open(
                 name,
                 home: std::fs::canonicalize(&session.home).unwrap_or(session.home.clone()),
                 repository,
-                identity: None,
                 rows: Vec::new(),
                 faults: Vec::new(),
                 cursor: 0,
@@ -541,6 +535,7 @@ pub(super) fn run(
                     None
                 }
                 Err(RemoveError::Blocked(blockers)) => {
+                    session.message = Some("Worktree removal blocked · nothing removed".to_owned());
                     popup.stage = Stage::Blocked {
                         path: inspection.path.clone(),
                         blockers,

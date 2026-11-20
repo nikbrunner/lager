@@ -3017,24 +3017,6 @@ fn status_lines(
         ),
         _ if message.is_some() && complete => message.unwrap_or_default().to_owned(),
         _ if message.is_some() => format!("{state} · {}", message.unwrap_or_default()),
-        View::Inspect
-        | View::Preview
-        | View::AddInput
-        | View::AddPreview
-        | View::Menu
-        | View::Help
-        | View::Problems
-        | View::Batch
-        | View::QuitBatch
-        | View::Worktrees
-        | View::WorktreeInput
-        | View::WorktreePlan
-        | View::WorktreeConfirm
-        | View::WorktreeBlocked
-        | View::RemoteCreateInput
-        | View::RemoteRenameInput
-        | View::RemoteDeleteConfirm
-        | View::RemoteVisibilityConfirm => state.to_owned(),
         View::Normal if complete && host_notice.is_some() => {
             host_notice.unwrap_or_default().to_owned()
         }
@@ -3051,6 +3033,7 @@ fn status_lines(
         }
         View::Normal if refresh.is_empty() => state.to_owned(),
         View::Normal => format!("{state} · {refresh}"),
+        _ => state.to_owned(),
     };
     let warned = operation.starts_with("! ") || host_notice == Some(operation.as_str());
     lines.push(Line::styled(operation, if warned { warn() } else { dim() }));
@@ -3874,11 +3857,20 @@ fn inspection_widget(
             name == "Branch",
         );
     }
-    // Found path carries the misplacement as `nonstandard`.
+    // Found path carries the misplacement against the shown configured path as `nonstandard`;
+    // a misplacement against another declaration of the identity stays a warning.
+    let marked = row
+        .configured_destination
+        .as_ref()
+        .map(|path| format!("; configured: {}", path.to_string_lossy()));
     let warnings = row
         .warnings
         .iter()
-        .filter(|warning| !(nonstandard && warning.starts_with("misplaced checkout;")))
+        .filter(|warning| {
+            !(nonstandard
+                && warning.starts_with("misplaced checkout;")
+                && marked.as_ref().is_some_and(|tail| warning.ends_with(tail)))
+        })
         .collect::<Vec<_>>();
     if !warnings.is_empty() {
         lines.push(Line::default());
@@ -5038,10 +5030,20 @@ fn outcome_label(outcome: Outcome) -> &'static str {
 /// default, and `cancel` focuses cancelling the remaining work.
 fn batch_widget(batch: &Batch, width: u16, cancel: bool) -> Paragraph<'static> {
     let active = batch.active();
-    let name_width = batch
+    let names = batch
         .targets
         .iter()
-        .map(|target| Line::raw(target.name.clone()).width())
+        .map(|target| {
+            if target.hidden {
+                format!("{} (hidden by filter)", target.name)
+            } else {
+                target.name.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let name_width = names
+        .iter()
+        .map(|name| Line::raw(name.clone()).width())
         .max()
         .unwrap_or(0)
         .max(11);
@@ -5058,7 +5060,7 @@ fn batch_widget(batch: &Batch, width: u16, cancel: bool) -> Paragraph<'static> {
         dim(),
     )];
     let reason_column = 13 + Line::raw(cells("", "", "")).width();
-    for (index, (target, result)) in batch.targets.iter().zip(&batch.results).enumerate() {
+    for (index, result) in batch.results.iter().enumerate() {
         let (label, style) = match result.outcome {
             _ if Some(index) == active => ("ACTIVE", warn()),
             Outcome::Succeeded => ("SUCCEEDED", focus()),
@@ -5087,7 +5089,7 @@ fn batch_widget(batch: &Batch, width: u16, cancel: bool) -> Paragraph<'static> {
         };
         lines.push(Line::from(vec![
             Span::styled(format!("{label:<12} "), style),
-            Span::raw(cells(&target.name, &result.disk, &result.config)),
+            Span::raw(cells(&names[index], &result.disk, &result.config)),
             Span::styled(first, dim()),
         ]));
         lines.extend(
@@ -5275,6 +5277,12 @@ fn preview_choices(batch: &Batch, focus: usize) -> Vec<Line<'static>> {
         .iter()
         .filter(|target| target.blocked.is_none() && target.noop.is_none())
         .count();
+    let hidden = batch.targets.iter().filter(|target| target.hidden).count();
+    let with_hidden = |hint: &str| match (hint, hidden) {
+        (hint, 0) => hint.to_owned(),
+        ("", hidden) => format!("{hidden} hidden by filter"),
+        (hint, hidden) => format!("{hint} · {hidden} hidden by filter"),
+    };
     let choice = |label: String, hint: String, focused: bool| {
         let style = if focused {
             Style::default().add_modifier(Modifier::REVERSED)
@@ -5324,12 +5332,11 @@ fn preview_choices(batch: &Batch, focus: usize) -> Vec<Line<'static>> {
                     if run.len() == 1 { "target" } else { "targets" }
                 )
             },
-            if run.is_empty() {
+            with_hidden(if run.is_empty() {
                 "nothing is eligible"
             } else {
                 "cannot be undone"
-            }
-            .to_owned(),
+            }),
             focus > cancel,
         )
     } else {
@@ -5339,7 +5346,7 @@ fn preview_choices(batch: &Batch, focus: usize) -> Vec<Line<'static>> {
                 batch.action.label(),
                 if changing == 1 { "target" } else { "targets" }
             ),
-            String::new(),
+            with_hidden(""),
             focus > cancel,
         )
     });

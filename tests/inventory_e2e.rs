@@ -63,9 +63,22 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
                 ),
                 (vec!["SEARCH · 2 rows", "/ org/alpha"], b"\r".to_vec()),
                 (vec!["NORMAL · 2 rows"], b"\r".to_vec()),
-                (vec!["INSPECT · 2 rows", "Inspect / alpha"], b"?".to_vec()),
                 (
-                    vec!["HELP · 2 rows", "Keyboard / effective bindings"],
+                    vec![
+                        "INSPECT · 2 rows",
+                        "Inspect / alpha",
+                        "j/k scroll · c copy · Esc close",
+                        "absent: q quit",
+                    ],
+                    b"?".to_vec(),
+                ),
+                (
+                    vec![
+                        "HELP · 2 rows",
+                        "Keyboard / effective bindings",
+                        "j/k scroll · Esc close",
+                        "absent: R refresh",
+                    ],
                     b"\x1b".to_vec(),
                 ),
                 (
@@ -3639,7 +3652,14 @@ fn inventory_menu_holds_its_entries_and_one_hint_row_over_an_empty_hint_bar() {
             support::lager(&home, &config).arg("tui"),
             &[
                 (vec!["NORMAL · 1 row", "absent: Scanning"], b"m".to_vec()),
-                (vec!["All actions"], b"\x1b".to_vec()),
+                (
+                    vec![
+                        "All actions",
+                        "j/k select · Enter choose · Esc back",
+                        "absent: q quit",
+                    ],
+                    b"\x1b".to_vec(),
+                ),
                 (vec!["NORMAL", "absent: All actions"], b"q".to_vec()),
             ],
             rows,
@@ -3689,7 +3709,12 @@ fn inventory_help_follows_its_board_with_one_hint_row_over_an_empty_hint_bar() {
         &[
             (vec!["Scan complete · 0 repositories"], b"?".to_vec()),
             (
-                vec!["Keyboard / effective bindings", "Other modes"],
+                vec![
+                    "Keyboard / effective bindings",
+                    "Other modes",
+                    "j/k scroll · Esc close",
+                    "absent: q quit",
+                ],
                 b"\x1b".to_vec(),
             ),
             (vec!["NORMAL", "absent: Keyboard /"], b"q".to_vec()),
@@ -4901,6 +4926,7 @@ fn inventory_session_problems_list_every_failure_behind_exit_one() {
                     "pair: scan ~/repos:",
                     "~/repos: permission denied ·",
                     "j/k scroll · Esc close",
+                    "absent: q quit",
                     "absent: Quit returns 1",
                     "absent: are not problems",
                 ],
@@ -5875,6 +5901,64 @@ fn inventory_registers_every_marked_row_including_hidden_ones_and_reports_each_o
 
 #[cfg(unix)]
 #[test]
+fn inventory_preview_and_outcomes_name_hidden_targets_at_80_by_24() {
+    let temp = temp_dir();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::write(
+        &config,
+        "root = \"repos\"\n[providers.\"github.com\"]\npreset = \"github\"\n\n\
+         [inventory.keys.normal]\nregister = [\"g\"]\n",
+    )
+    .unwrap();
+    for index in 1..=14 {
+        let name = format!("r{index:02}");
+        init_repo(
+            &root.join("org").join(&name),
+            &format!("git@github.com:org/{name}.git"),
+            true,
+        );
+    }
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (
+                vec!["NORMAL · 14 rows", "absent: Scanning"],
+                [b"k".repeat(14), b" j".repeat(14)].concat(),
+            ),
+            (vec!["14 marked"], b"/r01\r".to_vec()),
+            (
+                vec!["NORMAL · 1 row", "14 marked · 13 hidden"],
+                b"g".to_vec(),
+            ),
+            (
+                vec![
+                    "Register / preview",
+                    "more lines",
+                    "Register 14 targets  13 hidden by filter",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Batch / Register",
+                    "j/k scroll · Esc return",
+                    "r02 (hidden by filter)",
+                    "absent: r01 (hidden",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Batch /"], b"q".to_vec()),
+        ],
+        24,
+        80,
+    );
+    assert!(fs::read_to_string(&config).unwrap().contains("org/r14"));
+}
+
+#[cfg(unix)]
+#[test]
 fn inventory_registration_edits_wildcard_exclusions() {
     let temp = temp_dir();
     let home = temp.path().join("home");
@@ -6060,17 +6144,37 @@ fn inventory_add_follows_its_boards_with_one_hint_row_over_an_empty_hint_bar() {
             support::lager(&home, &config).arg("tui"),
             &[
                 (vec!["NORMAL · 0 rows", "absent: Scanning"], b"a".to_vec()),
-                (vec!["Add / URL or reference"], b"org/*\r".to_vec()),
                 (
-                    vec!["Rejected: wildcards are not accepted"],
+                    vec![
+                        "Add / URL or reference",
+                        "Enter preview · Tab focus · Esc back",
+                        "absent: q quit",
+                    ],
+                    b"org/*\r".to_vec(),
+                ),
+                (
+                    vec![
+                        "Rejected: wildcards are not accepted",
+                        "Enter preview · Tab focus · Esc back",
+                        "absent: q quit",
+                    ],
                     [vec![0x7f; 5], b"org/link\r".to_vec()].concat(),
                 ),
                 (
-                    vec!["Add / preview", "pair: checkout unreadable"],
+                    vec![
+                        "Add / preview",
+                        "pair: checkout unreadable",
+                        "j/k select · Enter choose · Esc back",
+                        "absent: q quit",
+                    ],
                     b"kkkkj\r".to_vec(),
                 ),
                 (
-                    vec!["Clone only unavailable: destination is unreadable"],
+                    vec![
+                        "Clone only unavailable: destination is unreadable",
+                        "j/k select · Enter choose · Esc back",
+                        "absent: q quit",
+                    ],
                     b"\x1b".to_vec(),
                 ),
                 (vec!["Add / URL or reference"], b"\x1b".to_vec()),
@@ -7920,6 +8024,7 @@ fn inventory_removal_confirmation_lists_clean_loss_and_blocked_targets_and_cance
                     "absent: default",
                     "Remove 1 checkout",
                     "pair: checkout cannot",
+                    "cannot be undone · 3 hidden by filter",
                     "No active operation",
                     "Space acknowledge",
                     "pair: Esc cancel",
@@ -10923,6 +11028,52 @@ fn inventory_worktree_popup_aborts_when_the_worktree_changed_after_the_confirmat
 
 #[cfg(unix)]
 #[test]
+fn inventory_worktree_popup_says_nothing_was_removed_when_a_lock_lands_after_the_confirmation() {
+    let temp = temp_dir();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    let hotfix = linked_worktree(&core, "hotfix", &["-b", "hotfix"]);
+
+    run_inventory_pty_actions_with_hook(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"wjr".to_vec()),
+            (
+                vec!["Remove worktree / hotfix", "pair: worktree cannot"],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "the worktree changed after it was inspected; nothing removed",
+                    "Worktrees / core",
+                    "pair: hotfix locked:",
+                    "absent: Remove worktree /",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Worktrees /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        |action| {
+            if action == 1 {
+                run_git(
+                    &core,
+                    &[
+                        "worktree",
+                        "lock",
+                        "--reason",
+                        "on loan",
+                        hotfix.to_str().unwrap(),
+                    ],
+                );
+            }
+        },
+    );
+    assert!(hotfix.is_dir());
+}
+
+#[cfg(unix)]
+#[test]
 fn inventory_worktree_popup_reports_a_failed_creation_and_returns_after_enter() {
     let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
@@ -11388,7 +11539,8 @@ fn inventory_worktree_popup_starts_on_the_primary_and_scrolls_every_blocker_into
     );
     init_repo_without_origin(&first.join("vendor/lib"));
 
-    run_inventory_pty_actions(
+    let mut scrolled = String::new();
+    run_inventory_pty_with_exit_observing(
         support::lager(&home, &config).arg("tui"),
         &[
             (POPUP_READY.to_vec(), b"w".to_vec()),
@@ -11405,6 +11557,7 @@ fn inventory_worktree_popup_starts_on_the_primary_and_scrolls_every_blocker_into
                 vec![
                     "Remove worktree / blocked",
                     "nested repository vendor/lib",
+                    "j/k scroll · Esc back",
                     "absent: Nothing was removed",
                     "absent: path ",
                 ],
@@ -11418,6 +11571,26 @@ fn inventory_worktree_popup_starts_on_the_primary_and_scrolls_every_blocker_into
         ],
         24,
         80,
+        0,
+        |action, _, frame| {
+            if action == 3 {
+                scrolled = screen_text(frame, 24, 80);
+            }
+        },
+    );
+    // The last blocker is the last body line: the scroll reaches the end of the body.
+    let body = scrolled
+        .lines()
+        .filter_map(|line| line.split('│').nth(1).map(str::trim))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let hints = body
+        .iter()
+        .position(|line| *line == "j/k scroll · Esc back")
+        .unwrap_or_else(|| panic!("{scrolled}"));
+    assert!(
+        body[hints - 1].ends_with("nested repository vendor/lib"),
+        "{scrolled}"
     );
     assert!(first.join("vendor/lib/README").exists());
 }
@@ -12940,9 +13113,25 @@ fn inventory_config_reload_waits_until_an_open_confirmation_closes() {
         &[
             (vec!["ok", "clean", "pending"], b"k".to_vec()),
             (vec!["selected: ok", "pending"], b"r".to_vec()),
-            (vec!["CONFIRM", "pair: Esc cancel"], b"\x1b".to_vec()),
+            // `x` is the new cancel key; with the old bindings still active it does nothing,
+            // and Esc closes the dialog. A reload under the dialog would make `x` cancel and
+            // Esc then quit, so the reload notice never shows.
             (
-                vec!["NORMAL ·", "Config changed on disk · reloaded"],
+                vec!["CONFIRM", "pair: Esc cancel", "Remove 1 checkout"],
+                b"x\x1b".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL ·",
+                    "Config changed on disk · reloaded",
+                    "clean",
+                    "selected: ok",
+                ],
+                b"r".to_vec(),
+            ),
+            (vec!["CONFIRM", "Remove 1 checkout"], b"x".to_vec()),
+            (
+                vec!["NORMAL ·", "Remove only cancelled · nothing changed"],
                 b"q".to_vec(),
             ),
         ],
@@ -12954,8 +13143,6 @@ fn inventory_config_reload_waits_until_an_open_confirmation_closes() {
                 let mut text = fs::read_to_string(&config).unwrap();
                 text.push_str("[inventory.keys.confirmation]\ncancel = [\"x\"]\n");
                 fs::write(&config, text).unwrap();
-                // Several passes of the event loop run while the dialog is open.
-                std::thread::sleep(Duration::from_millis(300));
             }
         },
     );
@@ -13819,7 +14006,11 @@ fn inventory_rename_form_holds_one_hint_row_over_an_empty_hint_bar_and_refuses_a
                 b"/x\r".to_vec(),
             ),
             (
-                vec!["Rejected: use letters, digits, -, _ and . without a leading -"],
+                vec![
+                    "Rejected: use letters, digits, -, _ and . without a leading -",
+                    "Enter choose · Esc back",
+                    "absent: q quit",
+                ],
                 b"\x1b".to_vec(),
             ),
             (
