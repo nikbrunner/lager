@@ -297,6 +297,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         let screen = screen_text(inspect, rows, cols);
         let lines = screen.split('\n').collect::<Vec<_>>();
         assert!(lines[0].ends_with("INSPECT · 2 rows"), "{screen}");
+        assert_eq!(lines[rows - 2], "  No active operation", "{screen}");
         assert_eq!(lines[rows - 1], "", "{screen}");
         assert_eq!(
             styled_screen(inspect, rows, cols)[rows - 1]
@@ -337,17 +338,12 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
             field("Found path", "~/repos/org/alpha"),
             field("Configured path", "~/repos/org/alpha"),
             field("Registration", "explicit"),
-            field(
-                "Declaration",
-                "github.com/org/alpha (explicit), satisfied by ~/repos/org/alpha",
-            ),
+            field("Declaration", "explicit · satisfied by ~/repos/org/alpha"),
             field("Checkout", "cloned"),
             field("Origin", "git@github.com:org/alpha.git"),
             field("Branch", "main"),
             field("Changes", "1 modified"),
-            String::new(),
-            field("Register", "no-op · identity is already registered"),
-            field("Unregister", "available"),
+            "j/k scroll · c copy · Esc close".to_owned(),
         ];
         let visible = expected
             .iter()
@@ -366,7 +362,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
             "{screen}"
         );
         assert!(
-            body.contains(&"j/k ↑/↓ scroll · c copy a value… · Esc close"),
+            body.contains(&"j/k scroll · c copy · Esc close"),
             "{screen}"
         );
 
@@ -1612,7 +1608,11 @@ exclude = ["repo"]
                 b"/elsewhere\r\r".to_vec(),
             ),
             (
-                vec!["Inspect / managed", "misplaced checkout; found:"],
+                vec![
+                    "Inspect / managed",
+                    "elsewhere/managed · nonstandard",
+                    "absent: misplaced checkout",
+                ],
                 b"\x1b".to_vec(),
             ),
             (vec!["NORMAL ·", "absent: Inspect /"], b"q".to_vec()),
@@ -3608,10 +3608,7 @@ fn inventory_compact_hints_keep_actions_and_popup_exit_routes_visible() {
                 b"j\r".to_vec(),
             ),
             (
-                vec![
-                    "Inspect / alpha",
-                    "j/k ↑/↓ scroll · c copy a value… · Esc close",
-                ],
+                vec!["Inspect / alpha", "j/k scroll · c copy · Esc close"],
                 b"\x1b".to_vec(),
             ),
             (
@@ -3799,7 +3796,7 @@ fn inventory_help_uses_the_invoking_mode_and_returns_to_it() {
 
 #[cfg(unix)]
 #[test]
-fn inventory_inspect_explains_unavailable_actions_without_changing_the_checkout() {
+fn inventory_inspect_shows_no_actions_and_typed_action_keys_change_nothing() {
     let temp = temp_dir();
     let home = temp.path().join("home");
     let config = temp.path().join("config.toml");
@@ -3817,11 +3814,10 @@ fn inventory_inspect_explains_unavailable_actions_without_changing_the_checkout(
             (vec!["Inspect / alpha"], vec![b'j'; 40]),
             (
                 vec![
-                    "pair: Register no-op",
-                    "pair: Unregister available",
-                    "pair: Clone no-op",
-                    "pair: Remove available",
-                    "removes the found path",
+                    "pair: Changes clean",
+                    "absent: available",
+                    "absent: no-op",
+                    "absent: removes the found path",
                 ],
                 b"ar \x1b".to_vec(),
             ),
@@ -3990,7 +3986,7 @@ fn inventory_search_and_inspection_remain_live_during_a_controlled_probe() {
 
 #[cfg(unix)]
 #[test]
-fn inventory_inspect_during_a_scan_says_the_destination_is_not_observed_yet() {
+fn inventory_during_a_scan_inspect_and_the_menu_keep_an_unobserved_destination_unknown() {
     let temp = temp_dir();
     // Search also matches the absolute temp path, so the query must be one no temp dir spells.
     let home = temp.path().join("home");
@@ -4024,14 +4020,27 @@ fn inventory_inspect_during_a_scan_says_the_destination_is_not_observed_yet() {
             (vec!["SEARCH ·", "1 row"], b"\x1b".to_vec()),
             (vec!["NORMAL ·", "/ zphqxjvk"], b"\r".to_vec()),
             (
+                vec!["INSPECT", "pair: Checkout unknown", "absent: unavailable"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL ·", "/ zphqxjvk"], b"m\r".to_vec()),
+            (
                 vec![
-                    "INSPECT",
-                    "unavailable · checkout state is unknown until it is observed",
+                    "Repository actions / zphqxjvk",
+                    "checkout state is unknown until it is observed",
                     "absent: holds no observed checkout",
                 ],
                 b"\x1b".to_vec(),
             ),
-            (vec!["NORMAL ·", "/ zphqxjvk"], b"q".to_vec()),
+            (
+                vec!["All actions", "absent: Repository actions /"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL ·", "absent: All actions"], b"r".to_vec()),
+            (
+                vec!["Remove only unavailable: checkout state is unknown until it is observed"],
+                b"q".to_vec(),
+            ),
         ],
         40,
         132,
@@ -4039,7 +4048,7 @@ fn inventory_inspect_during_a_scan_says_the_destination_is_not_observed_yet() {
             if action == 0 {
                 wait_for_file(&marker);
             }
-            if action == 4 {
+            if action == 8 {
                 fs::write(&release, "go").unwrap();
             }
         },
@@ -4522,7 +4531,7 @@ fn inventory_copy_value_sends_the_full_original_value_to_the_clipboard() {
                 b"\r".to_vec(),
             ),
             (vec!["Copied path of alpha"], b"\r".to_vec()),
-            (vec!["Inspect / alpha", "c copy a value…"], b"c".to_vec()),
+            (vec!["Inspect / alpha", "c copy · Esc close"], b"c".to_vec()),
             (vec!["Copy value / alpha"], b"j\r".to_vec()),
             (
                 vec!["Copied origin of alpha", "Inspect / alpha"],
@@ -5786,12 +5795,7 @@ fn inventory_registers_every_marked_row_including_hidden_ones_and_reports_each_o
                 b"kkjj\r".to_vec(),
             ),
             (
-                vec![
-                    "Inspect / local",
-                    "pair: Register unavailable",
-                    "pair: Unregister unavailable",
-                    "unavailable · no supported origin observed",
-                ],
+                vec!["Inspect / local", "pair: Origin No", "absent: unavailable"],
                 b"\x1b".to_vec(),
             ),
             (
@@ -13050,7 +13054,7 @@ fn inventory_remote_states_come_from_the_catalog_and_lookups_and_missing_blocks_
                 vec![
                     "Inspect / gone",
                     "pair: Remote missing",
-                    "unavailable · not found on github.com",
+                    "absent: not found",
                 ],
                 b"\x1b".to_vec(),
             ),
@@ -13093,12 +13097,7 @@ fn inventory_remote_states_come_from_the_catalog_and_lookups_and_missing_blocks_
             (vec!["NORMAL · 5 rows"], b"/org/old\r".to_vec()),
             (vec!["NORMAL · 1 row", "/ org/old"], b"\r".to_vec()),
             (
-                vec![
-                    "Inspect / old",
-                    "pair: Remote private",
-                    "pair: Clone available",
-                    "absent: not on",
-                ],
+                vec!["Inspect / old", "pair: Remote private", "absent: not on"],
                 b"\x1b".to_vec(),
             ),
             (
@@ -13168,7 +13167,7 @@ fn inventory_looks_up_declared_repositories_without_a_checkout_while_discovery_i
                 vec![
                     "Inspect / gone",
                     "pair: Remote missing",
-                    "unavailable · not found on github.com",
+                    "absent: not found",
                 ],
                 b"\x1b".to_vec(),
             ),

@@ -1719,8 +1719,6 @@ impl TerminalSession {
                                             row,
                                             &report.rows,
                                             &session.home,
-                                            &session.config,
-                                            session.complete,
                                         )
                                     })
                                     .unwrap_or(0);
@@ -1739,8 +1737,6 @@ impl TerminalSession {
                                             row,
                                             &report.rows,
                                             &session.home,
-                                            &session.config,
-                                            session.complete,
                                         )
                                     })
                                     .unwrap_or(0);
@@ -1796,8 +1792,6 @@ impl TerminalSession {
         row: &model::InventoryRow,
         rows: &[model::InventoryRow],
         home: &Path,
-        config: &crate::domain::config::Config,
-        complete: bool,
     ) -> u16 {
         let area = self.area();
         popup_scroll_limit(
@@ -1808,8 +1802,6 @@ impl TerminalSession {
                 short_names(rows).remove(&row.key).unwrap_or_default(),
                 rows,
                 home,
-                config,
-                complete,
                 popup_body_width(area, WIDE_POPUP),
             ),
         )
@@ -1881,16 +1873,9 @@ impl TerminalSession {
             .preview_scroll
             .min(self.preview_scroll_limit(selection, session));
         if let Some(row) = selection.inspected_row(visible_rows) {
-            selection.inspection_scroll =
-                selection
-                    .inspection_scroll
-                    .min(self.inspection_scroll_limit(
-                        row,
-                        &report.rows,
-                        &session.home,
-                        &session.config,
-                        session.complete,
-                    ));
+            selection.inspection_scroll = selection
+                .inspection_scroll
+                .min(self.inspection_scroll_limit(row, &report.rows, &session.home));
         }
         let names = short_names(&report.rows);
         let menu = selection.menu.last().map(|(menu, _)| {
@@ -2014,7 +1999,11 @@ impl TerminalSession {
                             "{} · {} {}{problems}",
                             view.label(),
                             visible_rows.len(),
-                            if visible_rows.len() == 1 { "row" } else { "rows" }
+                            if visible_rows.len() == 1 {
+                                "row"
+                            } else {
+                                "rows"
+                            }
                         ),
                         header.width,
                     ),
@@ -2132,8 +2121,8 @@ impl TerminalSession {
                     ),
                     View::Inspect => {
                         let footer = [
-                            format!("{} scroll", rows_hint(bindings, Mode::Inspection, true)),
-                            first_key_hint(bindings, Mode::Inspection, Action::Copy, "copy a value…"),
+                            format!("{} scroll", rows_hint(bindings, Mode::Inspection, false)),
+                            first_key_hint(bindings, Mode::Inspection, Action::Copy, "copy"),
                             close,
                         ]
                         .into_iter()
@@ -2150,8 +2139,6 @@ impl TerminalSession {
                                     names[&row.key].clone(),
                                     &report.rows,
                                     home,
-                                    &session.config,
-                                    complete,
                                     popup_body_width(area, WIDE_POPUP),
                                 )
                                 .scroll((shown.inspection_scroll, 0)),
@@ -2161,10 +2148,8 @@ impl TerminalSession {
                                 frame,
                                 WIDE_POPUP,
                                 "Inspect / unavailable",
-                                Paragraph::new(
-                                    "Inspected target is unavailable or stale. Close this popup and inspect a current row.",
-                                )
-                                .wrap(Wrap { trim: false }),
+                                Paragraph::new("Inspected target is unavailable or stale.")
+                                    .wrap(Wrap { trim: false }),
                                 footer,
                             ),
                         }
@@ -2234,8 +2219,9 @@ impl TerminalSession {
                                 list,
                             );
                             if let Some(more) = more.filter(|_| below > 0) {
-                                let page_down =
-                                    bindings.keys(Mode::Confirmation, Action::PageDown).join("/");
+                                let page_down = bindings
+                                    .keys(Mode::Confirmation, Action::PageDown)
+                                    .join("/");
                                 frame.render_widget(
                                     Paragraph::new(format!(
                                         "… {below} more line{} · {page_down}{}",
@@ -2257,8 +2243,10 @@ impl TerminalSession {
                             let focus_hint =
                                 format!("{} focus", rows_hint(bindings, Mode::Confirmation, true));
                             let scroll = format!("{pages} scroll");
-                            let (choose, cancel) =
-                                (hint(Action::Accept, "choose"), hint(Action::Cancel, "cancel"));
+                            let (choose, cancel) = (
+                                hint(Action::Accept, "choose"),
+                                hint(Action::Cancel, "cancel"),
+                            );
                             // A narrow popup cuts the end of the line: in a removal
                             // confirmation scrolling comes first, since every loss has to be
                             // seen, then the exit routes.
@@ -2310,9 +2298,7 @@ impl TerminalSession {
                                     let quit = bindings
                                         .keys(Mode::Normal, Action::Quit)
                                         .into_iter()
-                                        .find(|key| {
-                                            back.first() != Some(key) && back.contains(key)
-                                        })
+                                        .find(|key| back.first() != Some(key) && back.contains(key))
                                         .map(|key| format!(" · {key} quit"))
                                         .unwrap_or_default();
                                     format!(
@@ -3073,30 +3059,29 @@ fn status_lines(
         View::WorktreeInput => "Ordinary keys type text · nothing is created yet".to_owned(),
         View::AddPreview | View::WorktreePlan => "Nothing changes until you choose".to_owned(),
         View::Worktrees => "Worktrees target the current row · marks are not used".to_owned(),
-        View::Menu
+        View::Inspect
+        | View::Menu
         | View::Help
         | View::Problems
         | View::Batch
         | View::QuitBatch
         | View::WorktreeBlocked => state.to_owned(),
-        View::Normal | View::Inspect if complete && host_notice.is_some() => {
+        View::Normal if complete && host_notice.is_some() => {
             host_notice.unwrap_or_default().to_owned()
         }
-        View::Normal | View::Inspect
+        View::Normal
             if complete && remote.is_none() && report.rows.is_empty() && !report.incomplete =>
         {
             state.to_owned()
         }
-        View::Normal | View::Inspect
-            if compact && complete && remote.is_none() && !inspect.is_empty() =>
-        {
+        View::Normal if compact && complete && remote.is_none() && !inspect.is_empty() => {
             format!(
                 "Path and origin: {} inspects, menu copies the full value",
                 inspect[0]
             )
         }
-        View::Normal | View::Inspect if refresh.is_empty() => state.to_owned(),
-        View::Normal | View::Inspect => format!("{state} · {refresh}"),
+        View::Normal if refresh.is_empty() => state.to_owned(),
+        View::Normal => format!("{state} · {refresh}"),
     };
     let warned = operation.starts_with("! ") || host_notice == Some(operation.as_str());
     lines.push(Line::styled(operation, if warned { warn() } else { dim() }));
@@ -3809,11 +3794,31 @@ fn inspection_widget(
     name: String,
     rows: &[model::InventoryRow],
     home: &Path,
-    config: &crate::domain::config::Config,
-    complete: bool,
     width: u16,
 ) -> Paragraph<'static> {
-    let mut lines = Vec::new();
+    let mut lines = exact_field_lines("Repository", &name, Style::default(), width);
+    if let Some(identity) = identity(row) {
+        lines.extend(exact_field_lines(
+            "Identity",
+            &escape(identity),
+            Style::default(),
+            width,
+        ));
+    }
+    let nonstandard = row.observed_path.is_some()
+        && row.configured_destination.is_some()
+        && row.observed_path != row.configured_destination;
+    if let Some(path) = &row.observed_path {
+        lines.extend(exact_field_lines(
+            "Found path",
+            &home_relative(path, home),
+            Style::default(),
+            width,
+        ));
+        if nonstandard && let Some(found) = lines.last_mut() {
+            found.spans.push(Span::styled(" · nonstandard", warn()));
+        }
+    }
     // Paths, identities, origins and branches wrap by cell; prose wraps at spaces.
     let mut field = |name: &str, value: String, style: Style, exact: bool| {
         lines.extend(if exact {
@@ -3822,18 +3827,6 @@ fn inspection_widget(
             field_lines(name, &value, style, width)
         });
     };
-    field("Repository", name, Style::default(), true);
-    if let Some(identity) = identity(row) {
-        field("Identity", escape(identity), Style::default(), true);
-    }
-    if let Some(path) = &row.observed_path {
-        field(
-            "Found path",
-            home_relative(path, home),
-            Style::default(),
-            true,
-        );
-    }
     if let Some(path) = &row.configured_destination {
         field(
             "Configured path",
@@ -3858,9 +3851,7 @@ fn inspection_widget(
         model::RegistrationState::Excluded { pattern } => {
             format!("excluded · by {}", escape(pattern))
         }
-        model::RegistrationState::Unregistered => {
-            "unregistered · this path satisfies no declaration".to_owned()
-        }
+        model::RegistrationState::Unregistered => "unregistered".to_owned(),
         model::RegistrationState::Pattern => "wildcard · declaration pattern".to_owned(),
     };
     field(
@@ -3883,15 +3874,15 @@ fn inspection_widget(
             })
             .map(|declared| match declared.checkout {
                 model::CheckoutState::Cloned => format!(
-                    ", satisfied by {}",
+                    " · satisfied by {}",
                     home_relative(Path::new(&declared.path), home)
                 ),
-                ref state => format!(", configured path {}", state.label()),
+                ref state => format!(" · configured path {}", state.label()),
             })
             .unwrap_or_default();
         field(
             "Declaration",
-            format!("{} ({kind}){target}", escape(declaration)),
+            format!("{kind}{target}"),
             Style::default(),
             false,
         );
@@ -3906,83 +3897,28 @@ fn inspection_widget(
     if let Some(status) = row.remote_status {
         field("Remote", status.label().to_owned(), Style::default(), false);
     }
-    for (name, observation, gloss) in [
-        ("Branch", &row.branch, "not observed yet"),
-        ("Changes", &row.changes, "status not observed yet"),
-    ] {
-        let value = match observation {
-            model::ObservationField::Pending => format!("pending · {gloss}"),
-            other => observation_text(other),
-        };
+    for (name, observation) in [("Branch", &row.branch), ("Changes", &row.changes)] {
         field(
             name,
-            value,
+            observation_text(observation),
             observation_style(observation),
             name == "Branch",
         );
     }
-    if !row.warnings.is_empty() {
+    // Found path carries the misplacement as `nonstandard`.
+    let warnings = row
+        .warnings
+        .iter()
+        .filter(|warning| !(nonstandard && warning.starts_with("misplaced checkout;")))
+        .collect::<Vec<_>>();
+    if !warnings.is_empty() {
         lines.push(Line::default());
         lines.extend(
-            row.warnings
-                .iter()
+            warnings
+                .into_iter()
                 .map(|warning| Line::styled(escape(warning), warn())),
         );
     }
-    lines.push(Line::default());
-    for action in [BatchAction::Register, BatchAction::Unregister] {
-        let state = match batch::eligibility(row, action, config) {
-            Eligibility::Available => "available".to_owned(),
-            Eligibility::Noop(reason) => format!("no-op · {reason}"),
-            Eligibility::Unavailable(reason) => format!("unavailable · {reason}"),
-        };
-        lines.extend(field_lines(action.label(), &state, dim(), width));
-    }
-    let clone = config
-        .resolve_root(home)
-        .map_err(|_| "configured root is unavailable")
-        .and_then(|root| {
-            batch::clone_preview(
-                row,
-                config,
-                &root,
-                rows,
-                complete,
-                &LocalInventoryFilesystem,
-            )
-        });
-    let absent = clone.as_ref().ok().and_then(batch::AddPreview::absent);
-    let clone = match clone.as_ref().map(|preview| {
-        (
-            preview.eligibility(AddChoice::Clone),
-            row.observed_path
-                .as_ref()
-                .is_some_and(|found| *found != preview.destination),
-            home_relative(&preview.destination, home),
-        )
-    }) {
-        Ok((Eligibility::Available, true, destination)) => {
-            format!("available · clones at {destination}, not at the found path")
-        }
-        Ok((Eligibility::Available, ..)) => "available".to_owned(),
-        Ok((Eligibility::Noop(reason), ..)) => format!("no-op · {reason}"),
-        Ok((Eligibility::Unavailable(reason), ..)) | Err(&reason) => {
-            format!("unavailable · {reason}")
-        }
-    };
-    let clone = absent.map_or(clone, |reason| format!("unavailable · {reason}"));
-    lines.extend(field_lines("Clone", &clone, dim(), width));
-    let remove = match (
-        batch::removal_eligibility(row, BatchAction::Remove, config),
-        batch::removal_eligibility(row, BatchAction::RemoveUnregister, config),
-    ) {
-        (Eligibility::Unavailable(reason), Eligibility::Available) => {
-            format!("unavailable · {reason} · Remove + unregister is available")
-        }
-        (Eligibility::Unavailable(reason), _) => format!("unavailable · {reason}"),
-        _ => "available · removes the found path".to_owned(),
-    };
-    lines.extend(field_lines("Remove", &remove, dim(), width));
     Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 

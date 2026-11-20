@@ -39,7 +39,7 @@ Keys appear in the order listed here. Enumerations are lowercase snake_case stri
 | `branch`          | fact             | The checked-out branch. See below.                                                                                                                                            |
 | `changes`         | fact             | The working tree state. See below.                                                                                                                                            |
 | `archived`        | boolean or null  | Whether the provider reports the repository as archived. `null` unless `--remote` asked a provider about this identity.                                                       |
-| `warnings`        | array of strings | The notes Inspect shows for the row: misplaced checkouts with both paths, covering and excluding wildcards, `excludes NAME` on a pattern row, and identities taken from a path. |
+| `warnings`        | array of strings | The notes on the row: misplaced checkouts with both paths, covering and excluding wildcards, `excludes NAME` on a pattern row, and identities taken from a path. |
 
 `checkout` is `unknown` when something other than a checkout sits at a configured destination, `conflict` when another repository's checkout sits there, and `remote_only` for a wildcard member the provider lists that has no local checkout and nothing at its destination. Paths are converted to UTF-8; a byte that is not valid UTF-8 becomes U+FFFD.
 

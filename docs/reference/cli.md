@@ -199,7 +199,7 @@ and one reported failure. The batch popup lists every target with its outcome
 (succeeded, no-op, failed, blocked, cancelled or unattempted) and separate disk
 and config cells, empty when unchanged. Path-identified rows (no origin, an
 unsupported origin, or an origin that is pending, stale or failed) and wildcard
-patterns are blocked; Inspect and the menu show why. Immediately before its
+patterns are blocked; the menu shows why. Immediately before its
 write, each target is checked again. A target found as a checkout must still be
 at its exact path with the same origin identity, and the configuration must
 still declare the identity as it did when the action started, so a target shown
