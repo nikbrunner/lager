@@ -671,7 +671,7 @@ fn list_lines(popup: &Popup, width: usize) -> Vec<Line<'static>> {
 fn list_footer(bindings: &Bindings) -> String {
     let hint = |action, label| first_key_hint(bindings, Mode::Worktrees, action, label);
     [
-        format!("{} select", rows_hint(bindings, Mode::Worktrees, false)),
+        format!("{} select", rows_hint(bindings, Mode::Worktrees)),
         hint(Action::Add, "add"),
         hint(Action::Remove, "remove"),
         hint(Action::Copy, "copy"),
@@ -762,7 +762,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, popup: &Popup, bindings: &Bin
                 body.scroll((scroll, 0)),
                 format!(
                     "{} scroll · {}",
-                    rows_hint(bindings, Mode::Inspection, false),
+                    rows_hint(bindings, Mode::Inspection),
                     first_key_hint(bindings, Mode::Inspection, Action::Cancel, "back")
                 ),
             );
@@ -865,7 +865,7 @@ impl Sheet {
 fn sheet(popup: &Popup, bindings: &Bindings, area: Rect) -> Option<Sheet> {
     let width = popup_body_width(area, WIDE_POPUP);
     let hint = |action, label| first_key_hint(bindings, Mode::Confirmation, action, label);
-    let rows = rows_hint(bindings, Mode::Confirmation, false);
+    let rows = rows_hint(bindings, Mode::Confirmation);
     match &popup.stage {
         Stage::Plan { plan, back, .. } => {
             let branch = match &plan.start {

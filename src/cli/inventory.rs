@@ -2100,24 +2100,18 @@ impl TerminalSession {
                         "Keyboard / effective bindings",
                         help_widget(bindings, shown.help_mode, session.session_layout.is_some())
                             .scroll((shown.help_scroll, 0)),
-                        format!(
-                            "{} scroll · {close}",
-                            rows_hint(bindings, Mode::Inspection, false)
-                        ),
+                        format!("{} scroll · {close}", rows_hint(bindings, Mode::Inspection)),
                     ),
                     View::Problems => draw_popup(
                         frame,
                         WIDE_POPUP,
                         &format!("Problems / {}", session.problems.entries().len()),
                         problems_widget(session).scroll((shown.problems_scroll, 0)),
-                        format!(
-                            "{} scroll · {close}",
-                            rows_hint(bindings, Mode::Inspection, false)
-                        ),
+                        format!("{} scroll · {close}", rows_hint(bindings, Mode::Inspection)),
                     ),
                     View::Inspect => {
                         let footer = [
-                            format!("{} scroll", rows_hint(bindings, Mode::Inspection, false)),
+                            format!("{} scroll", rows_hint(bindings, Mode::Inspection)),
                             first_key_hint(bindings, Mode::Inspection, Action::Copy, "copy"),
                             close,
                         ]
@@ -2166,7 +2160,7 @@ impl TerminalSession {
                                 .scroll((shown.menu_scroll, 0)),
                             format!(
                                 "{} select · {} · {}",
-                                rows_hint(bindings, Mode::Menu, false),
+                                rows_hint(bindings, Mode::Menu),
                                 first_key_hint(bindings, Mode::Menu, Action::Accept, "choose"),
                                 first_key_hint(bindings, Mode::Menu, Action::Cancel, "back")
                             ),
@@ -2236,7 +2230,7 @@ impl TerminalSession {
                                 first_key_hint(bindings, Mode::Confirmation, action, label)
                             };
                             let focus_hint =
-                                format!("{} focus", rows_hint(bindings, Mode::Confirmation, false));
+                                format!("{} focus", rows_hint(bindings, Mode::Confirmation));
                             let scroll = format!("{pages} scroll");
                             let (choose, cancel) = (
                                 hint(Action::Accept, "choose"),
@@ -2279,7 +2273,7 @@ impl TerminalSession {
                                 if batch.finished() {
                                     format!(
                                         "{} scroll · {}",
-                                        rows_hint(bindings, Mode::Inspection, false),
+                                        rows_hint(bindings, Mode::Inspection),
                                         first_key_hint(
                                             bindings,
                                             Mode::Inspection,
@@ -2297,7 +2291,7 @@ impl TerminalSession {
                                         .unwrap_or_default();
                                     format!(
                                         "{} focus · {} scroll · {} · {}{quit}",
-                                        rows_hint(bindings, Mode::Inspection, false),
+                                        rows_hint(bindings, Mode::Inspection),
                                         paired_keys(
                                             &bindings.keys(Mode::Inspection, Action::PageUp),
                                             &bindings.keys(Mode::Inspection, Action::PageDown),
@@ -2332,7 +2326,7 @@ impl TerminalSession {
                                 ),
                                 format!(
                                     "{} focus · {} · {}",
-                                    rows_hint(bindings, Mode::Confirmation, false),
+                                    rows_hint(bindings, Mode::Confirmation),
                                     first_key_hint(
                                         bindings,
                                         Mode::Confirmation,
@@ -2411,7 +2405,7 @@ impl TerminalSession {
                             frame.render_widget(
                                 Paragraph::new(format!(
                                     "{} select · {} · {}",
-                                    rows_hint(bindings, Mode::Confirmation, false),
+                                    rows_hint(bindings, Mode::Confirmation),
                                     first_key_hint(
                                         bindings,
                                         Mode::Confirmation,
@@ -2661,19 +2655,16 @@ fn paired_keys(first: &[&str], second: &[&str]) -> String {
         .join(" ")
 }
 
-fn rows_hint(bindings: &Bindings, mode: Mode, arrows: bool) -> String {
-    let down = bindings.keys(mode, Action::Down);
-    let up = bindings.keys(mode, Action::Up);
-    let mut hint = [down.first(), up.first()]
-        .into_iter()
-        .flatten()
-        .copied()
-        .collect::<Vec<_>>()
-        .join("/");
-    if arrows && down.contains(&"Down") && up.contains(&"Up") && down.first() != Some(&"Down") {
-        hint.push_str(" ↑/↓");
-    }
-    hint
+fn rows_hint(bindings: &Bindings, mode: Mode) -> String {
+    [
+        bindings.keys(mode, Action::Down).first(),
+        bindings.keys(mode, Action::Up).first(),
+    ]
+    .into_iter()
+    .flatten()
+    .copied()
+    .collect::<Vec<_>>()
+    .join("/")
 }
 
 fn first_key_hint(bindings: &Bindings, mode: Mode, action: Action, label: &str) -> String {
@@ -2716,7 +2707,7 @@ fn footer_widget(
         .map(|(action, label)| (first(Mode::Normal, action), label))
         .to_vec(),
         View::Normal => {
-            let mut items = vec![(rows_hint(bindings, Mode::Normal, false), "rows")];
+            let mut items = vec![(rows_hint(bindings, Mode::Normal), "rows")];
             items.extend(
                 [
                     (Action::Search, "search"),
@@ -2857,13 +2848,13 @@ fn provider_text(
         (ProviderPhase::Loading { since }, None) => {
             format!("loading… {} s", since.elapsed().as_secs())
         }
-        (ProviderPhase::Ready, fetched) => {
+        (ProviderPhase::Ready, _) => {
             let ready = format!(
                 "ready{separator}{}",
                 counted(candidates, "candidate", "candidates")
             );
-            match fetched.filter(|_| detailed) {
-                Some(fetched) => format!("{ready}{separator}{fetched}"),
+            match provider.cached.as_ref().filter(|_| detailed) {
+                Some(cache) => format!("{ready}{separator}{}", clock(cache.fetched)),
                 None => ready,
             }
         }
@@ -3384,7 +3375,7 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
         let item = |keys: String, label: &str| {
             (!keys.trim().is_empty()).then(|| format!("{} {label}", keys.trim_end()))
         };
-        let rows = rows_hint(bindings, other, false);
+        let rows = rows_hint(bindings, other);
         let (name, items) = match other {
             Mode::Normal => (
                 "normal",
@@ -4232,7 +4223,7 @@ fn menu_lines(
                 (true, false) => item(
                     Entry::RemoteRetry,
                     "Retry failed providers",
-                    format!("{} only", escape(failed.join(", "))),
+                    escape(failed.join(", ")),
                     true,
                 ),
             };
@@ -4240,7 +4231,7 @@ fn menu_lines(
                 item(
                     Entry::RemoteRefresh,
                     "Refresh all enabled providers",
-                    "cached rows stay, shown stale".to_owned(),
+                    String::new(),
                     providers > 0,
                 )
             } else {
@@ -4253,11 +4244,7 @@ fn menu_lines(
                 } else {
                     "[ ] Include archived"
                 },
-                if enabled {
-                    "refetches".to_owned()
-                } else {
-                    "applies when remote is on".to_owned()
-                },
+                String::new(),
                 true,
             );
             if enabled {
@@ -4303,16 +4290,6 @@ fn menu_lines(
                     refresh,
                 ]);
             }
-            let local = menu_key(&session.bindings, Action::Refresh);
-            lines.extend([
-                heading(String::new()),
-                heading(if local.is_empty() {
-                    "A local refresh never asks a provider.".to_owned()
-                } else {
-                    format!("{local} refreshes local/config only.")
-                }),
-                heading("Discovery never registers, clones or runs hooks.".to_owned()),
-            ]);
             lines
         }
         Menu::Selection => {

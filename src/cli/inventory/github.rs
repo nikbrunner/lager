@@ -1102,7 +1102,7 @@ pub(super) fn draw(
                 ],
                 format!(
                     "{} focus · {} · {}",
-                    super::rows_hint(bindings, Mode::Confirmation, false),
+                    super::rows_hint(bindings, Mode::Confirmation),
                     hint(Mode::Confirmation, Action::Accept, "choose"),
                     hint(Mode::Confirmation, Action::Cancel, "cancel")
                 ),

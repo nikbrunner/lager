@@ -25,4 +25,4 @@ Read the canvas with the Artifact tool: `read` with the URL, then single files b
 
 A popup in the inventory holds a title, the table or list, and one row of key hints inside its frame. While it is open, the hint bar at the bottom of the screen stays empty and the status line above it shows the current state.
 
-Sentences that explain the interface stay out of the popup. A rule shows when it applies: a key that the rule refuses answers with one line giving the reason, and Help lists the rule. Text that says what the user is about to lose stays in the popup: the losses of a removal and their acknowledgment, the typed name and the permanence line of a GitHub delete, lock states, and the outcome of a batch.
+Sentences that explain the interface stay out of the popup. A rule shows when it applies: a key that the rule refuses answers with one line giving the reason. A rule that no key refuses lives in the reference docs. Text that says what the user is about to lose stays in the popup: the losses of a removal and their acknowledgment, the typed name and the permanence line of a GitHub delete, lock states, and the outcome of a batch.

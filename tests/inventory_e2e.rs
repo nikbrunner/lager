@@ -11829,9 +11829,10 @@ fn inventory_remote_menu_retries_only_the_failed_provider() {
                 vec![
                     "MENU · 5 rows · 1 problem",
                     "Remote discovery",
-                    "Retry failed providers",
-                    "bitbucket.org only",
+                    "pair: providers bitbucket.org",
+                    "absent: bitbucket.org only",
                     "Disable remote",
+                    "j/k select · Enter choose · Esc back",
                 ],
                 b"\r".to_vec(),
             ),
@@ -11884,27 +11885,57 @@ fn inventory_remote_menu_retries_only_the_failed_provider() {
     let order = [
         position("Remote discovery"),
         position("failed · bitbucket request failed"),
-        position("ready · 3 candidates · fetched "),
+        position("ready · 3 candidates · "),
         position("Retry failed providers"),
         position("Refresh all enabled providers"),
         position("[ ] Include archived"),
         position("Disable remote"),
-        position("Discovery never registers, clones or runs hooks."),
+        position("j/k select · Enter choose · Esc back"),
     ];
     assert!(order.is_sorted(), "{order:?}: {controls}");
-    for pair in [
-        "providers cached rows stay, shown stale",
-        "archived refetches",
-        "remote hides 3 rows",
+    for absent in [
+        "fetched",
+        "shown stale",
+        "refetches",
+        "refreshes local/config only",
+        "never registers",
     ] {
-        let (label, hint) = pair.split_once(' ').unwrap();
-        assert!(
-            controls
-                .lines()
-                .any(|line| line.contains(label) && line.contains(hint)),
-            "{pair}: {controls}"
-        );
+        assert!(!controls.contains(absent), "{absent}: {controls}");
     }
+    assert!(
+        controls
+            .lines()
+            .any(|line| line.contains("Disable remote") && line.contains("hides 3 rows")),
+        "{controls}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_add_shows_a_failed_provider_as_its_status() {
+    let fixture = RemoteFixture::new();
+    fixture.bitbucket.fail.store(true, Ordering::Relaxed);
+    run_inventory_pty_with_exit(
+        &mut fixture.command(&["tui", "--remote"]),
+        &[
+            (
+                vec!["NORMAL · 5 rows · 1 problem", "bitbucket.org: failed"],
+                b"a".to_vec(),
+            ),
+            (
+                vec![
+                    "Enter preview · Tab focus · Esc back",
+                    "! bitbucket.org failed: bitbucket request failed",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Enter preview"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        1,
+        |_| {},
+    );
 }
 
 #[cfg(unix)]
@@ -11917,7 +11948,7 @@ fn inventory_remote_refresh_keeps_cached_rows_stale_while_every_provider_reloads
         &[
             (REMOTE_READY.to_vec(), [&b"kk"[..], REMOTE_MENU].concat()),
             (
-                vec!["Refresh all enabled providers", "cached rows stay"],
+                vec!["Refresh all enabled providers", "absent: cached rows stay"],
                 b"j\r".to_vec(),
             ),
             (
@@ -12209,7 +12240,10 @@ fn inventory_remote_archive_toggle_refetches_and_survives_disabling() {
                 [&REMOTE_READY[..], &["absent: · archived"][..]].concat(),
                 [&b"kk"[..], REMOTE_MENU].concat(),
             ),
-            (vec!["[ ] Include archived", "refetches"], b"jj\r".to_vec()),
+            (
+                vec!["[ ] Include archived", "absent: refetches"],
+                b"jj\r".to_vec(),
+            ),
             (with_archives.to_vec(), REMOTE_MENU.to_vec()),
             (
                 vec!["[x] Include archived", "Disable remote"],
@@ -12583,7 +12617,7 @@ fn inventory_remote_keeps_a_provider_catalog_when_one_of_its_wildcards_fails() {
                 [&b"kk"[..], REMOTE_MENU].concat(),
             ),
             (
-                vec!["Retry failed providers", "github.com only"],
+                vec!["pair: providers github.com", "absent: github.com only"],
                 b"\r".to_vec(),
             ),
             (REMOTE_READY.to_vec(), b"q".to_vec()),
