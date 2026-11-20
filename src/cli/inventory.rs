@@ -2186,7 +2186,7 @@ impl TerminalSession {
                                 .scroll((shown.menu_scroll, 0)),
                             format!(
                                 "{} select · {} · {}",
-                                rows_hint(bindings, Mode::Menu, true),
+                                rows_hint(bindings, Mode::Menu, false),
                                 first_key_hint(bindings, Mode::Menu, Action::Accept, "choose"),
                                 first_key_hint(bindings, Mode::Menu, Action::Cancel, "back")
                             ),
@@ -4088,7 +4088,6 @@ fn menu_lines(
     match menu {
         Menu::Root => {
             let problems = session.problems.entries().len();
-            let mark = key(Action::Mark);
             vec![
                 heading(format!(
                     "This row · {}",
@@ -4097,7 +4096,7 @@ fn menu_lines(
                 on_row(
                     Entry::Open(Menu::Repository),
                     "Repository actions…",
-                    "clone, register, unregister, remove".to_owned(),
+                    String::new(),
                 ),
                 on_row(Entry::Inspect, "Inspect repository", key(Action::Inspect)),
                 on_row(Entry::Open(Menu::Copy), "Copy value…", String::new()),
@@ -4136,11 +4135,7 @@ fn menu_lines(
                 item(
                     Entry::Open(Menu::Selection),
                     "Selection…",
-                    if mark.is_empty() {
-                        mark
-                    } else {
-                        format!("{mark} marks the row")
-                    },
+                    String::new(),
                     true,
                 ),
                 heading(String::new()),

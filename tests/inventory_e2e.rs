@@ -3604,7 +3604,7 @@ fn inventory_compact_hints_keep_actions_and_popup_exit_routes_visible() {
                 b"m".to_vec(),
             ),
             (
-                vec!["All actions", "j/k ↑/↓ select · Enter choose · Esc back"],
+                vec!["All actions", "j/k select · Enter choose · Esc back"],
                 b"j\r".to_vec(),
             ),
             (
@@ -3622,6 +3622,60 @@ fn inventory_compact_hints_keep_actions_and_popup_exit_routes_visible() {
         24,
         80,
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_menu_holds_its_entries_and_one_hint_row_over_an_empty_hint_bar() {
+    let temp = temp_dir();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(
+        &config,
+        "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n",
+    )
+    .unwrap();
+    for (rows, cols) in [(32, 132), (24, 80)] {
+        let mut menu = String::new();
+        run_inventory_pty_with_exit_observing(
+            support::lager(&home, &config).arg("tui"),
+            &[
+                (vec!["NORMAL · 1 row", "absent: Scanning"], b"m".to_vec()),
+                (vec!["All actions"], b"\x1b".to_vec()),
+                (vec!["NORMAL", "absent: All actions"], b"q".to_vec()),
+            ],
+            rows,
+            cols,
+            0,
+            |action, _, frame| {
+                if action == 1 {
+                    menu = frame.to_owned();
+                }
+            },
+        );
+        let (rows, cols) = (rows as usize, cols as usize);
+        let screen = screen_text(&menu, rows, cols);
+        let lines = screen.split('\n').collect::<Vec<_>>();
+        let body = lines
+            .iter()
+            .map(|line| line.split('│').nth(1).unwrap_or_default().trim())
+            .collect::<Vec<_>>();
+        for line in [
+            "Repository actions…",
+            "Selection…",
+            "j/k select · Enter choose · Esc back",
+        ] {
+            assert!(body.contains(&line), "{line}:\n{screen}");
+        }
+        assert_eq!(lines[rows - 1], "", "{screen}");
+        assert!(
+            styled_screen(&menu, rows, cols)[rows - 1]
+                .iter()
+                .all(|(_, reversed)| *reversed),
+            "the empty hint bar stays a bar:\n{screen}"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -4569,13 +4623,13 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
                 vec![
                     "All actions",
                     "This row · alpha",
-                    "pair: actions… clone,",
+                    "absent: clone, register",
                     "pair: repository Enter",
                     "Copy value…",
                     "Open origin in browser",
                     "Worktrees…",
                     "Selection · 0 marked",
-                    "pair: Selection… Space",
+                    "absent: marks the row",
                     "Inventory",
                     "Add repository",
                     "pair: repository a",
