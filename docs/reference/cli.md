@@ -389,6 +389,42 @@ When Rex is missing or stopped, its first answer turns the status line into `Ses
 
 An inventory that quits while a session opens restores the terminal, prints `lager: waiting for session LABEL to open…` on stderr and waits for Rex, so lager records the session. Each Rex call is cut off after 10 seconds, and keys or signals do not end the wait. Then it prints the session line, or the status line of a failed open after `lager: `, and a failure on a running Rex makes it exit `1`. Without the section the inventory shows nothing about sessions and never calls Rex.
 
+#### Sessions in the Worktrees popup
+
+With a `[session]` section the Worktrees popup works with the session of each worktree. A `●` before the path marks a worktree with a live session, and the hint row adds `s session`. Both appear once Rex has answered, as in the table.
+
+`s` opens the session of the selected worktree. Its status line, its exit lines and the cases that keep the inventory open are those of `s` in the table. A worktree whose directory is gone answers `Open session unavailable: no checkout at the destination`.
+
+The plan of a new worktree shows its session label in a `session` field and the line `[x] Open session`. After Git has created the worktree, lager opens its session with the status `Opening session LABEL…`. The inventory then closes and prints two lines:
+
+```text
+Created worktree ~/repos/org/core.worktrees/fix on new branch fix
+Opened session core · Fix
+```
+
+When that open cannot run, the worktree stays created and the inventory stays open. The status line starts with the worktree line, which reads `on branch BRANCH` for a branch that existed:
+
+| Case | Status line | Problem |
+| --- | --- | --- |
+| Another session is opening | `Created worktree PATH on new branch BRANCH · Open session unavailable: a session is opening` | No |
+| Rex is missing or stopped | `Created worktree PATH on new branch BRANCH · Open session unavailable: REASON` | No |
+| A call fails on a running Rex, or the session record cannot be read or written | `! Created worktree PATH on new branch BRANCH · Open session failed: REASON` | Yes |
+
+For a worktree with a live session, the removal summary shows `session  LABEL · open` and the line `[x] Close session`, noted `ends its programs`. Once Git has removed the worktree, lager closes the session while Git still holds the terminal. Back in the popup, the status line reads `Removed worktree PATH · branch BRANCH kept · Closed session LABEL`. A worktree without a live session gets neither line.
+
+`s` in the plan or the summary switches the line to `[ ] Open session` or `[ ] Close session` for this one worktree, and lager leaves the session alone. While Rex is missing or stopped, the plan shows no session line.
+
+When the close fails, the worktree stays removed:
+
+| Case | Status line | Problem |
+| --- | --- | --- |
+| Rex is missing or stopped | `Removed worktree PATH · branch BRANCH kept · Close session unavailable: REASON` | No |
+| A call fails on a running Rex, or the session record cannot be read or written | `! Removed worktree PATH · branch BRANCH kept · Close session failed: REASON` | Yes, listed as `Close session failed: REASON` |
+
+A blocked removal keeps the session open. Its blocker view shows `session  LABEL · open` beside the blockers. A removal refused after the summary, because the worktree changed or would lose more than listed, closes nothing either, and its status line ends in `· the session stays open` when the close was ticked.
+
+Closing the session the inventory runs in ends the inventory too. Lager saves its record before it asks Rex to close the session, so the record stays correct.
+
 #### Remote discovery
 
 Remote discovery adds what the configured providers list to the table. It reads

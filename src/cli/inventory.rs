@@ -179,7 +179,8 @@ struct InventorySession {
 /// What a session worker reports back.
 enum HostAnswer {
     Listed(u64, Result<BTreeMap<PathBuf, String>, SessionError>),
-    Opened(Result<Ensured, SessionError>),
+    /// The line the farewell starts with, and the open's outcome.
+    Opened(Option<String>, Result<Ensured, SessionError>),
     /// The row's checkout is no repository root Git can name.
     Refused(String),
 }
@@ -387,27 +388,36 @@ impl InventorySession {
 
     /// Opens the session of the primary checkout at `path` off the UI loop.
     fn open_session(&mut self, path: &Path) {
+        let path = path.to_path_buf();
+        self.open_checkout(super::session::label(&path, &path), None, move || {
+            let repository =
+                worktree_service::resolve_repository(&NativeGit, &Filesystem, &path, true)?;
+            let label = super::session::label(&repository.primary, &repository.primary);
+            Ok((repository.primary, label))
+        });
+    }
+
+    /// Opens a session off the UI loop. `checkout` names the canonical checkout and its label,
+    /// or why it has none; the farewell starts with `lead`.
+    fn open_checkout(
+        &mut self,
+        label: String,
+        lead: Option<String>,
+        checkout: impl FnOnce() -> Result<(PathBuf, String), String> + Send + 'static,
+    ) {
         let Some(layout) = self.session_layout.clone() else {
             return;
         };
-        self.opening = Some(super::session::label(path, path));
-        let (sender, path) = (self.host_answers.0.clone(), path.to_path_buf());
+        self.opening = Some(label);
+        let sender = self.host_answers.0.clone();
         std::thread::spawn(move || {
-            let answer =
-                match worktree_service::resolve_repository(&NativeGit, &Filesystem, &path, true) {
-                    Ok(repository) => {
-                        let checkout = repository.primary;
-                        let label = super::session::label(&checkout, &checkout);
-                        HostAnswer::Opened(sessions::open(
-                            &Rex,
-                            &SessionFile,
-                            &checkout,
-                            &label,
-                            &layout,
-                        ))
-                    }
-                    Err(reason) => HostAnswer::Refused(reason),
-                };
+            let answer = match checkout() {
+                Ok((checkout, label)) => HostAnswer::Opened(
+                    lead,
+                    sessions::open(&Rex, &SessionFile, &checkout, &label, &layout),
+                ),
+                Err(reason) => HostAnswer::Refused(reason),
+            };
             let _ = sender.send(answer);
         });
     }
@@ -437,17 +447,27 @@ impl InventorySession {
     fn open_answered(&mut self, answer: HostAnswer) {
         self.opening = None;
         match answer {
-            HostAnswer::Opened(Ok(ensured)) => {
+            HostAnswer::Opened(lead, Ok(ensured)) => {
                 let verb = match ensured {
                     Ensured::Created(_) => "Opened",
                     Ensured::Existing(_) => "Switched to",
                 };
-                self.farewell = Some(format!(
-                    "{verb} session {}",
-                    escape(&ensured.recorded().label)
-                ));
+                let line = format!("{verb} session {}", escape(&ensured.recorded().label));
+                self.farewell = Some(match lead {
+                    Some(lead) => format!("{lead}\n{line}"),
+                    None => line,
+                });
             }
-            HostAnswer::Opened(Err(error)) => self.host_failed(error, true),
+            HostAnswer::Opened(lead, Err(error)) => {
+                let lead = lead.map(|lead| format!("{lead} · ")).unwrap_or_default();
+                self.message = Some(match self.host_error(error) {
+                    Ok(reason) => format!("{lead}Open session unavailable: {reason}"),
+                    Err(reason) => {
+                        self.problems.record("session", reason.clone());
+                        format!("! {lead}Open session failed: {reason}")
+                    }
+                });
+            }
             HostAnswer::Refused(reason) => {
                 self.message = Some(format!("Open session unavailable: {}", escape(reason)));
             }
@@ -455,26 +475,22 @@ impl InventorySession {
         }
     }
 
-    /// A missing or stopped host is a notice, given when the host turns unavailable; a call
-    /// that failed on a running host is a problem. `opening` also reports it as the outcome.
-    fn host_failed(&mut self, error: SessionError, opening: bool) {
-        let message = match error {
+    /// The reason of a failed host call: `Ok` for a missing or stopped host, which is a notice
+    /// given when the host turns unavailable, and `Err` for a call that failed on a running
+    /// host, which the caller records as a problem.
+    fn host_error(&mut self, error: SessionError) -> Result<String, String> {
+        match error {
             SessionError::Host(HostError::Unavailable(reason)) => {
                 let reason = escape(reason);
                 if !matches!(self.hosted, Some(Err(_))) {
                     self.host_notice = Some(format!("Sessions unavailable: {reason}"));
                 }
                 self.hosted = Some(Err(reason.clone()));
-                format!("Open session unavailable: {reason}")
+                Ok(reason)
             }
             SessionError::Host(HostError::Failed(reason)) | SessionError::Records(reason) => {
-                let reason = escape(model::problem_reason(&reason));
-                self.problems.record("session", reason.clone());
-                format!("! Open session failed: {reason}")
+                Err(escape(model::problem_reason(&reason)))
             }
-        };
-        if opening {
-            self.message = Some(message);
         }
     }
 
@@ -508,9 +524,13 @@ impl InventorySession {
                     self.hosted = Some(Ok(listed));
                     self.host_notice = None;
                 }
-                HostAnswer::Listed(_, Err(error)) => self.host_failed(error, false),
+                HostAnswer::Listed(_, Err(error)) => {
+                    if let Err(reason) = self.host_error(error) {
+                        self.problems.record("session", reason);
+                    }
+                }
                 answer => {
-                    let failed = matches!(answer, HostAnswer::Opened(Err(_)));
+                    let failed = matches!(answer, HostAnswer::Opened(_, Err(_)));
                     self.open_answered(answer);
                     if failed {
                         self.list_sessions();
@@ -2434,6 +2454,10 @@ impl TerminalSession {
                                 frame,
                                 popup,
                                 bindings,
+                                session
+                                    .hosted
+                                    .as_ref()
+                                    .and_then(|hosted| hosted.as_ref().ok()),
                                 above_status(frame.area(), below_help),
                             );
                         }
@@ -3250,10 +3274,15 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
                 "acknowledge the listed losses",
                 &[Acknowledge],
             ),
+        ]
+        .into_iter()
+        .chain(sessions.then(|| entry(single(Session), SESSION_TICK, &[Session])))
+        .chain([
             entry(single(Accept), "choose", &[Accept]),
             entry(single(Cancel), "cancel", &[Cancel]),
             entry(help_quit(), "help / quit", &[Help, Quit]),
-        ],
+        ])
+        .collect(),
         Mode::Input => vec![
             entry(single(Accept), "preview the reference", &[Accept]),
             entry(single(Cancel), "back", &[Cancel]),
@@ -3269,10 +3298,21 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
             entry(single(Add), "add a worktree…", &[Add]),
             entry(single(Remove), "remove the selected worktree", &[Remove]),
             entry(single(Copy), "copy path", &[Copy]),
+        ]
+        .into_iter()
+        .chain(sessions.then(|| {
+            entry(
+                single(Session),
+                "open the session of the selected worktree",
+                &[Session],
+            )
+        }))
+        .chain([
             entry(single(Accept), "close", &[Accept]),
             entry(single(Cancel), "close", &[Cancel]),
             entry(help_quit(), "help / quit", &[Help, Quit]),
-        ],
+        ])
+        .collect(),
     };
     let entries = entries
         .into_iter()
@@ -3339,6 +3379,9 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
                 "opens the session or shows the open one, then the inventory closes",
             ));
         }
+        if let Some(key) = bindings.keys(Mode::Confirmation, Session).first() {
+            lines.push(line((*key).to_owned(), SESSION_TICK));
+        }
     }
     lines.push(Line::raw(""));
     lines.push(Line::styled("Other modes", dim()));
@@ -3397,6 +3440,7 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
                 vec![
                     item(rows, "focus"),
                     item(first(Acknowledge), "acknowledge"),
+                    sessions.then(|| item(first(Session), "session")).flatten(),
                     item(first(Accept), "choose"),
                     item(first(Cancel), "cancel"),
                 ],
@@ -3422,6 +3466,7 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
                 "worktrees",
                 vec![
                     item(rows, "select"),
+                    sessions.then(|| item(first(Session), "session")).flatten(),
                     item(first(Add), "add"),
                     item(first(Remove), "remove"),
                     item(first(Copy), "copy path"),
@@ -3468,6 +3513,9 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
     }
     Paragraph::new(lines).wrap(Wrap { trim: false })
 }
+
+/// What the session key does in a worktree's plan or removal summary.
+const SESSION_TICK: &str = "plan: open the session after · removal: close it after";
 
 /// Normal-mode actions that run a menu entry; none has a default key.
 const DIRECT_ACTIONS: [Action; 15] = [

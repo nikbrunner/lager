@@ -10625,6 +10625,7 @@ fn inventory_worktree_popup_adds_a_worktree_through_input_and_plan() {
                     "absent: default",
                     "Back to name",
                     "absent: copies no files",
+                    "absent: Open session",
                     "j/k select · Enter choose · Esc back",
                     "No active operation",
                 ],
@@ -10710,8 +10711,9 @@ fn dirty_worktree(core: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[cfg(unix)]
-const LOSS_CONFIRMATION: [&str; 9] = [
+const LOSS_CONFIRMATION: [&str; 10] = [
     "CONFIRM · 1 row",
+    "absent: Close session",
     "Remove worktree / draft",
     "pair: path ~/repos/org/core.worktrees/draft",
     "draft · kept",
@@ -14058,10 +14060,21 @@ fn session_tui(
     home: &std::path::Path,
     config: &std::path::Path,
 ) -> (Command, std::path::PathBuf) {
+    let (mut command, state) = session_lager(temp, home, config);
+    command.arg("tui");
+    (command, state)
+}
+
+/// `lager` in the sandbox `session_tui` describes, for any command.
+#[cfg(unix)]
+fn session_lager(
+    temp: &std::path::Path,
+    home: &std::path::Path,
+    config: &std::path::Path,
+) -> (Command, std::path::PathBuf) {
     let (bin, state) = support::install_fake_rex(&temp.join("rex"));
     let mut command = support::lager_with_path(home, config, Some(&bin));
     command
-        .arg("tui")
         .env("REX_ARGS_LOG", state.join("args.log"))
         .env("REX_STATE", &state)
         .env(
@@ -14116,6 +14129,8 @@ fn inventory_s_opens_the_session_closes_and_names_it() {
                     "Sessions",
                     "pair: ● open",
                     "opens the session or shows the open one, then the inventory closes",
+                    "pair: s plan:",
+                    "plan: open the session after · removal: close it after",
                 ],
                 b"\x1b".to_vec(),
             ),
@@ -14502,4 +14517,511 @@ fn inventory_quit_waits_for_an_open_in_flight_and_records_it() {
     );
     let records = fs::read_to_string(temp.path().join("lager-test-cache/sessions.json")).unwrap();
     assert!(records.contains("org/core"), "{records}");
+}
+
+/// Opens the session of each worktree in `paths` through `lager session create`, as the
+/// inventory finds them later.
+#[cfg(unix)]
+fn create_sessions(
+    temp: &std::path::Path,
+    home: &std::path::Path,
+    config: &std::path::Path,
+    paths: &[&std::path::Path],
+) {
+    for path in paths {
+        let (mut command, _) = session_lager(temp, home, config);
+        let output = command
+            .args(["session", "create"])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_opens_the_session_of_a_worktree_it_creates() {
+    let temp = temp_dir();
+    let (home, config, _) = worktree_fixture(temp.path(), SESSION_SECTION);
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+
+    let transcript = run_inventory_pty_with_exit(
+        &mut command,
+        &[
+            (
+                [&POPUP_READY[..], &["pair: s session"]].concat(),
+                b"w".to_vec(),
+            ),
+            (
+                vec![
+                    "Worktrees / core",
+                    "j/k select · s session · a add · r remove · c copy · Esc close",
+                ],
+                b"a".to_vec(),
+            ),
+            (vec!["Add worktree / core"], b"skip\r".to_vec()),
+            (
+                vec![
+                    "Add worktree / plan",
+                    "pair: session core",
+                    "core · Skip",
+                    "[x] Open session",
+                    "j/k select · s session · Enter choose · Esc back",
+                ],
+                b"s".to_vec(),
+            ),
+            (vec!["[ ] Open session", "absent: [x]"], b"\r".to_vec()),
+            (
+                vec![
+                    "Created worktree ~/repos/org/core.worktrees/skip on new branch skip",
+                    "WORKTREES · 1 row",
+                ],
+                b"a".to_vec(),
+            ),
+            (vec!["Add worktree / core"], b"fix\r".to_vec()),
+            (
+                vec!["Add worktree / plan", "core · Fix", "[x] Open session"],
+                b"\r".to_vec(),
+            ),
+            (
+                vec!["Opening session core · Fix…", "WORKTREES · 1 row"],
+                Vec::new(),
+            ),
+        ],
+        32,
+        132,
+        0,
+        |action| {
+            if action == 5 {
+                assert_eq!(rex_calls(&state, "do - --json"), 0);
+                assert_eq!(rex_calls(&state, "client.perform"), 0);
+                fs::write(state.join("hold-create"), "").unwrap();
+            }
+            if action == 8 {
+                fs::write(state.join("release"), "").unwrap();
+            }
+        },
+    );
+    fs::remove_file(state.join("hold-create")).unwrap();
+    let after = after_restore(&transcript);
+    let created = after
+        .find("Created worktree ~/repos/org/core.worktrees/fix on new branch fix")
+        .unwrap_or_else(|| panic!("{transcript:?}"));
+    assert!(
+        after.trim_end().ends_with("Opened session core · Fix")
+            && created < after.find("Opened session").unwrap(),
+        "{transcript:?}"
+    );
+    assert_eq!(rex_calls(&state, "do - --json"), 1);
+    assert_eq!(rex_calls(&state, "client.perform"), 1);
+
+    // The next run marks the new worktree, and `s` there switches to its session.
+    let (mut command, _) = session_tui(temp.path(), &home, &config);
+    let transcript = run_inventory_pty_with_exit(
+        &mut command,
+        &[
+            (
+                [&POPUP_READY[..], &["pair: s session"]].concat(),
+                b"w".to_vec(),
+            ),
+            (
+                vec![
+                    "pair: ● ~/repos/org/core.worktrees/fix",
+                    "absent: ● ~/repos/org/core.worktrees/skip",
+                ],
+                b"?".to_vec(),
+            ),
+            (
+                vec![
+                    "Worktrees mode",
+                    "open the session of the selected worktree",
+                    "s session · Enter choose",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Worktrees / core", "absent: Keyboard /"],
+                b"js".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        0,
+        |_| {},
+    );
+    assert!(
+        after_restore(&transcript)
+            .trim_end()
+            .ends_with("Switched to session core · Fix"),
+        "{transcript:?}"
+    );
+    assert_eq!(rex_calls(&state, "do - --json"), 1);
+    assert_eq!(rex_calls(&state, "client.perform"), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_closes_a_session_only_when_ticked_and_after_the_removal() {
+    let temp = temp_dir();
+    let (home, config, core) = worktree_fixture(temp.path(), SESSION_SECTION);
+    let draft = linked_worktree(&core, "draft", &["-b", "draft"]);
+    let spare = linked_worktree(&core, "spare", &["-b", "spare"]);
+    create_sessions(temp.path(), &home, &config, &[&draft, &spare]);
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+
+    run_inventory_pty_with_exit(
+        &mut command,
+        &[
+            (
+                [&POPUP_READY[..], &["pair: s session"]].concat(),
+                b"w".to_vec(),
+            ),
+            (
+                vec![
+                    "pair: ● ~/repos/org/core.worktrees/draft",
+                    "pair: ● ~/repos/org/core.worktrees/spare",
+                ],
+                b"jr".to_vec(),
+            ),
+            (
+                vec![
+                    "Remove worktree / draft",
+                    "core · Draft · open",
+                    "[x] Close session",
+                    "ends its programs",
+                    "j/k focus · s session · Enter choose · Esc cancel",
+                ],
+                b"s".to_vec(),
+            ),
+            (vec!["[ ] Close session", "absent: [x]"], b"j\r".to_vec()),
+            (
+                vec![
+                    "Removed worktree ~/repos/org/core.worktrees/draft · branch draft kept",
+                    "WORKTREES · 1 row",
+                    "absent: Closed session",
+                ],
+                b"r".to_vec(),
+            ),
+            (
+                vec![
+                    "Remove worktree / spare",
+                    "core · Spare · open",
+                    "[x] Close session",
+                ],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Removed worktree ~/repos/org/core.worktrees/spare · branch spare kept · Closed session core · Spare",
+                    "WORKTREES · 1 row",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Worktrees /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        0,
+        |action| {
+            if action == 4 {
+                assert!(!draft.exists());
+                assert_eq!(rex_calls(&state, "session.destroy"), 0);
+            }
+        },
+    );
+    assert!(!spare.exists());
+    assert_eq!(rex_calls(&state, "session.destroy"), 1);
+    assert_eq!(rex_calls(&state, "client.perform"), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_keeps_the_session_of_a_blocked_worktree_open() {
+    let temp = temp_dir();
+    let (home, config, core) = worktree_fixture(temp.path(), SESSION_SECTION);
+    let locked = linked_worktree(&core, "locked", &["-b", "locked"]);
+    linked_worktree(&core, "plain", &["-b", "plain"]);
+    create_sessions(temp.path(), &home, &config, &[&locked]);
+    run_git(&core, &["worktree", "lock", locked.to_str().unwrap()]);
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+
+    run_inventory_pty_with_exit(
+        &mut command,
+        &[
+            (
+                [&POPUP_READY[..], &["pair: s session"]].concat(),
+                b"w".to_vec(),
+            ),
+            (
+                vec!["pair: ● ~/repos/org/core.worktrees/locked"],
+                b"jr".to_vec(),
+            ),
+            (
+                vec![
+                    "Remove worktree / blocked",
+                    "pair: session core",
+                    "core · Locked · open",
+                    "pair: blocked worktree",
+                    "absent: Close session",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Worktrees / core", "absent: Remove worktree /"],
+                b"jr".to_vec(),
+            ),
+            // A worktree without a session offers no session line.
+            (
+                vec![
+                    "Remove worktree / plain",
+                    "absent: Close session",
+                    "absent: · open",
+                    "j/k focus · Enter choose · Esc cancel",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Remove cancelled · nothing changed", "Worktrees / core"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Worktrees /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        0,
+        |_| {},
+    );
+    assert!(locked.exists());
+    assert_eq!(rex_calls(&state, "session.destroy"), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_keeps_the_session_when_the_removal_is_refused_after_the_summary() {
+    let temp = temp_dir();
+    let (home, config, core) = worktree_fixture(temp.path(), SESSION_SECTION);
+    let hotfix = linked_worktree(&core, "hotfix", &["-b", "hotfix"]);
+    create_sessions(temp.path(), &home, &config, &[&hotfix]);
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+
+    run_inventory_pty_with_exit(
+        &mut command,
+        &[
+            (
+                [&POPUP_READY[..], &["pair: s session"]].concat(),
+                b"wjr".to_vec(),
+            ),
+            (
+                vec!["Remove worktree / hotfix", "[x] Close session"],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "the worktree changed after it was inspected; nothing removed · the session stays open",
+                    "pair: ● ~/repos/org/core.worktrees/hotfix",
+                    "pair: hotfix locked",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Worktrees /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        0,
+        |action| {
+            if action == 1 {
+                run_git(&core, &["worktree", "lock", hotfix.to_str().unwrap()]);
+            }
+        },
+    );
+    assert!(hotfix.is_dir());
+    assert_eq!(rex_calls(&state, "session.destroy"), 0);
+}
+
+/// The menu keys that open Problems… from a row with a checkout and sessions configured.
+#[cfg(unix)]
+const OPEN_PROBLEMS: &[u8] = b"mjjjjjjjjjj\r";
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_keeps_the_removal_when_the_close_fails() {
+    let temp = temp_dir();
+    let (home, config, core) = worktree_fixture(temp.path(), SESSION_SECTION);
+    let draft = linked_worktree(&core, "draft", &["-b", "draft"]);
+    create_sessions(temp.path(), &home, &config, &[&draft]);
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+    fs::write(state.join("destroy-fails"), "").unwrap();
+
+    run_inventory_pty_with_exit(
+        &mut command,
+        &[
+            (
+                [&POPUP_READY[..], &["pair: s session"]].concat(),
+                b"wjr".to_vec(),
+            ),
+            (
+                vec!["Remove worktree / draft", "[x] Close session"],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "! Removed worktree ~/repos/org/core.worktrees/draft · branch draft kept · Close session failed:",
+                    "WORKTREES · 1 row · 1 problem",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row · 1 problem", "absent: Worktrees /"],
+                OPEN_PROBLEMS.to_vec(),
+            ),
+            (
+                vec![
+                    "Problems / 1",
+                    "pair: session Close",
+                    "Close session failed:",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Problems /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        1,
+        |_| {},
+    );
+    assert!(!draft.exists());
+    assert_eq!(rex_calls(&state, "session.destroy"), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_removes_the_worktree_while_rex_is_unavailable_at_the_close() {
+    let temp = temp_dir();
+    let (home, config, core) = worktree_fixture(temp.path(), SESSION_SECTION);
+    let draft = linked_worktree(&core, "draft", &["-b", "draft"]);
+    create_sessions(temp.path(), &home, &config, &[&draft]);
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+
+    run_inventory_pty_with_exit(
+        &mut command,
+        &[
+            (
+                [&POPUP_READY[..], &["pair: s session"]].concat(),
+                b"wjr".to_vec(),
+            ),
+            (
+                vec!["Remove worktree / draft", "[x] Close session"],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Removed worktree ~/repos/org/core.worktrees/draft · branch draft kept · Close session unavailable: no Rex server is running",
+                    "absent: problem",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Worktrees /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        0,
+        |action| {
+            if action == 1 {
+                fs::write(state.join("offline"), "").unwrap();
+            }
+        },
+    );
+    assert!(!draft.exists());
+    assert_eq!(rex_calls(&state, "session.destroy"), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_explicit_s_in_the_confirmation_wins_over_the_session_key() {
+    let temp = temp_dir();
+    let (home, config, core) = worktree_fixture(
+        temp.path(),
+        &format!("{SESSION_SECTION}\n[inventory.keys.confirmation]\ndown = [\"s\"]\n"),
+    );
+    let draft = linked_worktree(&core, "draft", &["-b", "draft"]);
+    create_sessions(temp.path(), &home, &config, &[&draft]);
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+
+    run_inventory_pty_with_exit(
+        &mut command,
+        &[
+            (
+                [&POPUP_READY[..], &["pair: s session"]].concat(),
+                b"wjr".to_vec(),
+            ),
+            (
+                vec![
+                    "Remove worktree / draft",
+                    "[x] Close session",
+                    "absent: s session",
+                ],
+                // `s` moves to the removing choice; the tick stays.
+                b"s\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Removed worktree ~/repos/org/core.worktrees/draft · branch draft kept · Closed session core · Draft",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Worktrees /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        0,
+        |_| {},
+    );
+    assert_eq!(rex_calls(&state, "session.destroy"), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_add_starts_no_second_open() {
+    let temp = temp_dir();
+    let (home, config, _) = worktree_fixture(temp.path(), SESSION_SECTION);
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+    fs::write(state.join("hold-create"), "").unwrap();
+
+    let transcript = run_inventory_pty_with_exit(
+        &mut command,
+        &[
+            (
+                [&POPUP_READY[..], &["pair: s session"]].concat(),
+                b"ws".to_vec(),
+            ),
+            (vec!["Opening session core…"], b"a".to_vec()),
+            (vec!["Add worktree / core"], b"fix\r".to_vec()),
+            (
+                vec!["Add worktree / plan", "[x] Open session"],
+                b"\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Created worktree ~/repos/org/core.worktrees/fix on new branch fix · Open session unavailable: a session is opening",
+                ],
+                Vec::new(),
+            ),
+        ],
+        32,
+        132,
+        0,
+        |action| {
+            if action == 4 {
+                fs::write(state.join("release"), "").unwrap();
+            }
+        },
+    );
+    assert!(
+        after_restore(&transcript)
+            .trim_end()
+            .ends_with("Opened session core"),
+        "{transcript:?}"
+    );
+    assert_eq!(rex_calls(&state, "do - --json"), 1);
 }

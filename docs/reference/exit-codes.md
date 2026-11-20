@@ -16,7 +16,8 @@ fails to load automatically do not count as failures. A
 cancelled confirmation and a cancelled batch do not count either, including
 cancelling from the quit prompt of a running batch; blocked and failed batch
 targets do. A session that fails to open on a running Rex counts, as do a list of
-sessions that fails on a running Rex and a session record file that cannot be
+sessions that fails on a running Rex, a session that fails to close on a running
+Rex after its worktree was removed, and a session record file that cannot be
 read or written; a missing or stopped Rex does not. When `s` has opened a session, the inventory closes with
 the status of a normal quit. Non-TTY
 use and invalid flags exit `2` before raw mode;

@@ -44,7 +44,7 @@ The first `open` creates the session and switches Rex to it: `Opened session pro
 
 Run `lager tui`, select a repository and press `s`. The inventory closes once Rex shows the session and prints `Opened session project`. When the session exists, it prints `Switched to session project`. Open session in the `m` menu does the same.
 
-A `●` between the mark and the name shows a repository whose primary checkout has a session. Worktree sessions show in `lager worktree list`.
+A `●` between the mark and the name shows a repository whose primary checkout has a session. Worktree sessions show in the Worktrees popup and in `lager worktree list`.
 
 When Rex is missing or not running, the inventory says `Sessions unavailable: …` once, and `s` repeats the reason. Everything else in the inventory keeps working. The [CLI reference](../reference/cli.md#sessions-in-the-inventory) lists every outcome.
 
@@ -70,6 +70,13 @@ lager worktree remove ~/repos/org/project.worktrees/hotfix --close-session
 ```
 
 `--create-session` on `add` creates the session without switching Rex to it. The [worktrees how-to](worktrees.md#start-a-topic-in-its-own-session) has the details.
+
+In the inventory, press `w` on a repository. The Worktrees popup marks each worktree that has a session with `●`, and `s` opens the selected one. Its plan and its removal summary carry a ticked session line:
+
+- Create worktree with `[x] Open session` creates the worktree, opens its session, closes the inventory and prints both lines.
+- A removal with `[x] Close session` closes the session once Git has removed the worktree. The inventory stays open.
+
+Press `s` in the plan or the summary to clear the tick for that worktree. A blocked removal leaves the session running and shows it as open. The [CLI reference](../reference/cli.md#sessions-in-the-worktrees-popup) lists every outcome.
 
 ## Close a session
 

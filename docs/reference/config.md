@@ -229,7 +229,8 @@ mode uses q/Esc for quit. To bind popup quit to q explicitly, also set
 Worktrees drives the list of the Worktrees popup: navigation, paging, `add`
 (default `a`), `remove` (default `r`), `copy` (default `c`), `session` (default
 `s`), accept and cancel, which both close it, help and quit, with the popup
-defaults for those. In the popup `session` does nothing. Its name
+defaults for those. `session` opens the session of the selected worktree and
+needs a [`[session]` section](#session). Its name
 form uses the input settings, its plan and its removal summary use the
 confirmation settings, and its blocker view scrolls with the inspection
 navigation keys and closes with the inspection accept and cancel keys.
@@ -240,7 +241,8 @@ up and down move the cursor between Cancel and the action, page up and down
 scroll the target list, accept chooses, cancel closes it, plus help and quit.
 The removal confirmation adds `acknowledge` (default Space), which ticks the
 loss acknowledgment, and the quit prompt of a running batch uses up, down,
-accept and cancel.
+accept and cancel. With a `[session]` section, `session` (default `s`) ticks or
+clears the session line of a worktree's plan or removal summary.
 Input settings drive the Add reference form: accept previews the reference,
 cancel closes the form, plus help and quit, with Enter, Esc, F1 and Ctrl-Q as
 defaults; its letters remain text. The Add preview uses the confirmation
@@ -257,10 +259,11 @@ actions:
 [inventory.keys.normal] binds x to remove and to clone
 ```
 
-Ten defaults give way to an explicit key of the same mode instead of colliding:
+Eleven defaults give way to an explicit key of the same mode instead of colliding:
 `worktrees` (`w`) and `session` (`s`) in normal, `add` (`a`), `remove` (`r`),
 `copy` (`c`) and `session` (`s`) in worktrees, `copy` (`c`) in inspection, and
-`acknowledge` (Space), cancel's `q` and quit's Ctrl-Q in confirmation. The
+`acknowledge` (Space), `session` (`s`), cancel's `q` and quit's Ctrl-Q in
+confirmation. The
 yielding action then has no key in that mode, and Help says so; Worktrees… and
 Open session in the menu still work. When Ctrl-Q goes to another confirmation action and quit has no
 explicit list, quit moves to `q` and cancel keeps Esc; if `q` is taken as well,
@@ -276,7 +279,8 @@ Help lists the mode it was opened from with the effective keys, adds
 `(config: action = [...])` next to each overridden action, shows one line per
 other mode, and names the normal actions without a key. With a `[session]`
 section, Help in normal mode adds a Sessions block that explains the `●` mark
-and the `session` key. It scrolls with the
+and the `session` keys of the table and the confirmation, and the worktrees and
+confirmation lines name their `session` key. It scrolls with the
 inspection bindings and leaves the status line visible.
 
 Keys include single characters, Enter, Esc, arrows, Home, End, PageUp, PageDown,

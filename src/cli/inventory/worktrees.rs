@@ -1,6 +1,7 @@
 //! The Worktrees popup of one inventory row: the list, Add through a name and its plan, and
 //! Remove through its blockers or a confirmation. Every rule comes from the worktree service.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::KeyEvent;
@@ -17,6 +18,7 @@ use super::{
     rows_hint, tint, wait_for_enter, warn,
 };
 use crate::application::ports::Desktop;
+use crate::application::sessions;
 use crate::application::worktrees::{
     self, AddPlan, Blocker, Placement, RemovalInspection, RemoveError, Repository, WorktreeRecord,
     short_id,
@@ -27,6 +29,8 @@ use crate::infrastructure::config::load_worktrees;
 use crate::infrastructure::desktop::NativeDesktop;
 use crate::infrastructure::filesystem::Filesystem;
 use crate::infrastructure::git::NativeGit;
+use crate::infrastructure::rex::Rex;
+use crate::infrastructure::session_record::SessionFile;
 use crate::presentation::escape;
 
 const GIT: NativeGit = NativeGit;
@@ -38,8 +42,9 @@ pub(super) struct Popup {
     /// Git reports real paths, so `~` stands for the real HOME here.
     home: PathBuf,
     repository: Repository,
-    /// Git's list as of the last change, each working tree with its state label.
-    rows: Vec<(WorktreeRecord, String)>,
+    /// Git's list as of the last change, each working tree with its state label and the key
+    /// of its session record.
+    rows: Vec<(WorktreeRecord, String, PathBuf)>,
     faults: Vec<String>,
     cursor: usize,
     stage: Stage,
@@ -56,23 +61,30 @@ enum Stage {
         plan: AddPlan,
         /// The cursor is on "Back to name" instead of "Create worktree".
         back: bool,
+        /// Whether the session opens after the add; `None` when sessions are off.
+        open: Option<bool>,
     },
     Blocked {
         path: PathBuf,
         blockers: Vec<Blocker>,
         scroll: u16,
+        /// The label of the worktree's live session.
+        session: Option<String>,
     },
     Confirm {
         inspection: RemovalInspection,
         /// The cursor is on the removing choice instead of Cancel.
         remove: bool,
+        /// The label of the worktree's live session, and whether it closes after the removal.
+        close: Option<(String, bool)>,
     },
 }
 
-/// A confirmed native Git operation; it runs with the terminal handed to Git.
+/// A confirmed native Git operation; it runs with the terminal handed to Git. Each carries
+/// the session choice of its sheet.
 pub(super) enum Native {
-    Add(AddPlan),
-    Remove(RemovalInspection),
+    Add(AddPlan, bool),
+    Remove(RemovalInspection, Option<(String, bool)>),
 }
 
 /// The last component of a worktree path, as the popup names the worktree.
@@ -168,7 +180,8 @@ impl Popup {
                     _ => {}
                 }
                 let state = states.join(" · ");
-                (record, state)
+                let key = crate::cli::session::key(&record.path);
+                (record, state, key)
             })
             .collect();
         self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
@@ -177,6 +190,19 @@ impl Popup {
     fn shown(&self, path: &Path) -> String {
         home_relative(path, &self.home)
     }
+}
+
+/// The session label of the working tree at `path`, a linked worktree unless it is the
+/// primary checkout Git lists.
+fn session_label(popup: &Popup, path: &Path) -> String {
+    let primary = popup
+        .rows
+        .iter()
+        .find(|(record, ..)| record.is_primary)
+        .map_or(popup.repository.primary.as_path(), |(record, ..)| {
+            record.path.as_path()
+        });
+    crate::cli::session::label(primary, path)
 }
 
 /// Opens the popup on `row`, or reports why the row has no worktrees to show.
@@ -214,7 +240,7 @@ pub(super) fn open(
             popup.cursor = popup
                 .rows
                 .iter()
-                .position(|(record, _)| record.is_primary)
+                .position(|(record, ..)| record.is_primary)
                 .unwrap_or(0);
             selection.worktrees = Some(popup);
         }
@@ -267,10 +293,21 @@ pub(super) fn key(
     // A choice that changes something acts only while what it confirms is on screen.
     let readable = sheet(popup, &session.bindings, area).is_none_or(|sheet| sheet.regions(area).3);
     let scroll_limit = match &popup.stage {
-        Stage::Blocked { path, blockers, .. } => popup_scroll_limit(
+        Stage::Blocked {
+            path,
+            blockers,
+            session,
+            ..
+        } => popup_scroll_limit(
             area,
             WIDE_POPUP,
-            &blocked_body(popup, path, blockers, popup_body_width(area, WIDE_POPUP)),
+            &blocked_body(
+                popup,
+                path,
+                session.as_deref(),
+                blockers,
+                popup_body_width(area, WIDE_POPUP),
+            ),
         ),
         _ => 0,
     };
@@ -282,8 +319,11 @@ pub(super) fn key(
         }
         (Stage::List, Some(action)) => {
             let last = popup.rows.len().saturating_sub(1);
-            let record = popup.rows.get(popup.cursor).map(|(record, _)| record);
-            match (action, record) {
+            let hosted = session
+                .hosted
+                .as_ref()
+                .and_then(|hosted| hosted.as_ref().ok());
+            match (action, popup.rows.get(popup.cursor)) {
                 (Action::Up, _) => popup.cursor = popup.cursor.saturating_sub(1),
                 (Action::Down, _) => popup.cursor = (popup.cursor + 1).min(last),
                 (Action::PageUp, _) => popup.cursor = popup.cursor.saturating_sub(10),
@@ -295,19 +335,39 @@ pub(super) fn key(
                     };
                     return None;
                 }
-                (Action::Copy, Some(record)) => {
+                (Action::Copy, Some((record, ..))) => {
                     session.message = Some(match NativeDesktop.copy(record.path.as_os_str()) {
                         Ok(()) => format!("Copied path of {}", dir_name(&record.path)),
                         Err(reason) => format!("Copy unavailable: {}", escape(reason)),
                     });
                 }
-                (Action::Remove, Some(record)) if record.is_primary => {
+                (Action::Session, Some((record, _, key))) if session.session_layout.is_some() => {
+                    let refused = match &session.hosted {
+                        Some(Err(reason)) => Some(reason.clone()),
+                        _ if session.opening.is_some() => Some("a session is opening".to_owned()),
+                        _ if !record.path.is_dir() => {
+                            Some("no checkout at the destination".to_owned())
+                        }
+                        _ => None,
+                    };
+                    match refused {
+                        Some(reason) => {
+                            session.message = Some(format!("Open session unavailable: {reason}"));
+                        }
+                        None => {
+                            let label = session_label(popup, &record.path);
+                            let checkout = (key.clone(), label.clone());
+                            session.open_checkout(label, None, move || Ok(checkout));
+                        }
+                    }
+                }
+                (Action::Remove, Some((record, ..))) if record.is_primary => {
                     session.message = Some(
                         "Remove unavailable: the primary checkout is removed from the table, not here"
                             .to_owned(),
                     );
                 }
-                (Action::Remove, Some(record)) => {
+                (Action::Remove, Some((record, ..))) => {
                     // Every guard runs here; nothing is deleted before the confirmation.
                     let inspection = worktrees::inspect_removal(
                         &GIT,
@@ -316,17 +376,22 @@ pub(super) fn key(
                         Some(&popup.repository.primary),
                         Some("in the worktree: git"),
                     );
+                    let live = hosted
+                        .and_then(|hosted| hosted.get(&inspection.path))
+                        .cloned();
                     popup.stage = if inspection.blockers.is_empty() {
                         selection.preview_fresh = true;
                         Stage::Confirm {
                             inspection,
                             remove: false,
+                            close: live.map(|label| (label, true)),
                         }
                     } else {
                         Stage::Blocked {
                             path: inspection.path,
                             blockers: inspection.blockers,
                             scroll: 0,
+                            session: live,
                         }
                     };
                     return None;
@@ -342,6 +407,9 @@ pub(super) fn key(
                     text,
                     plan,
                     back: false,
+                    open: (session.session_layout.is_some()
+                        && !matches!(session.hosted, Some(Err(_))))
+                    .then_some(true),
                 }
             }
             Err(reason) => Stage::Input {
@@ -360,13 +428,31 @@ pub(super) fn key(
                 rejected: None,
             }
         }
-        (Stage::Plan { text, plan, .. }, Some(action @ (Action::Up | Action::Down))) => {
+        (
+            Stage::Plan {
+                text, plan, open, ..
+            },
+            Some(action @ (Action::Up | Action::Down)),
+        ) => Stage::Plan {
+            text,
+            plan,
+            back: action == Action::Down,
+            open,
+        },
+        (
             Stage::Plan {
                 text,
                 plan,
-                back: action == Action::Down,
-            }
-        }
+                back,
+                open: Some(open),
+            },
+            Some(Action::Session),
+        ) => Stage::Plan {
+            text,
+            plan,
+            back,
+            open: Some(!open),
+        },
         (stage @ Stage::Plan { back: false, .. }, Some(Action::Accept)) if !readable => {
             session.message =
                 Some("Add unavailable: enlarge the terminal to show the whole plan".to_owned());
@@ -377,6 +463,7 @@ pub(super) fn key(
                 text,
                 plan,
                 back: false,
+                open,
             },
             Some(Action::Accept),
         ) => {
@@ -384,8 +471,9 @@ pub(super) fn key(
                 text,
                 plan: plan.clone(),
                 back: false,
+                open,
             };
-            return Some(Native::Add(plan));
+            return Some(Native::Add(plan, open == Some(true)));
         }
         (Stage::Plan { text, .. }, Some(Action::Accept | Action::Cancel)) => Stage::Input {
             text,
@@ -397,11 +485,13 @@ pub(super) fn key(
                 path,
                 blockers,
                 scroll,
+                session,
             },
             Some(action @ (Action::Up | Action::Down | Action::PageUp | Action::PageDown)),
         ) => Stage::Blocked {
             path,
             blockers,
+            session,
             scroll: match action {
                 Action::Up => scroll.saturating_sub(1),
                 Action::Down => scroll.saturating_add(1),
@@ -416,24 +506,42 @@ pub(super) fn key(
             );
             stage
         }
-        (Stage::Confirm { inspection, .. }, Some(action @ (Action::Up | Action::Down))) => {
+        (
+            Stage::Confirm {
+                inspection, close, ..
+            },
+            Some(action @ (Action::Up | Action::Down)),
+        ) => Stage::Confirm {
+            inspection,
+            remove: action == Action::Down,
+            close,
+        },
+        (
             Stage::Confirm {
                 inspection,
-                remove: action == Action::Down,
-            }
-        }
+                remove,
+                close: Some((label, tick)),
+            },
+            Some(Action::Session),
+        ) => Stage::Confirm {
+            inspection,
+            remove,
+            close: Some((label, !tick)),
+        },
         (
             Stage::Confirm {
                 inspection,
                 remove: true,
+                close,
             },
             Some(Action::Accept),
         ) => {
             popup.stage = Stage::Confirm {
                 inspection: inspection.clone(),
                 remove: true,
+                close: close.clone(),
             };
-            return Some(Native::Remove(inspection));
+            return Some(Native::Remove(inspection, close));
         }
         (Stage::Confirm { .. }, Some(Action::Accept | Action::Cancel)) => {
             session.message = cancelled("Remove");
@@ -459,7 +567,7 @@ pub(super) fn run(
     // Git ran, or a line was awaited: what was typed there is not for the inventory.
     let mut handed_over = true;
     let failed = match native {
-        Native::Add(plan) => {
+        Native::Add(plan, open) => {
             let destination = popup.shown(&plan.destination);
             // Keys typed before Git starts must not answer it or its hooks.
             discard_input();
@@ -471,11 +579,24 @@ pub(super) fn run(
             eprintln!();
             match worktrees::add(&GIT, &FILES, &plan) {
                 Ok(()) => {
-                    session.message = Some(format!(
+                    let created = format!(
                         "Created worktree {destination} on {}branch {}",
                         if plan.start.is_some() { "new " } else { "" },
                         escape(&plan.branch)
-                    ));
+                    );
+                    if !open {
+                        session.message = Some(created);
+                    } else if session.opening.is_some() {
+                        session.message = Some(format!(
+                            "{created} · Open session unavailable: a session is opening"
+                        ));
+                    } else {
+                        let label = session_label(popup, &plan.destination);
+                        let opened = label.clone();
+                        session.open_checkout(label, Some(created), move || {
+                            Ok((crate::cli::session::key(&plan.destination), opened))
+                        });
+                    }
                     None
                 }
                 Err(failure) => {
@@ -497,7 +618,7 @@ pub(super) fn run(
                 }
             }
         }
-        Native::Remove(inspection) => {
+        Native::Remove(inspection, close) => {
             let shown = popup.shown(&inspection.path);
             // Yes on a summary with losses accepts exactly the losses it listed.
             let result = worktrees::remove(
@@ -508,24 +629,54 @@ pub(super) fn run(
                 Some(&popup.repository.primary),
             );
             handed_over = matches!(result, Ok(()) | Err(RemoveError::Failed(_)));
+            let kept_open = if matches!(close, Some((_, true))) {
+                " · the session stays open"
+            } else {
+                ""
+            };
             match result {
                 Ok(()) => {
                     let kept = match &inspection.branch {
                         Some(branch) => format!("branch {} kept", branch_label(Some(branch), None)),
                         None => kept_label(&inspection),
                     };
-                    session.message = Some(format!("Removed worktree {shown} · {}", escape(kept)));
+                    let removed = format!("Removed worktree {shown} · {}", escape(kept));
+                    session.message = Some(match close {
+                        // The record is keyed by the canonical path read before the removal.
+                        Some((_, true)) => {
+                            match sessions::close(&Rex, &SessionFile, &inspection.path) {
+                                Ok(Some(recorded)) => {
+                                    format!(
+                                        "{removed} · Closed session {}",
+                                        escape(&recorded.label)
+                                    )
+                                }
+                                Ok(None) => removed,
+                                Err(error) => match session.host_error(error) {
+                                    Ok(reason) => {
+                                        format!("{removed} · Close session unavailable: {reason}")
+                                    }
+                                    Err(reason) => {
+                                        let failed = format!("Close session failed: {reason}");
+                                        session.problems.record("session", failed.clone());
+                                        format!("! {removed} · {failed}")
+                                    }
+                                },
+                            }
+                        }
+                        _ => removed,
+                    });
                     None
                 }
                 Err(RemoveError::Stale) => {
-                    session.message = Some(
-                        "the worktree changed after it was inspected; nothing removed".to_owned(),
-                    );
+                    session.message = Some(format!(
+                        "the worktree changed after it was inspected; nothing removed{kept_open}"
+                    ));
                     None
                 }
                 Err(RemoveError::Losses) => {
                     session.message = Some(format!(
-                        "{} would be lost; nothing removed",
+                        "{} would be lost; nothing removed{kept_open}",
                         if inspection.git_state.is_empty() {
                             "local changes"
                         } else {
@@ -540,6 +691,7 @@ pub(super) fn run(
                         path: inspection.path.clone(),
                         blockers,
                         scroll: 0,
+                        session: close.map(|(label, _)| label),
                     };
                     None
                 }
@@ -598,11 +750,17 @@ fn pad(text: String, width: usize) -> String {
 }
 
 /// The heading and one line per working tree, cut to `width`, with the cursor row reversed.
-fn list_lines(popup: &Popup, width: usize) -> Vec<Line<'static>> {
+/// With `hosted`, a slot before the path marks each worktree with a live session.
+fn list_lines(
+    popup: &Popup,
+    hosted: Option<&BTreeMap<PathBuf, String>>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let slot = if hosted.is_some() { 2 } else { 0 };
     let cells = popup
         .rows
         .iter()
-        .map(|(record, state)| {
+        .map(|(record, state, _)| {
             [
                 popup.shown(&record.path),
                 escape(branch_label(
@@ -624,8 +782,8 @@ fn list_lines(popup: &Popup, width: usize) -> Vec<Line<'static>> {
     let branch = widest(1, "branch").min(18);
     // The path keeps its tail and leaves the state room for a change summary.
     let state = widest(2, "state").min(24);
-    let path = widest(0, "path").min(width.saturating_sub(branch + state + 4));
-    let state = width.saturating_sub(path + branch + 4);
+    let path = widest(0, "path").min(width.saturating_sub(branch + state + 4 + slot));
+    let state = width.saturating_sub(path + branch + 4 + slot);
     let row = |cells: [String; 3]| {
         let [first, second, third] = cells;
         [
@@ -635,14 +793,19 @@ fn list_lines(popup: &Popup, width: usize) -> Vec<Line<'static>> {
         ]
     };
     let mut lines = vec![Line::styled(
-        row(["path", "branch", "state"].map(str::to_owned)).concat(),
+        " ".repeat(slot) + &row(["path", "branch", "state"].map(str::to_owned)).concat(),
         dim(),
     )];
     lines.extend(cells.into_iter().enumerate().map(|(index, cells)| {
-        let (record, state) = &popup.rows[index];
+        let (record, state, key) = &popup.rows[index];
+        let mark = match hosted {
+            Some(hosted) if hosted.contains_key(key) => "● ",
+            Some(_) => "  ",
+            None => "",
+        };
         if index == popup.cursor {
             return Line::styled(
-                row(cells).concat(),
+                mark.to_owned() + &row(cells).concat(),
                 Style::default().add_modifier(Modifier::REVERSED),
             );
         }
@@ -655,6 +818,7 @@ fn list_lines(popup: &Popup, width: usize) -> Vec<Line<'static>> {
         };
         let [path, branch, state] = row(cells);
         Line::from(vec![
+            Span::styled(mark, focus()),
             Span::raw(path),
             Span::raw(branch),
             Span::styled(state, style),
@@ -663,10 +827,15 @@ fn list_lines(popup: &Popup, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn list_footer(bindings: &Bindings) -> String {
+fn list_footer(bindings: &Bindings, sessions: bool) -> String {
     let hint = |action, label| first_key_hint(bindings, Mode::Worktrees, action, label);
     [
         format!("{} select", rows_hint(bindings, Mode::Worktrees)),
+        if sessions {
+            hint(Action::Session, "session")
+        } else {
+            String::new()
+        },
         hint(Action::Add, "add"),
         hint(Action::Remove, "remove"),
         hint(Action::Copy, "copy"),
@@ -678,7 +847,13 @@ fn list_footer(bindings: &Bindings) -> String {
     .join(" · ")
 }
 
-fn draw_list(frame: &mut ratatui::Frame<'_>, popup: &Popup, bindings: &Bindings, area: Rect) {
+fn draw_list(
+    frame: &mut ratatui::Frame<'_>,
+    popup: &Popup,
+    bindings: &Bindings,
+    hosted: Option<&BTreeMap<PathBuf, String>>,
+    area: Rect,
+) {
     let mut intro = popup
         .faults
         .iter()
@@ -687,7 +862,11 @@ fn draw_list(frame: &mut ratatui::Frame<'_>, popup: &Popup, bindings: &Bindings,
     if !intro.is_empty() {
         intro.push(Line::default());
     }
-    let list = list_lines(popup, usize::from(popup_body_width(area, WIDE_POPUP)));
+    let list = list_lines(
+        popup,
+        hosted,
+        usize::from(popup_body_width(area, WIDE_POPUP)),
+    );
     let sizing = [intro.clone(), list.clone()].concat();
     let [frame_area, title, content, footer] = popup_regions(
         area,
@@ -713,13 +892,23 @@ fn draw_list(frame: &mut ratatui::Frame<'_>, popup: &Popup, bindings: &Bindings,
     );
     frame.render_widget(intro, intro_area);
     frame.render_widget(Paragraph::new(rows), list_area);
-    frame.render_widget(Paragraph::new(list_footer(bindings)).style(dim()), footer);
+    frame.render_widget(
+        Paragraph::new(list_footer(bindings, hosted.is_some())).style(dim()),
+        footer,
+    );
 }
 
 /// Draws the popup's current stage inside `area`, which leaves the status line readable.
-pub(super) fn draw(frame: &mut ratatui::Frame<'_>, popup: &Popup, bindings: &Bindings, area: Rect) {
+/// `hosted` holds the live sessions once the host answered.
+pub(super) fn draw(
+    frame: &mut ratatui::Frame<'_>,
+    popup: &Popup,
+    bindings: &Bindings,
+    hosted: Option<&BTreeMap<PathBuf, String>>,
+    area: Rect,
+) {
     let (cap, title, lines, footer) = match &popup.stage {
-        Stage::List => return draw_list(frame, popup, bindings, area),
+        Stage::List => return draw_list(frame, popup, bindings, hosted, area),
         Stage::Input { text, rejected } => {
             let mut lines = vec![
                 Line::styled("name", dim()),
@@ -746,8 +935,15 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, popup: &Popup, bindings: &Bin
             path,
             blockers,
             scroll,
+            session,
         } => {
-            let body = blocked_body(popup, path, blockers, popup_body_width(area, WIDE_POPUP));
+            let body = blocked_body(
+                popup,
+                path,
+                session.as_deref(),
+                blockers,
+                popup_body_width(area, WIDE_POPUP),
+            );
             let scroll = (*scroll).min(popup_scroll_limit(area, WIDE_POPUP, &body));
             return super::draw_popup_in(
                 frame,
@@ -804,10 +1000,14 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, popup: &Popup, bindings: &Bin
 fn blocked_body(
     popup: &Popup,
     path: &Path,
+    session: Option<&str>,
     blockers: &[Blocker],
     width: u16,
 ) -> Paragraph<'static> {
     let mut lines = exact_field_lines("path", &popup.shown(path), Style::default(), width);
+    if let Some(label) = session {
+        lines.extend(open_session_line(label, width));
+    }
     for blocker in blockers {
         lines.extend(field_lines(
             "blocked",
@@ -861,8 +1061,19 @@ fn sheet(popup: &Popup, bindings: &Bindings, area: Rect) -> Option<Sheet> {
     let width = popup_body_width(area, WIDE_POPUP);
     let hint = |action, label| first_key_hint(bindings, Mode::Confirmation, action, label);
     let rows = rows_hint(bindings, Mode::Confirmation);
+    let session_hint = |offered: bool| {
+        let hint = hint(Action::Session, "session");
+        if offered && !hint.is_empty() {
+            format!(" · {hint}")
+        } else {
+            String::new()
+        }
+    };
+    let tick = |label: &str, ticked: bool| format!("[{}] {label}", if ticked { "x" } else { " " });
     match &popup.stage {
-        Stage::Plan { plan, back, .. } => {
+        Stage::Plan {
+            plan, back, open, ..
+        } => {
             let branch = match &plan.start {
                 Some(start) => format!("{} · new, at {}", escape(&plan.branch), short_id(start)),
                 None => format!("{} · existing", escape(&plan.branch)),
@@ -879,22 +1090,44 @@ fn sheet(popup: &Popup, bindings: &Bindings, area: Rect) -> Option<Sheet> {
                 Style::default(),
                 width,
             ));
+            let mut choices = Vec::new();
+            if let Some(open) = open {
+                required.extend(exact_field_lines(
+                    "session",
+                    &escape(session_label(popup, &plan.destination)),
+                    Style::default(),
+                    width,
+                ));
+                choices.push(choice_line(
+                    &tick("Open session", *open),
+                    "",
+                    true,
+                    false,
+                    usize::from(width),
+                ));
+            }
+            choices.extend([
+                choice_line("Create worktree", "", true, !back, usize::from(width)),
+                choice_line("Back to name", "", true, *back, usize::from(width)),
+            ]);
             Some(Sheet {
                 title: "Add worktree / plan".to_owned(),
                 required,
                 optional: vec![Line::default()],
-                choices: vec![
-                    choice_line("Create worktree", "", true, !back, usize::from(width)),
-                    choice_line("Back to name", "", true, *back, usize::from(width)),
-                ],
+                choices,
                 footer: format!(
-                    "{rows} select · {} · {}",
+                    "{rows} select{} · {} · {}",
+                    session_hint(open.is_some()),
                     hint(Action::Accept, "choose"),
                     hint(Action::Cancel, "back")
                 ),
             })
         }
-        Stage::Confirm { inspection, remove } => {
+        Stage::Confirm {
+            inspection,
+            remove,
+            close,
+        } => {
             let lossy = inspection.lossy();
             // The losses, the exact path in full and the kept branch all have to be in view.
             let mut required = Vec::new();
@@ -918,26 +1151,39 @@ fn sheet(popup: &Popup, bindings: &Bindings, area: Rect) -> Option<Sheet> {
                 Style::default(),
                 width,
             ));
+            let mut choices = Vec::new();
+            if let Some((label, ticked)) = close {
+                required.extend(open_session_line(label, width));
+                choices.push(choice_line(
+                    &tick("Close session", *ticked),
+                    "ends its programs",
+                    true,
+                    false,
+                    usize::from(width),
+                ));
+            }
+            choices.extend([
+                choice_line("Cancel", "", true, !remove, usize::from(width)),
+                choice_line(
+                    if lossy {
+                        "Accept these losses and remove this worktree"
+                    } else {
+                        "Remove this worktree"
+                    },
+                    "cannot be undone",
+                    true,
+                    *remove,
+                    usize::from(width),
+                ),
+            ]);
             Some(Sheet {
                 title: format!("Remove worktree / {}", dir_name(&inspection.path)),
                 required,
                 optional: vec![Line::default()],
-                choices: vec![
-                    choice_line("Cancel", "", true, !remove, usize::from(width)),
-                    choice_line(
-                        if lossy {
-                            "Accept these losses and remove this worktree"
-                        } else {
-                            "Remove this worktree"
-                        },
-                        "cannot be undone",
-                        true,
-                        *remove,
-                        usize::from(width),
-                    ),
-                ],
+                choices,
                 footer: format!(
-                    "{rows} focus · {} · {}",
+                    "{rows} focus{} · {} · {}",
+                    session_hint(close.is_some()),
                     hint(Action::Accept, "choose"),
                     hint(Action::Cancel, "cancel")
                 ),
@@ -945,4 +1191,14 @@ fn sheet(popup: &Popup, bindings: &Bindings, area: Rect) -> Option<Sheet> {
         }
         _ => None,
     }
+}
+
+/// The `session` field of a worktree whose session is open.
+fn open_session_line(label: &str, width: u16) -> Vec<Line<'static>> {
+    exact_field_lines(
+        "session",
+        &format!("{} · open", escape(label)),
+        Style::default(),
+        width,
+    )
 }

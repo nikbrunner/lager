@@ -157,6 +157,7 @@ impl Action {
                     | Self::Help
                     | Self::Quit
                     | Self::Acknowledge
+                    | Self::Session
             ),
             Mode::Inspection => matches!(
                 self,
@@ -190,7 +191,7 @@ impl Action {
 }
 
 /// Defaults that yield to an explicit key of the same mode, as (mode, action, key).
-const LATE_DEFAULTS: [(Mode, Action, &str); 10] = [
+const LATE_DEFAULTS: [(Mode, Action, &str); 11] = [
     (Mode::Normal, Action::Worktrees, "w"),
     (Mode::Normal, Action::Session, "s"),
     (Mode::Worktrees, Action::Session, "s"),
@@ -199,6 +200,7 @@ const LATE_DEFAULTS: [(Mode, Action, &str); 10] = [
     (Mode::Worktrees, Action::Copy, "c"),
     (Mode::Inspection, Action::Copy, "c"),
     (Mode::Confirmation, Action::Acknowledge, "Space"),
+    (Mode::Confirmation, Action::Session, "s"),
     (Mode::Confirmation, Action::Cancel, "q"),
     (Mode::Confirmation, Action::Quit, "Ctrl+q"),
 ];
@@ -286,7 +288,7 @@ impl Bindings {
                     defaults.push((Copy, vec!["c"]));
                 }
                 if mode == Mode::Confirmation {
-                    defaults.push((Acknowledge, vec!["Space"]));
+                    defaults.extend([(Acknowledge, vec!["Space"]), (Session, vec!["s"])]);
                 }
                 if mode == Mode::Worktrees {
                     defaults.extend([
