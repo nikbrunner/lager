@@ -115,9 +115,10 @@ pub fn install_fake_gh(dir: &Path) -> (PathBuf, PathBuf) {
 /// Logs its arguments per call to `$REX_ARGS_LOG`, keeps one file per session under
 /// `$REX_STATE/sessions` and the last create script in `$REX_STATE/script.lua`. Its replies,
 /// errors and exit codes follow captures from a real Rex, except `bad-list`'s invented `{}`. A
-/// file in `$REX_STATE` switches a
-/// mode: `offline`, `create-fails`, `slow-create`, `bad-list`, `destroy-fails`, `vanished`
-/// (destroy answers that the session is gone while the list still shows it), `no-app`.
+/// file in `$REX_STATE` switches a mode: `offline` (each refused call is also logged to
+/// `$REX_STATE/answered`), `create-fails`, `slow-create`, `hold-create` (create waits until a
+/// `release` file appears), `bad-list`, `destroy-fails`, `vanished` (destroy answers that the
+/// session is gone while the list still shows it), `no-app`.
 #[allow(dead_code)]
 pub const FAKE_REX: &str = r##"#!/bin/sh
 printf '%s\n' "$*" >> "$REX_ARGS_LOG"
@@ -125,6 +126,7 @@ printf '%s\n' "$*" >> "$REX_ARGS_LOG"
 [ "$1" = "--timeout" ] && shift 2
 if [ -e "$REX_STATE/offline" ]; then
   printf '%s\n' "Error: no Rex server is running at $REX_STATE/server.sock, and autostart is disabled" >&2
+  printf '%s\n' "$*" >> "$REX_STATE/answered"
   exit 4
 fi
 sessions="$REX_STATE/sessions"
@@ -137,6 +139,9 @@ case "$1 $2 $3" in
       exit 1
     fi
     [ -e "$REX_STATE/slow-create" ] && /bin/sleep 1
+    if [ -e "$REX_STATE/hold-create" ]; then
+      while [ ! -e "$REX_STATE/release" ]; do /bin/sleep 0.05; done
+    fi
     n=$(( $(cat "$REX_STATE/counter" 2>/dev/null || printf 0) + 1 ))
     printf '%s' "$n" > "$REX_STATE/counter"
     : > "$sessions/$n"

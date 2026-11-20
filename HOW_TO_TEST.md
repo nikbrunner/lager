@@ -178,7 +178,7 @@ session_lager() {
 - [ ] Turn off Rex's Remote Control setting. Close the session in Rex by hand, then run `session_lager session open "$PRIMARY"`. Expect Rex not to switch. Run `echo $?` and record what `open` printed and its exit status in the defect log. `session_lager session list` shows a new `remote` session. Turn Remote Control on again and repeat `open`; expect `Opened session remote` and still one session in the list.
   - Agent check: NOT RUN — needs the Rex app with Remote Control off. `open_without_an_app_fails_on_a_running_host` passes against the fake for an app that cannot select.
 
-- [ ] Quit the Rex app, start it again from the Dock, and open a pane in any session. Set the two values the entry block printed, `SANDBOX=…` and `BIN=…`, then run `env -u REX_BIN_DIR PATH=/usr/bin:/bin LAGER_CONFIG="$SANDBOX/session.toml" LAGER_CACHE_DIR="$SANDBOX/cache" "$BIN" session create "$SANDBOX/home/repos/remote"`. Expect exit 0 with `Session remote already exists`, or `Created session remote` if the session did not survive the restart, and Rex staying where it is. No `rex CLI not found`: lager finds the bundled `rex` without `PATH`.
+- [ ] Quit the Rex app, start it again from the Dock, and open a pane in any session. Set the two values the entry block printed, `SANDBOX=…` and `BIN=…`, then run `env -u REX_BIN_DIR PATH=/usr/bin:/bin LAGER_CONFIG="$SANDBOX/session.toml" LAGER_CACHE_DIR="$SANDBOX/cache" "$BIN" session create "$SANDBOX/home/repos/remote"`. Expect exit 0 with `Session remote already exists`, or `Created session remote` if the session did not survive the restart, and Rex staying where it is. No `rex is not installed`: lager finds the bundled `rex` without `PATH`.
   - Agent check: NOT RUN — needs Rex restarted from the Dock; the lookup's bundled path cannot be sandboxed in tests.
 
 - [ ] In a pane of the `remote` session, set `SANDBOX=…` and `BIN=…` as before and run `env LAGER_CONFIG="$SANDBOX/session.toml" LAGER_CACHE_DIR="$SANDBOX/cache" "$BIN" session close .`. Expect the whole session to close, the pane with it, so the `Closed session remote` line is never seen. From another shell, `session_lager session list` prints nothing, and Rex no longer lists `remote`.
@@ -189,6 +189,23 @@ session_lager() {
 
 - [ ] From a shell outside that session, run `session_lager worktree remove "$PRIMARY.worktrees/topic" --yes --close-session`. Expect the removal summary, `Removed worktree … · branch topic kept` and `Closed session remote · Topic`, exit 0, and the session gone from Rex.
   - Agent check: NOT RUN — needs the real Rex. `remove_close_session_destroys_only_after_a_successful_removal` passes against the fake; its log shows the close after Git's removal and none after a refused one.
+
+The inventory steps run the sandbox inventory with your real Rex and a sandbox `HOME`. Run them in a Rex pane outside the `remote` session: there `rex` is on `PATH` and `REX_SERVER` names your server, so lager finds both without your `HOME`. `rex is not installed` or `Sessions unavailable` in the first step means the pane lacks those variables, not that lager failed.
+
+```sh
+session_tui() {
+  env HOME="$SANDBOX/home" LAGER_CONFIG="$SANDBOX/session.toml" LAGER_CACHE_DIR="$SANDBOX/cache" "$BIN" tui "$@"
+}
+```
+
+- [ ] Run `session_tui`, select the `remote` row and press `s`. Expect `Opening session remote…` in the status line, then the inventory closes and the shell prints `Opened session remote` as its last line. `echo $?` prints `0`. Rex comes to the front on a new session `remote`.
+  - Agent check: NOT RUN — moves the Rex view. `inventory_e2e::inventory_s_opens_the_session_closes_and_names_it` and `inventory_answers_keys_while_a_session_opens` pass against a fake `rex`.
+
+- [ ] Go back to the first pane and run `session_tui` again. Once the table settles, expect `●` between the mark and `remote`, and `s session` in the footer. Press `s`. Expect `Switched to session remote`, Rex back on the same session, and one `remote` line in `session_lager session list`.
+  - Agent check: NOT RUN — moves the Rex view. The second run of `inventory_s_opens_the_session_closes_and_names_it` passes against the fake.
+
+- [ ] Look at the session screens at 132×32 and at 80×24, each in a dark theme, a light theme and with `NO_COLOR=1`. Compare them with the canvas boards: the table and footer with SesMain, `m` on `remote` with SesMenu, `?` with SesHelp, and `lager tui`, whose configuration has no `[session]`, with SesOff. Then run `env REX_SERVER="unix://$SANDBOX/none.sock" session_tui` and compare with SesNoRex: expect the status line `Sessions unavailable: REX_SERVER: no Rex server is running at …`, no `●` and no `s session` hint. `s` there prints `Open session unavailable: …`, and `q` exits `0`.
+  - Agent check: NOT RUN — needs eyes. `inventory_says_once_that_sessions_are_unavailable_and_s_repeats_it`, `inventory_explicit_s_wins_over_the_session_key` and `inventory_without_a_session_section_shows_and_asks_nothing_about_sessions` pin the text against the fake.
 
 - [ ] Clean up if a step failed before the close: `session_lager session close "$PRIMARY"`. Expect `Closed session remote` or `No session for …`, and no `remote` session left in Rex. If the `topic` worktree is still there, run `session_lager worktree remove "$PRIMARY.worktrees/topic" --yes --force --close-session`.
   - Agent check: NOT RUN — needs the real Rex.

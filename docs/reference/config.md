@@ -209,7 +209,7 @@ page_down = ["x", "PageDown"]
 ```
 
 Normal actions are `up`, `down`, `refresh`, `search`, `clear_search`, `inspect`,
-`menu`, `mark`, `add`, `remove`, `worktrees` (default `w`), `help` and `quit`. `register`, `unregister`,
+`menu`, `mark`, `add`, `remove`, `worktrees` (default `w`), `session` (default `s`), `help` and `quit`. `session` opens the session of the current row and needs a [`[session]` section](#session); without one its key does nothing. `register`, `unregister`,
 `clone`, `clone_register`, `remove_unregister`, `copy`, `open`, `remote`, `retry`
 and `archives` have no default key. Bound to a key, each runs its menu entry on
 the marked rows or the current row, with the same previews, eligibility and
@@ -227,8 +227,9 @@ mode uses q/Esc for quit. To bind popup quit to q explicitly, also set
 `cancel = ["Esc"]` in that mode so the actions do not collide.
 
 Worktrees drives the list of the Worktrees popup: navigation, paging, `add`
-(default `a`), `remove` (default `r`), `copy` (default `c`), accept and cancel,
-which both close it, help and quit, with the popup defaults for those. Its name
+(default `a`), `remove` (default `r`), `copy` (default `c`), `session` (default
+`s`), accept and cancel, which both close it, help and quit, with the popup
+defaults for those. In the popup `session` does nothing. Its name
 form uses the input settings, its plan and its removal summary use the
 confirmation settings, and its blocker view scrolls with the inspection
 navigation keys and closes with the inspection accept and cancel keys.
@@ -256,23 +257,26 @@ actions:
 [inventory.keys.normal] binds x to remove and to clone
 ```
 
-Eight defaults give way to an explicit key of the same mode instead of colliding:
-`worktrees` (`w`) in normal, `add` (`a`), `remove` (`r`) and `copy` (`c`) in
-worktrees, `copy` (`c`) in inspection, and `acknowledge` (Space), cancel's `q`
-and quit's Ctrl-Q in confirmation. The yielding action then has no key in that
-mode, and Help says so; Worktrees… in the menu still opens the popup. When Ctrl-Q goes to another confirmation action and quit has no
+Ten defaults give way to an explicit key of the same mode instead of colliding:
+`worktrees` (`w`) and `session` (`s`) in normal, `add` (`a`), `remove` (`r`),
+`copy` (`c`) and `session` (`s`) in worktrees, `copy` (`c`) in inspection, and
+`acknowledge` (Space), cancel's `q` and quit's Ctrl-Q in confirmation. The
+yielding action then has no key in that mode, and Help says so; Worktrees… and
+Open session in the menu still work. When Ctrl-Q goes to another confirmation action and quit has no
 explicit list, quit moves to `q` and cancel keeps Esc; if `q` is taken as well,
 the map is rejected because quit is unreachable.
 
 At startup an invalid map stops the inventory before raw mode. On refresh (`R`)
 the configuration and bindings are installed together or not at all: an invalid
 map keeps the previous map active, the status line shows `! Config refresh
-failed: … · previous bindings stay active`, and the failure is listed in Session
-problems and counted in the header.
+failed: … · previous bindings stay active`, and the failure is listed in
+Problems and counted in the header.
 
 Help lists the mode it was opened from with the effective keys, adds
 `(config: action = [...])` next to each overridden action, shows one line per
-other mode, and names the normal actions without a key. It scrolls with the
+other mode, and names the normal actions without a key. With a `[session]`
+section, Help in normal mode adds a Sessions block that explains the `●` mark
+and the `session` key. It scrolls with the
 inspection bindings and leaves the status line visible.
 
 Keys include single characters, Enter, Esc, arrows, Home, End, PageUp, PageDown,
@@ -289,7 +293,7 @@ Unknown modes/actions, collisions, missing required help/quit/accept/cancel
 routes, and bindings that consume ordinary text-editing keys in typing modes
 are rejected. Startup rejects invalid maps before raw mode. A valid local
 refresh swaps configuration and bindings together; an invalid refresh keeps
-the previous map, shows the failure and contributes to session exit status 1.
+the previous map, shows the failure and makes the inventory exit 1.
 Repository configuration mutations preserve inventory settings.
 
 ## Reads and writes

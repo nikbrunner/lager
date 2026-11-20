@@ -561,7 +561,7 @@ pub(super) fn poll(session: &mut InventorySession, selection: &mut Selection) {
         (Err(ActionError::Failed(error)), _) => {
             session.problems.record("github", escape(error));
             format!(
-                "{}: failed, see Session problems · {}",
+                "{}: failed, see Problems · {}",
                 escape(&job.identity),
                 escape(error)
             )

@@ -51,6 +51,7 @@ pub(super) enum Action {
     Visibility,
     DeleteRemote,
     CreateRemote,
+    Session,
 }
 
 impl Action {
@@ -89,6 +90,7 @@ impl Action {
             Self::Visibility => "visibility",
             Self::DeleteRemote => "delete_remote",
             Self::CreateRemote => "create_remote",
+            Self::Session => "session",
         }
     }
 
@@ -124,6 +126,7 @@ impl Action {
                     | Self::Visibility
                     | Self::DeleteRemote
                     | Self::CreateRemote
+                    | Self::Session
             ),
             Mode::Menu => matches!(
                 self,
@@ -176,6 +179,7 @@ impl Action {
                     | Self::Add
                     | Self::Remove
                     | Self::Copy
+                    | Self::Session
                     | Self::Accept
                     | Self::Cancel
                     | Self::Help
@@ -186,8 +190,10 @@ impl Action {
 }
 
 /// Defaults that yield to an explicit key of the same mode, as (mode, action, key).
-const LATE_DEFAULTS: [(Mode, Action, &str); 8] = [
+const LATE_DEFAULTS: [(Mode, Action, &str); 10] = [
     (Mode::Normal, Action::Worktrees, "w"),
+    (Mode::Normal, Action::Session, "s"),
+    (Mode::Worktrees, Action::Session, "s"),
     (Mode::Worktrees, Action::Add, "a"),
     (Mode::Worktrees, Action::Remove, "r"),
     (Mode::Worktrees, Action::Copy, "c"),
@@ -261,6 +267,7 @@ impl Bindings {
                     (Visibility, vec![]),
                     (DeleteRemote, vec![]),
                     (CreateRemote, vec![]),
+                    (Session, vec!["s"]),
                 ]);
             } else {
                 defaults.extend([
@@ -282,7 +289,12 @@ impl Bindings {
                     defaults.push((Acknowledge, vec!["Space"]));
                 }
                 if mode == Mode::Worktrees {
-                    defaults.extend([(Add, vec!["a"]), (Remove, vec!["r"]), (Copy, vec!["c"])]);
+                    defaults.extend([
+                        (Add, vec!["a"]),
+                        (Remove, vec!["r"]),
+                        (Copy, vec!["c"]),
+                        (Session, vec!["s"]),
+                    ]);
                 }
                 if mode == Mode::Menu {
                     // These inherit normal-mode shortcuts unless the menu map explicitly

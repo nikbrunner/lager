@@ -43,9 +43,9 @@ configuration for the printed sandbox config.
   - Agent check: PASS — menu/direct refresh, root return, internal menu scrolling, contextual help and delayed-probe interaction tests.
 - [ ] In the printed sandbox config, add `[inventory.keys.normal]` with `down = ["n"]` and `refresh = ["x"]`. Press the currently active refresh key. Confirm n moves, j no longer moves, x refreshes, and Help/hints show the new map.
   - Agent check: PASS — binary binding replacement and atomic-refresh tests, including normalization of terminal-equivalent keys.
-- [ ] Change that refresh list to `["n"]`, colliding with down. Press x. Expect a visible failure and the previous working map. Repair the list to `["x"]`, refresh successfully, then quit; the printed exit status remains 1 for this session.
+- [ ] Change that refresh list to `["n"]`, colliding with down. Press x. Expect a visible failure and the previous working map. Repair the list to `["x"]`, refresh successfully, then quit; the printed exit status remains 1 for this run.
   - Agent check: PASS — invalid refreshed maps retain working bindings and failures remain sticky after recovery.
-- [ ] In fresh sandbox sessions, quit with q and Esc, then interrupt with Ctrl-C. Confirm shell echo/input, cursor and the normal screen are restored; Ctrl-C prints exit 130.
+- [ ] In fresh sandbox runs, quit with q and Esc, then interrupt with Ctrl-C. Confirm shell echo/input, cursor and the normal screen are restored; Ctrl-C prints exit 130.
   - Agent check: PASS — controlling-PTY SIGINT/SIGTERM/Ctrl-C restoration and active-descendant cleanup tests; prior ignored/custom signal actions are restored by the guard test.
 - [ ] Repeat the navigation/Inspect pass with light and dark terminal profiles and NO_COLOR. Pay particular attention to wildcard blue, excluded amber, unregistered rows, long paths and `庫-café`. Capture any misalignment with a screenshot, dimensions and exact row/query.
   - Agent check: NOT RUN — human terminal/font/theme acceptance; ASCII PTY alignment is verified but does not rule out terminal-specific display defects.

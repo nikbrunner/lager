@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -26,11 +26,13 @@ use crate::application::inventory::{
     SessionProblems,
 };
 use crate::application::ports::{
-    Desktop, EnsureEvent, EnsureReporter, HookRunner, ProviderCatalog,
+    Desktop, EnsureEvent, EnsureReporter, HookRunner, HostError, ProviderCatalog,
 };
 use crate::application::remote::{
     self, ProviderPhase, ProviderState, RemoteBounds, RemoteDiscovery,
 };
+use crate::application::sessions::{self, Ensured, SessionError};
+use crate::application::worktrees as worktree_service;
 use crate::domain::repository::{RepositoryRef, validate_reference_safety};
 use crate::infrastructure::config::{CommandConfigStore, load_inventory};
 use crate::infrastructure::desktop::NativeDesktop;
@@ -41,6 +43,8 @@ use crate::infrastructure::inventory::{
     start_local_scan_with_context,
 };
 use crate::infrastructure::providers::ConfiguredProviders;
+use crate::infrastructure::rex::Rex;
+use crate::infrastructure::session_record::SessionFile;
 use crate::infrastructure::shell::{Shell, ShellError};
 use crate::presentation::escape;
 
@@ -116,7 +120,11 @@ pub fn run(config_path: &Path, args: InventoryArgs, interrupted: impl Fn() -> Op
     // The terminal is restored before the session waits for background work to end.
     drop(terminal);
     session.stop_background();
-    code
+    session.finish_open();
+    if let Some(farewell) = &session.farewell {
+        println!("{farewell}");
+    }
+    code.max(session.problems.exit_code())
 }
 
 struct InventorySession {
@@ -150,6 +158,30 @@ struct InventorySession {
     lookups: HashMap<String, Option<model::RemoteStatus>>,
     lookup_results: (mpsc::Sender<Lookup>, mpsc::Receiver<Lookup>),
     github: github::Remote,
+    /// The layout of `[session]`; `None` turns sessions off.
+    session_layout: Option<crate::domain::session::Layout>,
+    /// The host's live sessions by canonical checkout path with their labels, or why the host
+    /// is unavailable; `None` until it first answers.
+    hosted: Option<Result<BTreeMap<PathBuf, String>, String>>,
+    /// The rows' checkout paths with a live session, as of the last report.
+    hosted_rows: HashSet<PathBuf>,
+    host_answers: (mpsc::Sender<HostAnswer>, mpsc::Receiver<HostAnswer>),
+    /// The label of the session being opened.
+    opening: Option<String>,
+    /// Why sessions are unavailable, shown as the state until the next refresh.
+    host_notice: Option<String>,
+    /// The line printed once the terminal is restored.
+    farewell: Option<String>,
+    /// The number of the latest list request; answers to older ones are dropped.
+    listing: u64,
+}
+
+/// What a session worker reports back.
+enum HostAnswer {
+    Listed(u64, Result<BTreeMap<PathBuf, String>, SessionError>),
+    Opened(Result<Ensured, SessionError>),
+    /// The row's checkout is no repository root Git can name.
+    Refused(String),
 }
 
 /// Looks `reference` up on its own thread; no answer by `deadline` is an error naming `bound`.
@@ -207,13 +239,21 @@ impl InventorySession {
             remote::wildcards(&config),
             RemoteBounds::default(),
         );
-        Self {
+        let mut session = Self {
             remote,
             remote_rows: Vec::new(),
             remote_cached: 0,
             lookups: HashMap::new(),
             lookup_results: mpsc::channel(),
             github: github::Remote::default(),
+            session_layout: super::session::layout(&config_path).ok(),
+            hosted: None,
+            hosted_rows: HashSet::new(),
+            host_answers: mpsc::channel(),
+            opening: None,
+            host_notice: None,
+            farewell: None,
+            listing: 0,
             config,
             config_path,
             home,
@@ -230,7 +270,9 @@ impl InventorySession {
             message: None,
             cached_report: None,
             batch: None,
-        }
+        };
+        session.list_sessions();
+        session
     }
 
     /// Inventory rows are a snapshot of scan events, not a reason to probe the filesystem again
@@ -263,6 +305,16 @@ impl InventorySession {
             report
                 .rows
                 .retain(|row| !matches!(row.key, model::RowKey::Pattern(_)));
+            // Records name canonical paths; resolving them here keeps the filesystem out of
+            // every frame.
+            if let Some(Ok(hosted)) = &self.hosted {
+                self.hosted_rows = report
+                    .rows
+                    .iter()
+                    .filter_map(|row| row.observed_path.clone())
+                    .filter(|path| hosted.contains_key(&super::session::key(path)))
+                    .collect();
+            }
             self.cached_report = Some(report);
         }
         Ok(self
@@ -315,6 +367,117 @@ impl InventorySession {
         });
     }
 
+    /// Asks the host for its live sessions off the UI loop; nothing without `[session]`.
+    fn list_sessions(&mut self) {
+        self.listing += 1;
+        if self.session_layout.is_none() {
+            return;
+        }
+        let (sender, request) = (self.host_answers.0.clone(), self.listing);
+        std::thread::spawn(move || {
+            let listed = sessions::list(&Rex, &SessionFile).map(|listed| {
+                listed
+                    .into_iter()
+                    .map(|(path, recorded)| (path, recorded.label))
+                    .collect()
+            });
+            let _ = sender.send(HostAnswer::Listed(request, listed));
+        });
+    }
+
+    /// Opens the session of the primary checkout at `path` off the UI loop.
+    fn open_session(&mut self, path: &Path) {
+        let Some(layout) = self.session_layout.clone() else {
+            return;
+        };
+        self.opening = Some(super::session::label(path, path));
+        let (sender, path) = (self.host_answers.0.clone(), path.to_path_buf());
+        std::thread::spawn(move || {
+            let answer =
+                match worktree_service::resolve_repository(&NativeGit, &Filesystem, &path, true) {
+                    Ok(repository) => {
+                        let checkout = repository.primary;
+                        let label = super::session::label(&checkout, &checkout);
+                        HostAnswer::Opened(sessions::open(
+                            &Rex,
+                            &SessionFile,
+                            &checkout,
+                            &label,
+                            &layout,
+                        ))
+                    }
+                    Err(reason) => HostAnswer::Refused(reason),
+                };
+            let _ = sender.send(answer);
+        });
+    }
+
+    /// Waits for an open still in flight, so the session it creates is recorded. Each host
+    /// call is bounded by the adapter.
+    fn finish_open(&mut self) {
+        let Some(label) = self.opening.clone().filter(|_| self.farewell.is_none()) else {
+            return;
+        };
+        eprintln!("lager: waiting for session {} to open…", escape(label));
+        // Only the workers hold senders now, so a worker that dies without answering ends it.
+        self.host_answers.0 = mpsc::channel().0;
+        while self.opening.is_some() && self.farewell.is_none() {
+            match self.host_answers.1.recv() {
+                Ok(HostAnswer::Listed(..)) => {}
+                Ok(answer) => self.open_answered(answer),
+                Err(_) => break,
+            }
+        }
+        if let Some(message) = self.message.as_ref().filter(|_| self.farewell.is_none()) {
+            eprintln!("lager: {message}");
+        }
+    }
+
+    /// Takes the answer of an open: the farewell, or the reason it stays open.
+    fn open_answered(&mut self, answer: HostAnswer) {
+        self.opening = None;
+        match answer {
+            HostAnswer::Opened(Ok(ensured)) => {
+                let verb = match ensured {
+                    Ensured::Created(_) => "Opened",
+                    Ensured::Existing(_) => "Switched to",
+                };
+                self.farewell = Some(format!(
+                    "{verb} session {}",
+                    escape(&ensured.recorded().label)
+                ));
+            }
+            HostAnswer::Opened(Err(error)) => self.host_failed(error, true),
+            HostAnswer::Refused(reason) => {
+                self.message = Some(format!("Open session unavailable: {}", escape(reason)));
+            }
+            HostAnswer::Listed(..) => {}
+        }
+    }
+
+    /// A missing or stopped host is a notice, given when the host turns unavailable; a call
+    /// that failed on a running host is a problem. `opening` also reports it as the outcome.
+    fn host_failed(&mut self, error: SessionError, opening: bool) {
+        let message = match error {
+            SessionError::Host(HostError::Unavailable(reason)) => {
+                let reason = escape(reason);
+                if !matches!(self.hosted, Some(Err(_))) {
+                    self.host_notice = Some(format!("Sessions unavailable: {reason}"));
+                }
+                self.hosted = Some(Err(reason.clone()));
+                format!("Open session unavailable: {reason}")
+            }
+            SessionError::Host(HostError::Failed(reason)) | SessionError::Records(reason) => {
+                let reason = escape(model::problem_reason(&reason));
+                self.problems.record("session", reason.clone());
+                format!("! Open session failed: {reason}")
+            }
+        };
+        if opening {
+            self.message = Some(message);
+        }
+    }
+
     fn event_is_current(&self, context: &ScanContext) -> bool {
         context.generation == self.generation
             && context.root == self.root
@@ -336,6 +499,24 @@ impl InventorySession {
             }
             self.lookups
                 .insert(identity, model::RemoteStatus::looked_up(state));
+            received = true;
+        }
+        while let Ok(answer) = self.host_answers.1.try_recv() {
+            match answer {
+                HostAnswer::Listed(request, _) if request != self.listing => {}
+                HostAnswer::Listed(_, Ok(listed)) => {
+                    self.hosted = Some(Ok(listed));
+                    self.host_notice = None;
+                }
+                HostAnswer::Listed(_, Err(error)) => self.host_failed(error, false),
+                answer => {
+                    let failed = matches!(answer, HostAnswer::Opened(Err(_)));
+                    self.open_answered(answer);
+                    if failed {
+                        self.list_sessions();
+                    }
+                }
+            }
             received = true;
         }
         for failure in failures {
@@ -517,7 +698,13 @@ impl InventorySession {
         self.config = config;
         self.bindings = bindings;
         self.notice = warning_notice(warnings);
+        self.host_notice = None;
         self.root = root;
+        self.session_layout = super::session::layout(&self.config_path).ok();
+        if self.session_layout.is_none() {
+            self.hosted = None;
+        }
+        self.list_sessions();
         self.restart_scan();
         Ok(())
     }
@@ -975,6 +1162,9 @@ impl TerminalSession {
                 return code;
             }
             session.receive_events();
+            if session.farewell.is_some() && !session.running() {
+                return quit(session);
+            }
             github::poll(session, &mut selection);
             session.reload_changed_config(selection.view() == View::Normal && !selection.quit);
             // The batch waits while the user decides whether to cancel it.
@@ -1162,6 +1352,19 @@ impl TerminalSession {
                             }
                             Some(Action::Add) if view == View::Normal => {
                                 open_add(session, &mut selection);
+                            }
+                            Some(Action::Session)
+                                if view == View::Normal && session.session_layout.is_some() =>
+                            {
+                                if let Some(code) = run_direct(
+                                    session,
+                                    &mut selection,
+                                    &report,
+                                    &visible_rows,
+                                    Action::Session,
+                                ) {
+                                    return code;
+                                }
                             }
                             Some(action @ (Action::Remove | Action::RemoveUnregister))
                                 if view == View::Normal =>
@@ -1584,7 +1787,7 @@ impl TerminalSession {
         popup_scroll_limit(
             above_status(self.area(), self.below_help),
             WIDE_POPUP,
-            &help_widget(&session.bindings, mode),
+            &help_widget(&session.bindings, mode, session.session_layout.is_some()),
         )
     }
 
@@ -1734,7 +1937,11 @@ impl TerminalSession {
                         .unwrap_or_default()
                 )
             })
-            .or_else(|| github::status(session));
+            .or_else(|| github::status(session))
+            .or_else(|| {
+                (session.opening.as_ref())
+                    .map(|label| format!("Opening session {}…", escape(label)))
+            });
         let remote_state = remote_state(&session.remote);
         let root_missing = report
             .diagnostics
@@ -1745,6 +1952,7 @@ impl TerminalSession {
             &session.home,
             complete,
             session.notice.as_ref(),
+            session.host_notice.as_deref(),
             session.message.as_deref().or(progress.as_deref()),
             remote_state.as_ref(),
             view,
@@ -1763,6 +1971,8 @@ impl TerminalSession {
             1 => " · 1 problem".to_owned(),
             count => format!(" · {count} problems"),
         };
+        // Marks and hints wait for the host's answer and stay away while it is unavailable.
+        let hosted = matches!(session.hosted, Some(Ok(_))).then_some(&session.hosted_rows);
         let marked = session.marks.len();
         let counter = (marked > 0).then(|| {
             format!(
@@ -1783,6 +1993,7 @@ impl TerminalSession {
                     area.width.saturating_sub(4),
                     acknowledges,
                     !report.rows.is_empty(),
+                    hosted.is_some(),
                 );
                 let footer_height = footer.line_count(area.width.saturating_sub(4)) as u16;
                 let [header, source, search, _, table, status_area, footer_area] =
@@ -1848,6 +2059,7 @@ impl TerminalSession {
                             &[],
                             &names,
                             &session.marks,
+                            hosted,
                             home,
                             table.width,
                             None,
@@ -1882,6 +2094,7 @@ impl TerminalSession {
                             visible_rows,
                             &names,
                             &session.marks,
+                            hosted,
                             home,
                             table.width,
                             table_state.selected(),
@@ -1901,7 +2114,8 @@ impl TerminalSession {
                         above_status(frame.area(), below_help),
                         WIDE_POPUP,
                         "Keyboard / effective bindings",
-                        help_widget(bindings, shown.help_mode).scroll((shown.help_scroll, 0)),
+                        help_widget(bindings, shown.help_mode, session.session_layout.is_some())
+                            .scroll((shown.help_scroll, 0)),
                         bindings
                             .keys(Mode::Inspection, Action::Cancel)
                             .first()
@@ -1911,7 +2125,7 @@ impl TerminalSession {
                     View::Problems => draw_popup(
                         frame,
                         WIDE_POPUP,
-                        &format!("Session problems / {}", session.problems.entries().len()),
+                        &format!("Problems / {}", session.problems.entries().len()),
                         problems_widget(session).scroll((shown.problems_scroll, 0)),
                         format!(
                             "{} scroll · {close}",
@@ -2359,6 +2573,8 @@ const WIDE_POPUP: u16 = 100;
 const WIDE_TABLE: u16 = 132;
 /// Reserved for the mark column; the repository text starts after it on every row.
 const MARK_SLOT: usize = 4;
+/// Reserved after the mark column for the open-session dot while sessions are shown.
+const SESSION_SLOT: usize = 2;
 const INSPECT_KEY_COLUMN: usize = 19;
 
 fn no_color() -> bool {
@@ -2499,6 +2715,7 @@ fn footer_widget(
     width: u16,
     acknowledges: bool,
     has_rows: bool,
+    sessions: bool,
 ) -> Paragraph<'static> {
     let first = |mode: Mode, action: Action| {
         bindings
@@ -2615,12 +2832,15 @@ fn footer_widget(
                     (Action::Add, "add"),
                     (Action::Remove, "remove"),
                     (Action::Worktrees, "worktrees"),
+                    (Action::Session, "session"),
                     (Action::Inspect, "inspect"),
                     (Action::Refresh, "refresh"),
                     (Action::Menu, "menu"),
                     (Action::Help, "help"),
                     (Action::Quit, "quit"),
                 ]
+                .into_iter()
+                .filter(|(action, _)| sessions || *action != Action::Session)
                 .map(|(action, label)| (first(Mode::Normal, action), label)),
             );
             items
@@ -2640,6 +2860,7 @@ fn footer_widget(
     // Least needed first; exit, help and menu routes always stay visible.
     for dropped in [
         "scroll",
+        "session",
         "worktrees",
         "mark",
         "remove",
@@ -2785,7 +3006,7 @@ fn source_line(session: &InventorySession, report: &InventoryReport) -> String {
         parts.push("remote off".to_owned());
         if session.remote_cached > 0 {
             parts.push(format!(
-                "{} cached for this session",
+                "{} cached for this run",
                 counted(session.remote_cached, "candidate", "candidates")
             ));
         }
@@ -2810,6 +3031,7 @@ fn status_lines(
     home: &Path,
     complete: bool,
     notice: Option<&Notice>,
+    host_notice: Option<&str>,
     message: Option<&str>,
     remote: Option<&RemoteState>,
     view: View,
@@ -2942,6 +3164,9 @@ fn status_lines(
         | View::Batch
         | View::QuitBatch
         | View::WorktreeBlocked => state.to_owned(),
+        View::Normal | View::Inspect if complete && host_notice.is_some() => {
+            host_notice.unwrap_or_default().to_owned()
+        }
         View::Normal | View::Inspect
             if complete && remote.is_none() && report.rows.is_empty() && !report.incomplete =>
         {
@@ -2958,7 +3183,8 @@ fn status_lines(
         View::Normal | View::Inspect if refresh.is_empty() => state.to_owned(),
         View::Normal | View::Inspect => format!("{state} · {refresh}"),
     };
-    lines.push(Line::styled(operation, dim()));
+    let warned = operation.starts_with("! ") || host_notice == Some(operation.as_str());
+    lines.push(Line::styled(operation, if warned { warn() } else { dim() }));
     lines
 }
 
@@ -3034,7 +3260,7 @@ fn draw_popup_in(
     frame.render_widget(Paragraph::new(footer).style(dim()), footer_area);
 }
 
-fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
+fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'static> {
     use Action::*;
     let keys = |action| bindings.keys(mode, action);
     // Default lists pair up by position (`j/k ↑/↓`); configured lists show their direction.
@@ -3107,6 +3333,13 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
                     &[Worktrees],
                 ),
             ];
+            if sessions {
+                entries.push(entry(
+                    single(Session),
+                    "Session of the current repository",
+                    &[Session],
+                ));
+            }
             entries.extend(
                 DIRECT_ACTIONS.map(|action| entry(single(action), direct_label(action), &[action])),
             );
@@ -3209,8 +3442,7 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
         Mode::Inspection => "Inspect mode",
         Mode::Worktrees => "Worktrees mode",
     };
-    let mut lines = vec![Line::styled(title, dim())];
-    lines.extend(entries.into_iter().map(|(keys, description)| {
+    let line = |keys: String, description: &str| {
         let padding = column
             .saturating_sub(Line::raw(keys.clone()).width())
             .max(1);
@@ -3218,7 +3450,26 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
             Span::styled(keys, focus()),
             Span::raw(format!("{}{description}", " ".repeat(padding))),
         ])
-    }));
+    };
+    let mut lines = vec![Line::styled(title, dim())];
+    lines.extend(
+        entries
+            .into_iter()
+            .map(|(keys, description)| line(keys, &description)),
+    );
+    if sessions && mode == Mode::Normal {
+        lines.extend([
+            Line::raw(""),
+            Line::styled("Sessions", dim()),
+            line("●".to_owned(), "open session"),
+        ]);
+        if let Some(key) = keys(Session).first() {
+            lines.push(line(
+                (*key).to_owned(),
+                "opens the session or shows the open one, then the inventory closes",
+            ));
+        }
+    }
     lines.push(Line::raw(""));
     lines.push(Line::styled("Other modes", dim()));
     for other in [
@@ -3343,6 +3594,7 @@ fn help_widget(bindings: &Bindings, mode: Mode) -> Paragraph<'static> {
         let missing = bindings
             .unbound(other)
             .into_iter()
+            .filter(|action| sessions || *action != Session)
             .filter(|action| match other {
                 Mode::Normal => {
                     !DIRECT_ACTIONS.contains(action)
@@ -3836,6 +4088,7 @@ enum Entry {
     Problems,
     Add,
     Worktrees,
+    OpenSession,
     Help,
     Quit,
     /// Reports the message instead of acting.
@@ -3939,6 +4192,29 @@ fn menu_lines(
                     }
                     _ => on_row(Entry::Worktrees, "Worktrees…", key(Action::Worktrees)),
                 },
+            ]
+            .into_iter()
+            .chain(session.session_layout.as_ref().map(|_| {
+                let refused = match (row.map(model::worktree_checkout), &session.hosted) {
+                    (None, _) => Some("no row".to_owned()),
+                    (Some(Err(reason)), _) => Some(reason.to_owned()),
+                    (_, Some(Err(reason))) => Some(reason.clone()),
+                    _ if session.opening.is_some() => Some("a session is opening".to_owned()),
+                    _ if session.running() => Some("a batch is running".to_owned()),
+                    _ if session.github.running() => Some("a GitHub action is running".to_owned()),
+                    _ => None,
+                };
+                match refused {
+                    Some(reason) => item(Entry::OpenSession, "Open session", reason, false),
+                    None => item(
+                        Entry::OpenSession,
+                        "Open session",
+                        key(Action::Session),
+                        true,
+                    ),
+                }
+            }))
+            .chain([
                 heading(String::new()),
                 heading(format!("Selection · {} marked", session.marks.len())),
                 item(
@@ -3952,10 +4228,9 @@ fn menu_lines(
                     true,
                 ),
                 heading(String::new()),
-                heading("Session".to_owned()),
+                heading("Inventory".to_owned()),
                 item(Entry::Add, "Add repository", key(Action::Add), true),
-            ]
-            .into_iter()
+            ])
             .chain(github::create_line(session))
             .chain([
                 item(
@@ -3979,7 +4254,7 @@ fn menu_lines(
                 ),
                 item(
                     Entry::Problems,
-                    "Session problems…",
+                    "Problems…",
                     match problems {
                         0 => "none".to_owned(),
                         1 => "1 problem".to_owned(),
@@ -4360,6 +4635,12 @@ fn activate_menu_entry(
             worktrees::open(session, selection, row, name);
             return None;
         }
+        (Entry::OpenSession, Some(row)) => {
+            if let Ok(path) = model::worktree_checkout(row) {
+                session.open_session(path);
+            }
+            None
+        }
         (Entry::Github(act), row) => {
             github::activate(session, selection, act, row);
             return None;
@@ -4527,6 +4808,7 @@ fn run_direct(
         Action::Archive => (Menu::Repository, Entry::Github(github::Act::Archive(true))),
         Action::Visibility => (Menu::Repository, Entry::Open(Menu::Visibility)),
         Action::DeleteRemote => (Menu::Repository, Entry::Github(github::Act::Delete)),
+        Action::Session => (Menu::Root, Entry::OpenSession),
         _ => (Menu::Root, Entry::Github(github::Act::Create)),
     };
     // Archive and visibility entries name the state they lead to.
@@ -5017,7 +5299,7 @@ fn problems_widget(session: &InventorySession) -> Paragraph<'static> {
     lines.extend([
         Line::default(),
         Line::styled(
-            "Quit returns 1 because problems occurred in this session. A successful retry stays listed.",
+            "Quit returns 1 because problems occurred in this run. A successful retry stays listed.",
             dim(),
         ),
         Line::default(),
@@ -5170,7 +5452,7 @@ fn quit_widget(batch: &Batch, cancel: bool, width: u16) -> Paragraph<'static> {
     let mut consequence = format!("Cancelling leaves {names} unattempted.");
     if problems > 0 {
         consequence.push_str(&format!(
-            " The session exits 1 because {problems} {} failed or were blocked.",
+            " The inventory exits 1 because {problems} {} failed or were blocked.",
             if problems == 1 { "target" } else { "targets" }
         ));
     }
@@ -5912,10 +6194,12 @@ fn status_cell(row: &model::InventoryRow, compact: bool) -> (String, Style) {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn repository_table(
     rows: &[&model::InventoryRow],
     names: &HashMap<model::RowKey, String>,
     marks: &Marks,
+    hosted: Option<&HashSet<PathBuf>>,
     home: &Path,
     width: u16,
     selected: Option<usize>,
@@ -5930,7 +6214,14 @@ fn repository_table(
     } else {
         (vec![22, 27, 37, 18, 12, 14], &[1, 2])
     };
-    let slot = |column: usize| if column == 0 { MARK_SLOT } else { 0 };
+    let session_slot = if hosted.is_some() { SESSION_SLOT } else { 0 };
+    let slot = |column: usize| {
+        if column == 0 {
+            MARK_SLOT + session_slot
+        } else {
+            0
+        }
+    };
     let cells = rows
         .iter()
         .map(|row| {
@@ -6004,6 +6295,22 @@ fn repository_table(
                             0 => "[ ] ",
                             _ => "",
                         };
+                        if let (0, Some(hosted)) = (column, hosted) {
+                            let open = rows[index]
+                                .observed_path
+                                .as_ref()
+                                .is_some_and(|path| hosted.contains(path));
+                            let dot = match (open, selected == Some(index)) {
+                                (false, _) => Span::raw("  "),
+                                (true, true) => Span::styled("● ", style),
+                                (true, false) => Span::styled("● ", focus()),
+                            };
+                            return Cell::from(Line::from(vec![
+                                Span::styled(format!(" {mark}"), style),
+                                dot,
+                                Span::styled(text, style),
+                            ]));
+                        }
                         Cell::from(Span::styled(format!(" {mark}{text}"), style))
                     })
                     .collect::<Vec<_>>(),
@@ -6187,6 +6494,14 @@ mod tests {
             lookups: Default::default(),
             lookup_results: std::sync::mpsc::channel(),
             github: super::github::Remote::default(),
+            session_layout: None,
+            hosted: None,
+            hosted_rows: Default::default(),
+            host_answers: std::sync::mpsc::channel(),
+            opening: None,
+            host_notice: None,
+            farewell: None,
+            listing: 0,
         };
 
         session.receive_events();

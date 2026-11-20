@@ -40,6 +40,14 @@ The first form opens the repository's primary checkout. The second opens the che
 
 The first `open` creates the session and switches Rex to it: `Opened session project`. The next `open` of the same checkout switches to the same session.
 
+## Open a session from the inventory
+
+Run `lager tui`, select a repository and press `s`. The inventory closes once Rex shows the session and prints `Opened session project`. When the session exists, it prints `Switched to session project`. Open session in the `m` menu does the same.
+
+A `●` between the mark and the name shows a repository whose primary checkout has a session. Worktree sessions show in `lager worktree list`.
+
+When Rex is missing or not running, the inventory says `Sessions unavailable: …` once, and `s` repeats the reason. Everything else in the inventory keeps working. The [CLI reference](../reference/cli.md#sessions-in-the-inventory) lists every outcome.
+
 ## Create a session for an agent
 
 `create` makes the session and leaves Rex showing what it shows:

@@ -1423,7 +1423,7 @@ fn inventory_empty_and_partial_states_follow_the_canvas_at_both_sizes() {
                     Vec::new(),
                 ),
                 (
-                    // At 80 columns the status line is cut; Session problems lists the failure.
+                    // At 80 columns the status line is cut; Problems lists the failure.
                     if cols < 132 {
                         vec!["Local: incomplete · remote off"]
                     } else {
@@ -4569,12 +4569,12 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
                     "Worktrees…",
                     "Selection · 0 marked",
                     "pair: Selection… Space",
-                    "Session",
+                    "Inventory",
                     "Add repository",
                     "pair: repository a",
                     "pair: discovery… off",
                     "pair: config R",
-                    "pair: problems… none",
+                    "pair: Problems… none",
                     "pair: batch no",
                     "pair: keybindings ?",
                 ],
@@ -4708,7 +4708,7 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
             ),
             (vec!["NORMAL", "absent: All actions"], root_entry(8)),
             (vec!["NORMAL", "absent: All actions"], root_entry(9)),
-            (vec!["All actions", "pair: problems… none"], b"j\r".to_vec()),
+            (vec!["All actions", "pair: Problems… none"], b"j\r".to_vec()),
             (vec!["All actions", "pair: batch no"], b"j\r".to_vec()),
             (
                 vec!["Keyboard / effective bindings", "Menu mode"],
@@ -4750,23 +4750,23 @@ fn inventory_session_problems_list_every_failure_behind_exit_one() {
                 b"m".to_vec(),
             ),
             (
-                vec!["All actions", "pair: problems… 1"],
+                vec!["All actions", "pair: Problems… 1"],
                 problems[1..].to_vec(),
             ),
             (
                 vec![
                     "PROBLEMS · 1 row · 1 problem",
-                    "Session problems / 1",
+                    "Problems / 1",
                     "pair: scan ~/repos:",
                     "~/repos: permission denied ·",
-                    "Quit returns 1 because problems occurred in this session.",
+                    "Quit returns 1 because problems occurred in this run.",
                     "Declined confirmations, cancellations and missing optional tools are not",
                     "j/k ↑/↓ scroll · Esc close",
                 ],
                 b"\x1b".to_vec(),
             ),
             (
-                vec!["NORMAL · 1 row · 1 problem", "absent: Session problems /"],
+                vec!["NORMAL · 1 row · 1 problem", "absent: Problems /"],
                 b"R".to_vec(),
             ),
             (
@@ -4775,14 +4775,14 @@ fn inventory_session_problems_list_every_failure_behind_exit_one() {
             ),
             (
                 vec![
-                    "Session problems / 2",
+                    "Problems / 2",
                     "pair: scan ~/repos:",
                     "pair: refresh inventory",
                     "previous configuration kept",
                 ],
                 b"\x1b".to_vec(),
             ),
-            (vec!["NORMAL", "absent: Session problems /"], b"q".to_vec()),
+            (vec!["NORMAL", "absent: Problems /"], b"q".to_vec()),
         ],
         24,
         80,
@@ -5554,12 +5554,12 @@ fn inventory_invalid_binding_refresh_keeps_the_previous_map_and_is_a_session_pro
             ),
             (
                 vec![
-                    "Session problems /",
+                    "Problems /",
                     "refresh         [inventory.keys.normal] binds x to remove and to clone",
                 ],
                 b"\x1b".to_vec(),
             ),
-            (vec!["NORMAL", "absent: Session problems /"], b"q".to_vec()),
+            (vec!["NORMAL", "absent: Problems /"], b"q".to_vec()),
         ],
         32,
         132,
@@ -5694,13 +5694,13 @@ fn inventory_registers_every_marked_row_including_hidden_ones_and_reports_each_o
             ),
             (
                 vec![
-                    "Session problems / 1",
+                    "Problems / 1",
                     "batch · local",
                     "Register blocked: no supported origin observed",
                 ],
                 b"\x1b".to_vec(),
             ),
-            (vec!["NORMAL", "absent: Session problems /"], b"q".to_vec()),
+            (vec!["NORMAL", "absent: Problems /"], b"q".to_vec()),
         ],
         32,
         132,
@@ -6761,7 +6761,7 @@ fn inventory_clone_batch_reports_each_target_and_continues_past_a_failed_and_a_s
             ),
             (
                 vec![
-                    "Session problems / 2",
+                    "Problems / 2",
                     "batch · broken",
                     "Clone only failed: git exited with status 128",
                     "batch · delta",
@@ -6769,7 +6769,7 @@ fn inventory_clone_batch_reports_each_target_and_continues_past_a_failed_and_a_s
                 ],
                 b"\x1b".to_vec(),
             ),
-            (vec!["NORMAL", "absent: Session problems /"], b"q".to_vec()),
+            (vec!["NORMAL", "absent: Problems /"], b"q".to_vec()),
         ],
         32,
         132,
@@ -9859,15 +9859,23 @@ fn highlighted_inventory_row(
             let selected = line[start..start + repository.len()]
                 .iter()
                 .all(|(_, reversed)| *reversed);
-            let fixed_mark_slot = start >= 4
-                && MARK_SLOTS.contains(
-                    &line[start - 4..start]
-                        .iter()
-                        .map(|(character, _)| *character)
-                        .collect::<String>()
-                        .as_str(),
-                )
-                && line[start - 4..start].iter().all(|(_, reversed)| *reversed);
+            let text = |from: usize, to: usize| {
+                line[from..to]
+                    .iter()
+                    .map(|(character, _)| *character)
+                    .collect::<String>()
+            };
+            // The mark slot, then the session slot when sessions are shown.
+            let slot = [4, 6].into_iter().find(|&width| {
+                start >= width
+                    && MARK_SLOTS.contains(&text(start - width, start - width + 4).as_str())
+                    && (width == 4 || ["  ", "● "].contains(&text(start - 2, start).as_str()))
+            });
+            let fixed_mark_slot = slot.is_some_and(|width| {
+                line[start - width..start]
+                    .iter()
+                    .all(|(_, reversed)| *reversed)
+            });
             (selected && fixed_mark_slot).then(|| {
                 line.into_iter()
                     .map(|(character, _)| character)
@@ -11686,7 +11694,7 @@ fn inventory_remote_disable_hides_candidates_removes_their_marks_and_keeps_the_c
                     "NORMAL · 2 rows",
                     "Remote off · 4 remote-only rows hidden · 4 marks removed: ",
                     "2 marked · 0 hidden",
-                    "remote off · 4 candidates cached for this session",
+                    "remote off · 4 candidates cached for this run",
                     "absent: vanished",
                     "absent: remote only",
                 ],
@@ -11716,7 +11724,7 @@ fn inventory_remote_disable_hides_candidates_removes_their_marks_and_keeps_the_c
     assert_remote_regions(
         off,
         "NORMAL · 2 rows",
-        "Local + declarations · remote off · 4 candidates cached for this session",
+        "Local + declarations · remote off · 4 candidates cached for this run",
         status.trim_start(),
         "q quit",
     );
@@ -12028,14 +12036,14 @@ fn inventory_remote_ignores_answers_to_requests_that_were_invalidated() {
             (
                 vec![
                     "NORMAL · 2 rows",
-                    "remote off · 3 candidates cached for this session",
+                    "remote off · 3 candidates cached for this run",
                 ],
                 b"j".to_vec(),
             ),
             (
                 vec![
                     "NORMAL · 2 rows",
-                    "remote off · 3 candidates cached for this session",
+                    "remote off · 3 candidates cached for this run",
                 ],
                 REMOTE_MENU.to_vec(),
             ),
@@ -13276,19 +13284,13 @@ fn inventory_github_failure_names_the_fix_in_session_problems_and_exits_one() {
         &mut fixture.command(),
         &[
             (vec!["NORMAL · 1 row", "absent: Scanning"], b"A".to_vec()),
-            (
-                vec!["org/demo: failed, see Session problems"],
-                b"m".to_vec(),
-            ),
+            (vec!["org/demo: failed, see Problems"], b"m".to_vec()),
             (vec!["All actions", "1 problem"], b"jjjjjjjjj\r".to_vec()),
             (
-                vec![
-                    "Session problems / 1",
-                    "gh auth login --hostname github.com",
-                ],
+                vec!["Problems / 1", "gh auth login --hostname github.com"],
                 b"\x1b".to_vec(),
             ),
-            (vec!["NORMAL", "absent: Session problems /"], b"q".to_vec()),
+            (vec!["NORMAL", "absent: Problems /"], b"q".to_vec()),
         ],
         24,
         80,
@@ -13445,4 +13447,462 @@ fn inventory_a_refused_rename_reopens_its_form_with_the_reason() {
             .iter()
             .any(|call| call.contains("repo rename"))
     );
+}
+
+#[cfg(unix)]
+const SESSION_SECTION: &str = "\n[session]\nhost = \"rex\"\n\n[session.layouts.default.tabs.Shells]\nroot = { pane = \"Shell I\" }\n";
+
+/// `lager tui` with the fake `rex` first on `PATH` and its state under `<temp>/rex/state`. No
+/// call can reach a real Rex: the environment is cleared, `HOME` is the sandbox, and
+/// `REX_SERVER` names a socket that does not exist.
+#[cfg(unix)]
+fn session_tui(
+    temp: &std::path::Path,
+    home: &std::path::Path,
+    config: &std::path::Path,
+) -> (Command, std::path::PathBuf) {
+    let (bin, state) = support::install_fake_rex(&temp.join("rex"));
+    let mut command = support::lager_with_path(home, config, Some(&bin));
+    command
+        .arg("tui")
+        .env("REX_ARGS_LOG", state.join("args.log"))
+        .env("REX_STATE", &state)
+        .env(
+            "REX_SERVER",
+            format!("unix://{}", temp.join("none.sock").display()),
+        )
+        .env("REX_RUNTIME_DIR", temp.join("rex-runtime"));
+    (command, state)
+}
+
+/// The fake's calls that contain `part`.
+#[cfg(unix)]
+fn rex_calls(state: &std::path::Path, part: &str) -> usize {
+    fs::read_to_string(state.join("args.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|call| call.contains(part))
+        .count()
+}
+
+/// What the terminal received after the inventory left the alternate screen.
+#[cfg(unix)]
+fn after_restore(transcript: &str) -> &str {
+    transcript
+        .rsplit_once("\x1b[?1049l")
+        .map(|(_, after)| after)
+        .unwrap_or_default()
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_s_opens_the_session_closes_and_names_it() {
+    let temp = temp_dir();
+    let (home, config, _) = worktree_fixture(temp.path(), SESSION_SECTION);
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+
+    let transcript = run_inventory_pty_with_exit(
+        &mut command,
+        &[
+            (
+                vec![
+                    "NORMAL · 1 row",
+                    "absent: Scanning",
+                    "pair: s session",
+                    "absent: ●",
+                ],
+                b"?".to_vec(),
+            ),
+            (
+                vec![
+                    "pair: s Session",
+                    "Sessions",
+                    "pair: ● open",
+                    "opens the session or shows the open one, then the inventory closes",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Keyboard /"], b"m".to_vec()),
+            (vec!["All actions", "pair: session s"], b"\x1b".to_vec()),
+            (vec!["NORMAL · 1 row", "absent: All actions"], b"s".to_vec()),
+        ],
+        32,
+        132,
+        0,
+        |_| {},
+    );
+    assert!(
+        after_restore(&transcript)
+            .trim_end()
+            .ends_with("Opened session core"),
+        "{transcript:?}"
+    );
+    assert_eq!(rex_calls(&state, "do - --json"), 1);
+    assert_eq!(rex_calls(&state, "client.perform"), 1);
+
+    // The next run marks the row and switches to the same session.
+    let (mut command, _) = session_tui(temp.path(), &home, &config);
+    let transcript = run_inventory_pty_with_exit(
+        &mut command,
+        &[(
+            vec!["NORMAL · 1 row", "absent: Scanning", "pair: ● core"],
+            b"s".to_vec(),
+        )],
+        32,
+        132,
+        0,
+        |_| {},
+    );
+    assert!(
+        after_restore(&transcript)
+            .trim_end()
+            .ends_with("Switched to session core"),
+        "{transcript:?}"
+    );
+    assert_eq!(rex_calls(&state, "do - --json"), 1);
+    assert_eq!(rex_calls(&state, "client.perform"), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_s_stays_open_with_the_reason_or_the_failure() {
+    let temp = temp_dir();
+    let (home, config, _) = worktree_fixture(
+        temp.path(),
+        &format!("\n[[repositories]]\nurl = \"github.com/org/ghost\"\n{SESSION_SECTION}"),
+    );
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+    fs::write(state.join("create-fails"), "").unwrap();
+
+    let transcript = run_inventory_pty_with_exit(
+        &mut command,
+        &[
+            (
+                vec!["NORMAL · 2 rows", "absent: Scanning", "pair: s session"],
+                b"/ghost\r".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "selected: ghost"], b"s".to_vec()),
+            (
+                vec!["Open session unavailable: no checkout at the destination"],
+                b"m".to_vec(),
+            ),
+            (
+                vec![
+                    "All actions",
+                    "pair: session no",
+                    "checkout at the destination",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: All actions"],
+                b"\x7f/core\r".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "selected: core"], b"s".to_vec()),
+            (
+                vec![
+                    "! Open session failed: stdin:4: session.create",
+                    "NORMAL · 1 row · 1 problem",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        1,
+        |_| {},
+    );
+    assert!(
+        !after_restore(&transcript).contains("session core"),
+        "{transcript:?}"
+    );
+    assert_eq!(rex_calls(&state, "do - --json"), 1);
+    assert_eq!(rex_calls(&state, "client.perform"), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_says_once_that_sessions_are_unavailable_and_s_repeats_it() {
+    let temp = temp_dir();
+    let (home, config, _) = worktree_fixture(temp.path(), SESSION_SECTION);
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+    fs::write(state.join("offline"), "").unwrap();
+
+    run_inventory_pty_with_exit(
+        &mut command,
+        &[
+            (
+                vec![
+                    "NORMAL · 1 row",
+                    "absent: Scanning",
+                    "Sessions unavailable: no Rex server is running",
+                    "absent: ! Sessions",
+                    "absent: No active operation",
+                    "absent: s session",
+                    "absent: ●",
+                ],
+                b"s".to_vec(),
+            ),
+            (
+                vec!["Open session unavailable: no Rex server is running"],
+                b"R".to_vec(),
+            ),
+            // Sent once the list after the refresh has been answered.
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"j".to_vec()),
+            (
+                vec![
+                    "NORMAL · 1 row",
+                    "No active operation",
+                    "absent: Sessions unavailable",
+                ],
+                b"s".to_vec(),
+            ),
+            (
+                vec![
+                    "Open session unavailable: no Rex server is running",
+                    "absent: Sessions unavailable",
+                    "absent: problem",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        0,
+        |action| {
+            if action == 2 {
+                wait_for_answers(&state, "session.list", 2);
+            }
+        },
+    );
+    assert_eq!(rex_calls(&state, "do - --json"), 0);
+}
+
+/// Waits until the offline fake answered `count` calls containing `part`, and lager had time
+/// to read them.
+#[cfg(unix)]
+fn wait_for_answers(state: &std::path::Path, part: &str, count: usize) {
+    let answered = || {
+        fs::read_to_string(state.join("answered"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|call| call.contains(part))
+            .count()
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while answered() < count {
+        assert!(Instant::now() < deadline, "no {count} calls of {part}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_records_a_failed_session_list_as_a_problem() {
+    let temp = temp_dir();
+    let (home, config, _) = worktree_fixture(temp.path(), SESSION_SECTION);
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+    fs::write(state.join("bad-list"), "").unwrap();
+
+    run_inventory_pty_with_exit(
+        &mut command,
+        &[(
+            vec![
+                "NORMAL · 1 row · 1 problem",
+                "absent: Scanning",
+                "absent: Sessions unavailable",
+                "absent: s session",
+            ],
+            b"q".to_vec(),
+        )],
+        32,
+        132,
+        1,
+        |_| {},
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_answers_keys_while_a_session_opens() {
+    let temp = temp_dir();
+    let (home, config, _) = worktree_fixture(temp.path(), SESSION_SECTION);
+    tracked_repo(&home.join("repos/org/dots"), "git@github.com:org/dots.git");
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+    fs::write(state.join("hold-create"), "").unwrap();
+
+    let transcript = run_inventory_pty_with_exit(
+        &mut command,
+        &[
+            (
+                vec!["NORMAL · 2 rows", "absent: Scanning", "pair: s session"],
+                b"/core\r\x7f".to_vec(),
+            ),
+            (vec!["NORMAL · 2 rows", "selected: core"], b"s".to_vec()),
+            (vec!["Opening session core…"], b"j".to_vec()),
+            (
+                vec!["selected: dots", "Opening session core…"],
+                b"s".to_vec(),
+            ),
+            (
+                vec!["Open session unavailable: a session is opening"],
+                Vec::new(),
+            ),
+        ],
+        32,
+        132,
+        0,
+        |action| {
+            if action == 4 {
+                fs::write(state.join("release"), "").unwrap();
+            }
+        },
+    );
+    assert!(
+        after_restore(&transcript)
+            .trim_end()
+            .ends_with("Opened session core"),
+        "{transcript:?}"
+    );
+    assert_eq!(rex_calls(&state, "do - --json"), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_explicit_s_wins_over_the_session_key() {
+    let temp = temp_dir();
+    let (home, config, _) = worktree_fixture(
+        temp.path(),
+        &format!("{SESSION_SECTION}\n[inventory.keys.normal]\nsearch = [\"s\"]\n"),
+    );
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+
+    run_inventory_pty_with_exit(
+        &mut command,
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "pair: s search"],
+                b"s".to_vec(),
+            ),
+            (vec!["SEARCH · 1 row"], b"\x1b".to_vec()),
+            (
+                vec!["NORMAL · 1 row", "absent: Enter accept"],
+                b"m".to_vec(),
+            ),
+            (
+                vec!["All actions", "Open session", "absent: session s"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: All actions"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        0,
+        |_| {},
+    );
+    assert_eq!(rex_calls(&state, "do - --json"), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_without_a_session_section_shows_and_asks_nothing_about_sessions() {
+    let temp = temp_dir();
+    let (home, config, _) = worktree_fixture(temp.path(), "");
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+    let mut frames = Vec::new();
+
+    run_inventory_pty_with_exit_observing(
+        &mut command,
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"s".to_vec()),
+            // Gives `s` time to act before the next frame is compared.
+            (vec!["NORMAL · 1 row"], Vec::new()),
+            (vec!["NORMAL · 1 row"], b"?".to_vec()),
+            (
+                vec![
+                    "Keyboard / effective bindings",
+                    "absent: Session of the current repository",
+                    "absent: Sessions",
+                    "absent: mode: session",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Keyboard /"], b"m".to_vec()),
+            (
+                vec!["All actions", "absent: Open session"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: All actions"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        0,
+        |action, _, frame| {
+            if action == 1 {
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            if matches!(action, 0 | 2) {
+                frames.push(screen_text(frame, 32, 132));
+            }
+        },
+    );
+    let [before, after] = frames.as_slice() else {
+        panic!("expected two frames: {frames:?}");
+    };
+    assert_eq!(before, after);
+    assert!(!before.contains("session"), "{before}");
+    assert!(!state.join("args.log").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_quit_waits_for_an_open_in_flight_and_records_it() {
+    let temp = temp_dir();
+    let (home, config, _) = worktree_fixture(temp.path(), SESSION_SECTION);
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+    fs::write(state.join("hold-create"), "").unwrap();
+
+    let transcript = run_inventory_pty_with_exit_observing(
+        &mut command,
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "pair: s session"],
+                b"s".to_vec(),
+            ),
+            (vec!["Opening session core…"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        0,
+        |action, terminal, _| {
+            if action == 1 {
+                // Rex answers once the inventory gave the terminal back.
+                let (terminal, release) = (terminal.try_clone().unwrap(), state.join("release"));
+                std::thread::spawn(move || {
+                    let deadline = Instant::now() + Duration::from_secs(20);
+                    while Instant::now() < deadline
+                        && !rustix_openpty::rustix::termios::tcgetattr(&terminal)
+                            .unwrap()
+                            .local_modes
+                            .contains(rustix_openpty::rustix::termios::LocalModes::ICANON)
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    fs::write(release, "").unwrap();
+                });
+            }
+        },
+    );
+    let after = after_restore(&transcript);
+    assert!(
+        after.contains("lager: waiting for session core to open…"),
+        "{transcript:?}"
+    );
+    assert!(
+        after.trim_end().ends_with("Opened session core"),
+        "{transcript:?}"
+    );
+    let records = fs::read_to_string(temp.path().join("lager-test-cache/sessions.json")).unwrap();
+    assert!(records.contains("org/core"), "{records}");
 }

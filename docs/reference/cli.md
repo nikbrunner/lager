@@ -127,23 +127,23 @@ status is pending or remote discovery is on, followed by `status: N pending` whi
 observations are outstanding. A scan that could not read a path shows one
 warning line above the state, `! Scan incomplete:` with each unreadable path and
 its reason and each ignored repository (`PATH ignored: bare repository`); the
-failures are also listed in Session problems. An inventory with no rows and
+failures are also listed in Problems. An inventory with no rows and
 nothing declared says so in the table, names the root, and offers `a` to add a
 repository; its status line reads `Scan complete · 0 repositories · 0
 declarations` and its footer shows only the keys that act without a row. A root
 that does not exist yet is shown the same way, with `~/repos does not exist
 yet` in the table, or as a status line when declarations give the table rows;
-it is not a session problem.
+it is not a problem.
 
 Press `R` to reload configuration and refresh local observations. Earlier
 observations remain marked stale until refreshed. Press `q` or Esc to cancel
 background work and quit, restoring the terminal. A normal quit returns `1` if
-an operational failure occurred during the session, even after a successful
+an operational failure occurred during the run, even after a successful
 refresh; otherwise it returns `0`. Informational exclusions and deliberate
 cancellation do not count as failures.
 
 Use `j`/`k` or arrow keys to select a row, `/` for live fuzzy search, Space to
-mark the row, `a` to add a repository by reference, `r` to remove the checkout and keep its registration, `w` for the worktrees of the selected repository, Enter to inspect the selected repository, `m` for the action menu,
+mark the row, `a` to add a repository by reference, `r` to remove the checkout and keep its registration, `w` for the worktrees of the selected repository, `s` for its session, Enter to inspect the selected repository, `m` for the action menu,
 and `?` for effective bindings. Search matches full attributes, paths and origins; Enter/Esc
 retain the filter and normal-mode Backspace clears it. Ordinary search letters
 remain text; F1 opens search help. Help describes the mode it was opened from.
@@ -151,9 +151,10 @@ Marks survive filtering and refresh while their exact target remains; the search
 row shows the marked and hidden-marked counts, and the status line reports marks
 removed with a vanished entry. Wildcard pattern rows cannot be marked.
 The menu groups actions for this row (Repository actions…, Inspect, Copy value…,
-Open origin, Worktrees…), the selection (mark this row, mark visible concrete
-rows, clear all marks) and the session (Add, Remote discovery…, Refresh, Session
-problems…, batch cancellation, Help and Quit).
+Open origin, Worktrees…, and Open session with a `[session]` section), the
+selection (mark this row, mark visible concrete rows, clear all marks) and the
+inventory (Add, Remote discovery…, Refresh, Problems…, batch cancellation, Help
+and Quit).
 `w` or Worktrees… opens the worktrees of the current row's checkout; marks are
 not used. The popup lists the primary checkout and every linked worktree Git
 knows, wherever it sits, with its path, branch and state: `primary`, `locked`
@@ -207,7 +208,7 @@ as done. Otherwise the target is blocked as stale (`stale: origin changed`,
 `stale: checkout is gone or unreadable` or `stale: registration changed`,
 followed by `after preview`, or `since the action started` for the current row
 alone), nothing is written for it, and the other targets go on. Blocked and
-failed targets are session problems; a cancelled preview is not.
+failed targets are problems; a cancelled preview is not.
 Repository actions… → Clone only and Clone + register run through the same
 service as `add`, with the same targets, preview and outcomes as above. A clone
 lands at the identity's configured destination. A matching checkout there is a
@@ -289,10 +290,10 @@ Alt+key matches no binding and does nothing.
 Cancel active batch in the menu, or Cancel remaining work in the batch popup,
 stops the batch before its next target: completed targets keep their outcomes,
 the rest stay `UNATTEMPTED`, the inventory refreshes, and the cancellation is
-not a session problem. Quitting while a batch runs, with `q` in the batch popup
+not a problem. Quitting while a batch runs, with `q` in the batch popup
 or a normal-mode quit key, pauses it and asks: Return
 to inventory, the default, resumes it; Cancel remaining work and quit cancels
-as above and exits with the session status. Ctrl-C exits `130` at once.
+as above and exits with the run's status. Ctrl-C exits `130` at once.
 While Git or a hook runs, the inventory leaves the alternate screen, restores
 cooked mode and the cursor, and reads no input: Git and the hook keep the
 terminal's streams for output, prompts and authentication, without a timeout.
@@ -336,7 +337,7 @@ the typed reference text. The preview observes the destination once, when it
 opens; a destination that appeared since then blocks the clone as stale.
 Add never targets or changes marks, and closing it changes no files or
 configuration and keeps the query, cursor and marks.
-Session problems… lists every failure that makes the session exit `1`; the header
+Problems… lists every failure that makes the inventory exit `1`; the header
 shows their count.
 Popup content scrolls independently of its title and effective action hints.
 In Menu, Inspect, Help, the batch preview, the removal confirmation and the Add preview, q or Esc closes
@@ -347,12 +348,37 @@ Register, Unregister, Clone only, Clone + register, Remove + unregister, Copy va
 Open origin and the three remote actions have no default key; a configured key runs the same entry as the
 menu. Hints and Help show the effective keys, and Help names the actions without
 one. A refresh with an invalid key map keeps the previous bindings and records a
-session problem.
+problem.
 
 Register, Unregister, Clone only and Clone + register, from the menu or from Add,
 and Remove only and Remove + unregister are the repository mutations.
 `--include-archived` without `--remote` exits `2` before raw mode.
 Non-TTY use exits `2`; fatal startup/configuration errors exit `1`.
+
+#### Sessions in the inventory
+
+With a [`[session]` section](config.md#session) the inventory opens the session of a repository. A `●` after the mark column shows that the row's primary checkout has a live session. Lager asks Rex for its sessions in the background when the inventory starts, on every refresh and after an open that failed. Marks and the `s session` hint appear once Rex has answered.
+
+`s` or Open session in the menu opens the session of the selected row, with the status `Opening session LABEL…`. The table keeps answering keys while Rex works. When the session is open, the inventory closes with the exit status of a normal quit and prints one line after the terminal is restored:
+
+| Outcome | Line |
+| --- | --- |
+| A new session | `Opened session LABEL` |
+| The session existed | `Switched to session LABEL` |
+
+The inventory stays open in these cases:
+
+| Case | Status line | Problem |
+| --- | --- | --- |
+| The row has no checkout, or Git cannot name its repository | `Open session unavailable: REASON`, such as `no checkout at the destination` | No |
+| Another session is opening | `Open session unavailable: a session is opening` | No |
+| A batch or a GitHub action is running | `Open session unavailable: a batch is running` or `a GitHub action is running` | No |
+| Rex is missing or stopped | `Open session unavailable: REASON` | No |
+| A call fails on a running Rex, or the session record cannot be read or written | `! Open session failed: REASON` | Yes |
+
+When Rex is missing or stopped, its first answer turns the status line into `Sessions unavailable: REASON` until the next refresh, and the marks and the `s session` hint stay hidden. A missing Rex does not change the exit status. A list that fails on a running Rex, or a record file that cannot be read, is a problem as well.
+
+An inventory that quits while a session opens restores the terminal, prints `lager: waiting for session LABEL to open…` on stderr and waits for Rex, so lager records the session. Each Rex call is cut off after 10 seconds, and keys or signals do not end the wait. Then it prints the session line, or the status line of a failed open after `lager: `, and a failure on a running Rex makes it exit `1`. Without the section the inventory shows nothing about sessions and never calls Rex.
 
 #### Remote discovery
 
@@ -381,7 +407,7 @@ answered. The source line under the header names every provider with its state:
 `loading… N s`, `ready, N candidates`, `failed`, or `refreshing, N cached
 (stale)` while rows of an earlier answer are still shown. A failed provider
 leaves the other providers' rows in place. Its error is the status line's state
-and a session problem, so the session exits `1`. When only the catalog or one
+and a problem, so the inventory exits `1`. When only the catalog or one
 wildcard of a provider fails, the provider reads `failed` and keeps the rows the
 rest of its answer returned. A request without an answer after 30 seconds is
 ended and fails, also while Git or a hook holds the terminal; the failure shows
@@ -396,7 +422,7 @@ The Remote discovery menu lists the providers and these entries:
 | Retry failed providers | Fetches the failed providers again and no other. |
 | Refresh all enabled providers | Fetches every provider again; the cached rows stay until the answers arrive. |
 | Include archived | Switches the archive preference. While remote discovery is on, the running requests are dropped and every provider is fetched again. |
-| Disable remote | Drops the running requests, hides the rows the providers added and removes their marks, naming them in the status line. The answers of this session and the archive preference stay for the next enable. |
+| Disable remote | Drops the running requests, hides the rows the providers added and removes their marks, naming them in the status line. The answers of this run and the archive preference stay for the next enable. |
 
 An answer to a request that was dropped by disabling, a refresh or the archive
 preference is ignored. `R` reloads the configuration and rescans the disk; it
@@ -596,7 +622,7 @@ A session's label is the primary checkout's directory name, such as `core`. A li
 | The record cannot be locked, read or written | `error: could not lock sessions: …`, `error: could not read sessions PATH: …` or `error: could not write sessions PATH: …` | `1` |
 | Invalid arguments | clap's usage error | `2` |
 
-Success lines go to stdout, error lines to stderr. `PATH` is the canonical checkout path. `REASON` is Rex's own first line, such as `no Rex server is running at SOCKET, and autostart is disabled`, or one of lager's: `rex CLI not found`, `no Rex app connected`, `rex did not answer within 10 s`, `rex listed no session ids`.
+Success lines go to stdout, error lines to stderr. `PATH` is the canonical checkout path. `REASON` is Rex's own first line, such as `no Rex server is running at SOCKET, and autostart is disabled`, or one of lager's: `rex is not installed`, `no Rex app connected`, `rex did not answer within 10 s`, `rex listed no session ids`.
 
 Every command, `list` and a `close` that finds nothing included, asks Rex first, so with Rex unavailable each one exits `1`. Lager never starts the Rex server. `open` creates the session before it asks Rex to show it, so when showing fails the session stays and `list` shows it.
 
@@ -645,6 +671,6 @@ opaque escaped field when `exact_path` is absent; when present, it renders the
 identity and path instead. Duplicate labels map back to distinct untouched
 candidates by hidden row ID, in the order returned by the picker.
 
-A picker or repository interaction cancellation exits 130. Inventory's `q` and Esc use the session exit status described above. Invalid usage exits 2. Configuration, provider, Git, hook, filesystem, and aggregate failures exit 1. Success, no-op, empty selections, and explicitly skipped removals exit 0.
+A picker or repository interaction cancellation exits 130. Inventory's `q` and Esc use the exit status described above. Invalid usage exits 2. Configuration, provider, Git, hook, filesystem, and aggregate failures exit 1. Success, no-op, empty selections, and explicitly skipped removals exit 0.
 
 See [status JSON](status-json.md), [worktree JSON](worktree-json.md), [session JSON](session-json.md), [exit codes](exit-codes.md), [automation](../how-to/automation.md), and [safe removal](../how-to/remove-safely.md) for the detailed contracts.

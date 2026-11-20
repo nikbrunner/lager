@@ -212,7 +212,7 @@ fn run(args: &[&str], stdin: Option<&str>) -> Result<Value, Failure> {
         .map_err(|error| match error.kind() {
             ErrorKind::NotFound => Failure {
                 exit: None,
-                error: HostError::Unavailable("rex CLI not found".to_owned()),
+                error: HostError::Unavailable("rex is not installed".to_owned()),
             },
             _ => failed(None, format!("rex: {error}")),
         })?;

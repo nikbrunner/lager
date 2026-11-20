@@ -9,25 +9,28 @@
 
 For `tui`, normal-mode `q`/Esc or popup Ctrl-Q perform a normal
 quit: `1` if discovery, observation or another operational failure occurred in
-the session, including
+the run, including
 failures followed by successful refresh; otherwise `0`. Informational exclusions,
 deliberate background-work cancellation and a configuration changed on disk that
 fails to load automatically do not count as failures. A
 cancelled confirmation and a cancelled batch do not count either, including
 cancelling from the quit prompt of a running batch; blocked and failed batch
-targets do. Non-TTY
+targets do. A session that fails to open on a running Rex counts, as do a list of
+sessions that fails on a running Rex and a session record file that cannot be
+read or written; a missing or stopped Rex does not. When `s` has opened a session, the inventory closes with
+the status of a normal quit. Non-TTY
 use and invalid flags exit `2` before raw mode;
-fatal startup/configuration errors exit `1`. In Unix binary inventory sessions,
+fatal startup/configuration errors exit `1`. In Unix binary inventory runs,
 Ctrl-C or SIGINT exits `130`, SIGTERM `143` and SIGHUP `129` (128 plus the
 signal number). The terminal is restored first; the local scan and the provider
 requests then share one 2-second budget to end, and work still running after it,
 such as a scan held in a blocking filesystem call, is left behind. Every exit
 route does the same. SIGQUIT and SIGTSTP keep their default actions.
 While a clone or hook owns the terminal, Ctrl-C interrupts it and the batch, and
-a child that reports an interruption or exits `130` does the same: the session
+a child that reports an interruption or exits `130` does the same: the run
 exits `130` without returning to the inventory, and completed targets keep their
 checkouts and registrations. SIGTERM or SIGHUP during that time takes effect when
-the child returns; the session then exits `143` or `129`.
+the child returns; the inventory then exits `143` or `129`.
 
 For `worktree`, `1` covers a repository that cannot be found, a refused
 destination or branch, a blocked removal, local losses without `--force`, a
@@ -60,7 +63,7 @@ inventory and restores previous signal actions afterward.
 `status` (and its aliases `list` and `ls`) exits `0` when the scan finished
 and nothing failed. It exits `1` when a path could not be read, a Git
 observation failed, or a provider failed with `--remote`: the failures that
-make a `tui` session exit `1`. A root that does not exist yet is an empty
+make a `tui` run exit `1`. A root that does not exist yet is an empty
 scan with a note on stderr and exits `0`; a root that is not a directory
 exits `1`. The rows are printed in every case, and each failure is one line on
 stderr. Invalid flags exit `2` and invalid configuration exits `1`, both before
