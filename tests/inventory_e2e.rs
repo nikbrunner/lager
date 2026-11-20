@@ -389,7 +389,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         let descriptions = body
             .iter()
             .skip(1)
-            .take_while(|line| !line.is_empty() && !line.starts_with("Esc close"))
+            .take_while(|line| !line.is_empty() && !line.starts_with("j/k scroll"))
             .map(|line| {
                 line.split("  ")
                     .filter(|part| !part.is_empty())
@@ -416,7 +416,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
                 || body[1].starts_with("j/k ↑/↓ Tab/Shift+Tab"),
             "{screen}"
         );
-        assert!(body.contains(&"Esc close"), "{screen}");
+        assert!(body.contains(&"j/k scroll · Esc close"), "{screen}");
 
         let colored = transcript.contains("\x1b[38;5;2;");
         assert_eq!(colored, !no_color, "explicit registration tint");
@@ -3680,6 +3680,77 @@ fn inventory_menu_holds_its_entries_and_one_hint_row_over_an_empty_hint_bar() {
 
 #[cfg(unix)]
 #[test]
+fn inventory_help_follows_its_board_with_one_hint_row_over_an_empty_hint_bar() {
+    let temp = temp_dir();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    let mut help = String::new();
+    run_inventory_pty_with_exit_observing(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (vec!["Scan complete · 0 repositories"], b"?".to_vec()),
+            (
+                vec!["Keyboard / effective bindings", "Other modes"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Keyboard /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        0,
+        |action, _, frame| {
+            if action == 1 {
+                help = frame.to_owned();
+            }
+        },
+    );
+    let screen = screen_text(&help, 32, 132);
+    let lines = screen.split('\n').collect::<Vec<_>>();
+    let body = lines
+        .iter()
+        .filter_map(|line| line.split('│').nth(1))
+        .map(|inner| inner.strip_prefix("  ").unwrap_or(inner).trim_end())
+        .collect::<Vec<_>>();
+    let at = |text: &str| {
+        body.iter()
+            .position(|line| line.starts_with(text))
+            .unwrap_or_else(|| panic!("{text}:\n{screen}"))
+    };
+    // The keyless actions close the normal keys; a blank line separates the sections.
+    assert_eq!(at("unbound"), at("? / q") + 1, "{screen}");
+    assert!(
+        body[at("unbound")].starts_with("unbound       Register, Unregister, "),
+        "{screen}"
+    );
+    let other = at("Other modes");
+    assert_eq!(body[other - 1], "", "{screen}");
+    assert_eq!(
+        body[other + 1..other + 8],
+        [
+            "search        Enter / Esc keep the filter · letters are text",
+            "menu          j/k select · Enter choose · Esc back one level",
+            "input         Enter accept · Esc cancel",
+            "confirm       j/k focus · Space acknowledge · Enter choose · Esc cancel",
+            "inspect       j/k PageUp/PageDown scroll · c copy a value · Esc close",
+            "worktrees     j/k select · a add · r remove · c copy path · Esc close",
+            "j/k scroll · Esc close",
+        ],
+        "{screen}"
+    );
+    assert!(!screen.contains("No default key"), "{screen}");
+    assert_eq!(lines[31], "", "{screen}");
+    assert!(
+        styled_screen(&help, 32, 132)[31]
+            .iter()
+            .all(|(_, reversed)| *reversed),
+        "the empty hint bar stays a bar:\n{screen}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn inventory_help_uses_the_invoking_mode_and_returns_to_it() {
     let temp = temp_dir();
     let home = temp.path().join("home");
@@ -5238,7 +5309,8 @@ fn inventory_remapped_keys_work_in_every_mode_and_their_defaults_are_dead() {
                     "pair: M all",
                     "Other modes",
                     "pair: b back",
-                    "search    Ctrl+a / Esc keep the filter",
+                    "pair: search Ctrl+a",
+                    "Ctrl+a / Esc keep the filter",
                     "pair: Ctrl+p accept",
                     "pair: n cancel",
                     "pair: h close",
@@ -5425,7 +5497,8 @@ fn inventory_help_shows_configured_directions_and_emptied_actions() {
                     "c/j ↓ · k/Up/Shift+Tab ↑",
                     "scroll (config: down = [\"c\", \"j\"])",
                     "No key in normal mode: mark.",
-                    "No default key: Register,",
+                    "pair: unbound Register,",
+                    "absent: No default key",
                 ],
                 b"\x1b".to_vec(),
             ),
@@ -5555,7 +5628,8 @@ fn inventory_help_scrolls_to_every_mode_and_the_keyless_actions_at_80_columns() 
             (
                 vec![
                     "Normal mode",
-                    "absent: No default key:",
+                    "pair: unbound Register,",
+                    "Register, Unregister",
                     "Scan complete · 0 repositories",
                 ],
                 b"\x1b[6~".to_vec(),
@@ -5564,7 +5638,7 @@ fn inventory_help_scrolls_to_every_mode_and_the_keyless_actions_at_80_columns() 
                 vec![
                     "Other modes",
                     "pair: confirm j/k",
-                    "No default key: Register, Unregister",
+                    "absent: No default key",
                     "absent: No key in",
                     "Scan complete · 0 repositories",
                 ],

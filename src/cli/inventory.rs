@@ -2115,11 +2115,10 @@ impl TerminalSession {
                         "Keyboard / effective bindings",
                         help_widget(bindings, shown.help_mode, session.session_layout.is_some())
                             .scroll((shown.help_scroll, 0)),
-                        bindings
-                            .keys(Mode::Inspection, Action::Cancel)
-                            .first()
-                            .map(|key| format!("{key} close"))
-                            .unwrap_or_default(),
+                        format!(
+                            "{} scroll · {close}",
+                            rows_hint(bindings, Mode::Inspection, false)
+                        ),
                     ),
                     View::Problems => draw_popup(
                         frame,
@@ -3367,12 +3366,30 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
             Span::raw(format!("{}{description}", " ".repeat(padding))),
         ])
     };
+    let normal = bindings
+        .unbound(Mode::Normal)
+        .into_iter()
+        .filter(|action| {
+            DIRECT_ACTIONS.contains(action) && bindings.configured(Mode::Normal, *action).is_none()
+        })
+        .map(direct_label)
+        .collect::<Vec<_>>();
+    // The normal actions without a key follow the normal keys, in either section.
+    let unbound = (!normal.is_empty()).then(|| {
+        Line::from(vec![
+            Span::styled(format!("{:<column$}", "unbound"), dim()),
+            Span::raw(normal.join(", ")),
+        ])
+    });
     let mut lines = vec![Line::styled(title, dim())];
     lines.extend(
         entries
             .into_iter()
             .map(|(keys, description)| line(keys, &description)),
     );
+    if mode == Mode::Normal {
+        lines.extend(unbound.clone());
+    }
     if sessions && mode == Mode::Normal {
         lines.extend([
             Line::raw(""),
@@ -3476,26 +3493,10 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
             ),
         };
         let items = items.into_iter().flatten().collect::<Vec<_>>();
-        lines.push(Line::from(vec![
-            Span::styled(format!("{name:<10}"), focus()),
-            Span::raw(items.join(" · ")),
-        ]));
-    }
-    let normal = bindings
-        .unbound(Mode::Normal)
-        .into_iter()
-        .filter(|action| {
-            DIRECT_ACTIONS.contains(action) && bindings.configured(Mode::Normal, *action).is_none()
-        })
-        .map(direct_label)
-        .collect::<Vec<_>>();
-    if !normal.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::raw(format!(
-            "No default key: {}. Reach them through the menu or bind them under \
-             [inventory.keys.normal].",
-            normal.join(", ")
-        )));
+        lines.push(line(name.to_owned(), &items.join(" · ")));
+        if other == Mode::Normal {
+            lines.extend(unbound.clone());
+        }
     }
     for (other, name) in [
         (Mode::Normal, "normal"),
