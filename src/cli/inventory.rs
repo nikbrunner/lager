@@ -1844,12 +1844,7 @@ impl TerminalSession {
             popup_scroll_limit(
                 area,
                 WIDE_POPUP,
-                &batch_widget(
-                    batch,
-                    &session.home,
-                    popup_body_width(area, WIDE_POPUP),
-                    false,
-                ),
+                &batch_widget(batch, popup_body_width(area, WIDE_POPUP), false),
             )
         })
     }
@@ -1918,6 +1913,7 @@ impl TerminalSession {
                     bindings
                         .keys(Mode::Normal, Action::Menu)
                         .first()
+                        .filter(|_| view == View::Normal)
                         .map(|key| format!(" · {key} → cancel batch"))
                         .unwrap_or_default()
                 )
@@ -2277,7 +2273,6 @@ impl TerminalSession {
                                 &format!("Batch / {}", batch.action.label()),
                                 batch_widget(
                                     batch,
-                                    home,
                                     popup_body_width(area, WIDE_POPUP),
                                     shown.batch_cancel,
                                 )
@@ -2285,7 +2280,7 @@ impl TerminalSession {
                                 if batch.finished() {
                                     format!(
                                         "{} scroll · {}",
-                                        rows_hint(bindings, Mode::Inspection, true),
+                                        rows_hint(bindings, Mode::Inspection, false),
                                         first_key_hint(
                                             bindings,
                                             Mode::Inspection,
@@ -2302,8 +2297,12 @@ impl TerminalSession {
                                         .map(|key| format!(" · {key} quit"))
                                         .unwrap_or_default();
                                     format!(
-                                        "{} focus · {} · {}{quit}",
-                                        rows_hint(bindings, Mode::Inspection, true),
+                                        "{} focus · {} scroll · {} · {}{quit}",
+                                        rows_hint(bindings, Mode::Inspection, false),
+                                        paired_keys(
+                                            &bindings.keys(Mode::Inspection, Action::PageUp),
+                                            &bindings.keys(Mode::Inspection, Action::PageDown),
+                                        ),
                                         first_key_hint(
                                             bindings,
                                             Mode::Inspection,
@@ -2333,7 +2332,8 @@ impl TerminalSession {
                                     popup_body_width(area, POPUP),
                                 ),
                                 format!(
-                                    "{} · {}",
+                                    "{} focus · {} · {}",
+                                    rows_hint(bindings, Mode::Confirmation, false),
                                     first_key_hint(
                                         bindings,
                                         Mode::Confirmation,
@@ -5160,16 +5160,8 @@ fn outcome_label(outcome: Outcome) -> &'static str {
 
 /// The outcomes of a batch. While it runs, two choices follow them: return to browsing, the
 /// default, and `cancel` focuses cancelling the remaining work.
-fn batch_widget(batch: &Batch, home: &Path, width: u16, cancel: bool) -> Paragraph<'static> {
+fn batch_widget(batch: &Batch, width: u16, cancel: bool) -> Paragraph<'static> {
     let active = batch.active();
-    let hidden = batch.targets.iter().filter(|target| target.hidden).count();
-    let mut summary = format!("{} / {} processed", batch.processed(), batch.targets.len());
-    if hidden > 0 {
-        summary.push_str(&format!(" · {hidden} hidden by filter"));
-    }
-    if let Some(path) = active.and_then(|index| batch.targets[index].path.as_ref()) {
-        summary.push_str(&format!(" · active: {}", home_relative(path, home)));
-    }
     let name_width = batch
         .targets
         .iter()
@@ -5181,18 +5173,14 @@ fn batch_widget(batch: &Batch, home: &Path, width: u16, cancel: bool) -> Paragra
         let padding = name_width.saturating_sub(Line::raw(name.to_owned()).width());
         format!("{name}{} {disk:<9} {config:<13} ", " ".repeat(padding))
     };
-    let mut lines = vec![
-        Line::raw(summary),
-        Line::default(),
-        Line::styled(
-            format!(
-                "{:<12} {}reason",
-                "outcome",
-                cells("repository", "disk", "config")
-            ),
-            dim(),
+    let mut lines = vec![Line::styled(
+        format!(
+            "{:<12} {}reason",
+            "outcome",
+            cells("repository", "disk", "config")
         ),
-    ];
+        dim(),
+    )];
     let reason_column = 13 + Line::raw(cells("", "", "")).width();
     for (index, (target, result)) in batch.targets.iter().zip(&batch.results).enumerate() {
         let (label, style) = match result.outcome {
@@ -5238,21 +5226,11 @@ fn batch_widget(batch: &Batch, home: &Path, width: u16, cancel: bool) -> Paragra
                 }),
         );
     }
-    lines.extend([
-        Line::default(),
-        Line::styled(batch_note(batch.action), dim()),
-    ]);
     if !batch.finished() {
         let width = usize::from(width);
         lines.extend([
             Line::default(),
-            choice_line(
-                "Return to browsing",
-                "batch continues",
-                true,
-                !cancel,
-                width,
-            ),
+            choice_line("Return to browsing", "", true, !cancel, width),
             choice_line(
                 "Cancel remaining work",
                 "completed changes remain",
@@ -5274,38 +5252,33 @@ fn quit_widget(batch: &Batch, cancel: bool, width: u16) -> Paragraph<'static> {
         .filter(|(_, result)| result.outcome == Outcome::Unattempted)
         .map(|(target, _)| target.name.as_str())
         .collect::<Vec<_>>();
-    let names = match left.as_slice() {
-        [] => "nothing".to_owned(),
-        [one] => (*one).to_owned(),
-        [first, second] => format!("{first} and {second}"),
-        [first, second, rest @ ..] => format!("{first}, {second} and {} more", rest.len()),
-    };
-    let problems = batch
-        .results
-        .iter()
-        .filter(|result| matches!(result.outcome, Outcome::Failed | Outcome::Blocked))
-        .count();
-    let mut consequence = format!("Cancelling leaves {names} unattempted.");
-    if problems > 0 {
-        consequence.push_str(&format!(
-            " The inventory exits 1 because {problems} {} failed or were blocked.",
-            if problems == 1 { "target" } else { "targets" }
+    let mut lines = field_lines(
+        "processed",
+        &format!("{} of {}", batch.processed(), batch.targets.len()),
+        Style::default(),
+        width,
+    );
+    if !left.is_empty() {
+        lines.extend(field_lines(
+            "unattempted",
+            &left.join(", "),
+            Style::default(),
+            width,
         ));
     }
     let width = usize::from(width);
-    Paragraph::new(vec![
-        Line::raw(format!(
-            "{} of {} targets processed. Completed changes remain.",
-            batch.processed(),
-            batch.targets.len()
-        )),
+    lines.extend([
         Line::default(),
-        Line::styled(consequence, dim()),
-        Line::default(),
-        choice_line("Return to inventory", "default", true, !cancel, width),
-        choice_line("Cancel remaining work and quit", "", true, cancel, width),
-    ])
-    .wrap(Wrap { trim: false })
+        choice_line("Return to inventory", "", true, !cancel, width),
+        choice_line(
+            "Cancel remaining work and quit",
+            "completed changes remain",
+            true,
+            cancel,
+            width,
+        ),
+    ]);
+    Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 
 /// Joins `detail` with ` · `. The path in front wraps by cell, so the paragraph's word wrap only

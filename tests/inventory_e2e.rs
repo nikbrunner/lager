@@ -5036,7 +5036,7 @@ fn inventory_registers_and_unregisters_the_current_row_without_touching_files() 
             (
                 vec![
                     "Batch / Register",
-                    "1 / 1 processed",
+                    "j/k scroll · Esc return",
                     "pair: SUCCEEDED beta",
                     "pair: beta updated",
                     "Register: 1 succeeded",
@@ -5827,7 +5827,7 @@ fn inventory_registers_every_marked_row_including_hidden_ones_and_reports_each_o
             (
                 vec![
                     "Batch / Register",
-                    "3 / 3 processed · 2 hidden by filter",
+                    "j/k scroll · Esc return",
                     "pair: NO-OP alpha",
                     "already registered",
                     "pair: SUCCEEDED beta",
@@ -6443,7 +6443,7 @@ fn inventory_add_registers_a_typed_reference_through_the_batch_and_keeps_marks()
             (
                 vec![
                     "Batch / Register",
-                    "1 / 1 processed",
+                    "j/k scroll · Esc return",
                     "pair: SUCCEEDED github.com/org/beta",
                     "Register: 1 succeeded",
                 ],
@@ -6566,7 +6566,7 @@ fn inventory_clone_register_hands_the_terminal_to_git_and_returns_with_the_new_s
             (
                 vec![
                     "Batch / Clone + register",
-                    "1 / 1 processed",
+                    "j/k scroll · Esc return",
                     "SUCCEEDED",
                     "pair: cloned updated",
                     "Clone + register: 1 succeeded",
@@ -6661,7 +6661,7 @@ fn inventory_clone_only_from_the_row_menu_runs_the_hook_on_the_terminal_and_keep
             (
                 vec![
                     "Batch / Clone only",
-                    "1 / 1 processed",
+                    "j/k scroll · Esc return",
                     "pair: SUCCEEDED alpha",
                     "pair: alpha cloned",
                     "Clone only: 1 succeeded",
@@ -6892,7 +6892,7 @@ fn inventory_clone_batch_reports_each_target_and_continues_past_a_failed_and_a_s
             (
                 vec![
                     "Batch / Clone only",
-                    "4 / 4 processed",
+                    "j/k scroll · Esc return",
                     "pair: SUCCEEDED alpha",
                     "pair: alpha cloned",
                     "pair: FAILED broken",
@@ -7062,7 +7062,7 @@ fn inventory_clone_register_on_a_matching_checkout_registers_without_cloning() {
             (
                 vec![
                     "Batch / Clone + register",
-                    "1 / 1 processed",
+                    "j/k scroll · Esc return",
                     "pair: SUCCEEDED github.com/org/alpha",
                     "pair: github.com/org/alpha updated",
                     "Clone + register: 1 succeeded",
@@ -7122,7 +7122,7 @@ fn inventory_add_blocks_a_clone_whose_destination_appeared_after_the_preview() {
             (
                 vec![
                     "Batch / Clone + register",
-                    "1 / 1 processed",
+                    "j/k scroll · Esc return",
                     "BLOCKED",
                     // The reason wraps or moves below its row, depending on the URL's width.
                     "stale: destination",
@@ -7204,7 +7204,7 @@ fn inventory_failed_hook_keeps_the_clone_skips_registration_and_lets_the_next_ta
             (
                 vec![
                     "Batch / Clone + register",
-                    "2 / 2 processed",
+                    "j/k scroll · Esc return",
                     "pair: FAILED alpha",
                     "pair: alpha cloned",
                     "hook exited with status 3",
@@ -7424,7 +7424,7 @@ fn recheck_blocks_a_vanished_checkout(exported_git: bool) {
             (
                 vec![
                     "Batch / Register",
-                    "2 / 2 processed",
+                    "j/k scroll · Esc return",
                     "pair: SUCCEEDED alpha",
                     "pair: BLOCKED beta",
                     "stale: checkout is gone",
@@ -7500,7 +7500,7 @@ fn inventory_blocks_a_previewed_no_op_whose_registration_changed_before_its_writ
             (
                 vec![
                     "Batch / Unregister",
-                    "2 / 2 processed",
+                    "j/k scroll · Esc return",
                     "pair: SUCCEEDED alpha",
                     "pair: BLOCKED zeta",
                     "stale: registration changed after preview",
@@ -7576,7 +7576,7 @@ fn inventory_long_preview_scrolls_its_targets_while_the_choices_stay_in_view() {
             (
                 vec![
                     "Batch / Register",
-                    "12 / 12 processed",
+                    "j/k scroll · Esc return",
                     "pair: SUCCEEDED r11",
                 ],
                 b"\x1b".to_vec(),
@@ -7635,7 +7635,7 @@ fn inventory_failed_registration_write_is_one_problem_per_identity_and_keeps_col
                 (
                     vec![
                         "Batch / Register",
-                        "2 / 2 processed",
+                        "j/k scroll · Esc return",
                         "pair: FAILED beta",
                         "write failed",
                         "could not write config",
@@ -7683,8 +7683,10 @@ fn inventory_failed_registration_write_is_one_problem_per_identity_and_keeps_col
         .chars()
         .count();
     let outcome = header_text[..outcome].chars().count();
+    // The outcome rows end at the popup's hint row.
     let rows = lines[header + 1..]
         .iter()
+        .take_while(|line| !String::from_iter(line.iter()).contains("Esc return"))
         .take_while(|line| {
             line.get(outcome..reason)
                 .is_some_and(|cells| cells.iter().any(|c| *c != ' '))
@@ -8200,7 +8202,7 @@ fn inventory_remove_only_continues_past_blocked_targets_and_keeps_registration()
             (
                 vec![
                     "Batch / Remove only",
-                    "3 / 3 processed",
+                    "j/k scroll · Esc return",
                     "pair: SUCCEEDED alpha",
                     "pair: alpha removed",
                     "pair: BLOCKED core",
@@ -8282,7 +8284,7 @@ fn inventory_acknowledged_losses_are_removed_while_a_blocker_and_a_new_loss_stay
             (
                 vec![
                     "Batch / Remove only",
-                    "3 / 3 processed",
+                    "j/k scroll · Esc return",
                     "pair: BLOCKED core",
                     "dependent worktree metadata",
                     "pair: SUCCEEDED draft",
@@ -8368,7 +8370,7 @@ fn inventory_remove_unregister_reports_a_deleted_checkout_and_a_failed_config_wr
                 (
                     vec![
                         "Batch / Remove + unregister",
-                        "2 / 2 processed",
+                        "j/k scroll · Esc return",
                         "pair: SUCCEEDED alpha",
                         // The first checkout is gone; its row points at the one that failed.
                         "registration kept: see alpha (copy)",
@@ -8445,7 +8447,7 @@ fn inventory_remove_unregister_keeps_registration_while_a_selected_checkout_of_t
             (
                 vec![
                     "Batch / Remove + unregister",
-                    "2 / 2 processed",
+                    "j/k scroll · Esc return",
                     "pair: BLOCKED alpha",
                     "dependent worktree metadata",
                     "pair: (copy) removed",
@@ -8515,7 +8517,7 @@ fn inventory_remove_unregister_writes_once_per_identity_and_previews_the_unselec
             (
                 vec![
                     "Batch / Remove + unregister",
-                    "3 / 3 processed",
+                    "j/k scroll · Esc return",
                     "pair: SUCCEEDED beta",
                     "pair: beta removed",
                     "unregistered with beta (copy)",
@@ -8593,7 +8595,7 @@ fn inventory_removal_blocks_targets_whose_origin_path_or_registration_changed_af
             (
                 vec![
                     "Batch / Remove + unregister",
-                    "4 / 4 processed",
+                    "j/k scroll · Esc return",
                     "pair: BLOCKED alpha",
                     "stale: origin changed after preview",
                     "pair: SUCCEEDED delta",
@@ -8890,7 +8892,7 @@ fn inventory_removal_never_follows_an_ancestor_that_became_a_symlink_to_another_
             (
                 vec![
                     "Batch / Remove only",
-                    "1 / 1 processed",
+                    "j/k scroll · Esc return",
                     "BLOCKED",
                     "stale: selected clone path changed",
                     "· 1 problem",
@@ -9164,8 +9166,10 @@ fn removal_held_at_its_second_target(
         "pair: SUCCEEDED alpha",
         "pair: ACTIVE beta",
         "pair: UNATTEMPTED gamma",
-        "Batch: 1 / 3 processed · m → cancel batch",
-        "Esc return · q quit",
+        "Batch: 1 / 3 processed",
+        "absent: cancel batch",
+        "j/k focus · PageUp/PageDown scroll · Enter choose · Esc return · q quit",
+        "absent: Enter choose  Esc return",
     ];
     let mut actions = vec![
         (
@@ -9219,7 +9223,7 @@ fn cancelled_batch_outcomes() -> Vec<(Vec<&'static str>, Vec<u8>)> {
         (
             vec![
                 "Batch / Remove only",
-                "2 / 3 processed",
+                "j/k scroll · Esc return",
                 "pair: SUCCEEDED alpha",
                 "pair: SUCCEEDED beta",
                 "pair: UNATTEMPTED gamma",
@@ -9256,14 +9260,16 @@ fn inventory_batch_popup_cancels_the_remaining_targets() {
 }
 
 #[cfg(unix)]
-const QUIT_PROMPT: [&str; 7] = [
+const QUIT_PROMPT: [&str; 9] = [
     "CONFIRM",
     "A batch is running",
-    "2 of 3 targets processed. Completed changes remain.",
-    "Cancelling leaves gamma unattempted.",
-    "pair: inventory default",
-    "Cancel remaining work and quit",
-    "pair: Esc return",
+    "pair: processed 2",
+    "pair: unattempted gamma",
+    "Return to inventory",
+    "pair: quit completed",
+    "j/k focus · Enter choose · Esc return",
+    "absent: Cancelling leaves",
+    "absent: Enter choose  Esc return",
 ];
 
 #[cfg(unix)]
@@ -9277,7 +9283,7 @@ fn inventory_quit_during_a_batch_returns_to_it_by_default() {
             (
                 vec![
                     "Batch / Remove only",
-                    "3 / 3 processed",
+                    "j/k scroll · Esc return",
                     "absent: A batch is running",
                     "absent: Scanning",
                     "Remove only: 3 succeeded",
