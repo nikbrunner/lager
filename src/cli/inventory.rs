@@ -2128,7 +2128,7 @@ impl TerminalSession {
                         problems_widget(session).scroll((shown.problems_scroll, 0)),
                         format!(
                             "{} scroll · {close}",
-                            rows_hint(bindings, Mode::Inspection, true)
+                            rows_hint(bindings, Mode::Inspection, false)
                         ),
                     ),
                     View::Inspect => {
@@ -5207,18 +5207,6 @@ fn problems_widget(session: &InventorySession) -> Paragraph<'static> {
             .iter()
             .map(|problem| Line::raw(line(&clock(problem.at), &problem.source, &problem.message))),
     );
-    lines.extend([
-        Line::default(),
-        Line::styled(
-            "Quit returns 1 because problems occurred in this run. A successful retry stays listed.",
-            dim(),
-        ),
-        Line::default(),
-        Line::styled(
-            "Declined confirmations, cancellations and missing optional tools are not problems.",
-            dim(),
-        ),
-    ]);
     Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 

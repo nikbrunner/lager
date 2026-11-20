@@ -4797,8 +4797,9 @@ fn inventory_session_problems_list_every_failure_behind_exit_one() {
     )
     .unwrap();
     let problems = format!("m{}\r", "j".repeat(9)).into_bytes();
+    let mut popup = String::new();
 
-    run_inventory_pty_with_exit(
+    run_inventory_pty_with_exit_observing(
         support::lager(&home, &config).arg("tui"),
         &[
             (
@@ -4819,9 +4820,9 @@ fn inventory_session_problems_list_every_failure_behind_exit_one() {
                     "Problems / 1",
                     "pair: scan ~/repos:",
                     "~/repos: permission denied ·",
-                    "Quit returns 1 because problems occurred in this run.",
-                    "Declined confirmations, cancellations and missing optional tools are not",
-                    "j/k ↑/↓ scroll · Esc close",
+                    "j/k scroll · Esc close",
+                    "absent: Quit returns 1",
+                    "absent: are not problems",
                 ],
                 b"\x1b".to_vec(),
             ),
@@ -4847,7 +4848,10 @@ fn inventory_session_problems_list_every_failure_behind_exit_one() {
         24,
         80,
         1,
-        |action| {
+        |action, _, frame| {
+            if action == 2 {
+                popup = frame.to_owned();
+            }
             if action == 3 {
                 fs::write(
                     &config,
@@ -4856,6 +4860,14 @@ fn inventory_session_problems_list_every_failure_behind_exit_one() {
                 .unwrap();
             }
         },
+    );
+    let screen = screen_text(&popup, 24, 80);
+    assert_eq!(screen.split('\n').nth(23), Some(""), "{screen}");
+    assert!(
+        styled_screen(&popup, 24, 80)[23]
+            .iter()
+            .all(|(_, reversed)| *reversed),
+        "the empty hint bar stays a bar:\n{screen}"
     );
 }
 
