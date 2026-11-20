@@ -234,7 +234,7 @@ pub(super) fn group(
             Entry::Github(Act::Rename),
             "Rename…",
             if model::worktree_checkout(row).is_ok() {
-                "moves the checkout too"
+                "moves the checkout"
             } else {
                 ""
             },
@@ -259,13 +259,13 @@ pub(super) fn group(
             Some(Visibility::Private) => line(
                 Entry::Github(Act::Visibility(Visibility::Public)),
                 "Make public…",
-                "asks first",
+                "private",
                 gate(RemoteAction::Visibility),
             ),
             Some(Visibility::Public) => line(
                 Entry::Github(Act::Visibility(Visibility::Private)),
                 "Make private…",
-                "asks first",
+                "public",
                 gate(RemoteAction::Visibility),
             ),
             _ => line(
@@ -298,13 +298,13 @@ pub(super) fn visibility_lines(
         line(
             Entry::Github(Act::Visibility(Visibility::Public)),
             "Make public…",
-            "asks first",
+            "",
             gate.clone(),
         ),
         line(
             Entry::Github(Act::Visibility(Visibility::Private)),
             "Make private…",
-            "asks first",
+            "",
             gate,
         ),
     ]
@@ -316,7 +316,7 @@ pub(super) fn create_line(session: &InventorySession) -> Option<MenuLine> {
         line(
             Entry::Github(Act::Create),
             "New repository on GitHub…",
-            "create, then clone",
+            "",
             busy(session),
         )
     })
@@ -837,7 +837,6 @@ pub(super) fn draw(
 ) {
     let bindings = &session.bindings;
     let home = session.home.as_path();
-    let keys = |mode, action| bindings.keys(mode, action).join("/");
     let hint = |mode, action, label| first_key_hint(bindings, mode, action, label);
     let (cap, title, lines, footer) = match dialog {
         Dialog::Create {
@@ -848,18 +847,14 @@ pub(super) fn draw(
             focus: focused,
             rejected,
         } => {
-            let width = usize::from(popup_body_width(area, POPUP));
+            let width = popup_body_width(area, POPUP);
             let toggle = |on: bool, label: &str, index: usize| {
                 let line = choice_line(
                     &format!("[{}] {label}", if on { "x" } else { " " }),
-                    if *focused == index {
-                        "Space toggles"
-                    } else {
-                        ""
-                    },
+                    "",
                     true,
                     false,
-                    width,
+                    usize::from(width),
                 );
                 if *focused == index {
                     line.style(Style::default().add_modifier(Modifier::BOLD))
@@ -867,44 +862,41 @@ pub(super) fn draw(
                     line
                 }
             };
+            let destination = RepositoryRef::parse(repository.trim())
+                .ok()
+                .filter(|reference| !reference.is_wildcard())
+                .and_then(|reference| {
+                    warehouse::destination(&session.config, &reference, home).ok()
+                })
+                .map_or("…".to_owned(), |path| shown(&path, home));
             let mut lines = vec![
-                Line::raw("Repository"),
+                Line::styled("repository", dim()),
                 text_line(repository, *focused == 0, "github.com/owner/name"),
-                Line::raw("Description · optional"),
+                Line::styled("description", dim()),
                 text_line(description, *focused == 1, "none"),
                 toggle(*private, "Private", 2),
-                toggle(*register, "Register after cloning", 3),
+                toggle(*register, "Register", 3),
             ];
             lines.extend(rejected_line(rejected));
+            lines.push(Line::default());
+            lines.extend(exact_field_lines(
+                "clone to",
+                &destination,
+                Style::default(),
+                width,
+            ));
             lines.extend([
-                Line::styled(
-                    "Lager creates it on GitHub, then clones it into its place under root.",
-                    dim(),
-                ),
                 Line::default(),
-                choice_line(
-                    "Create and clone",
-                    &keys(Mode::Input, Action::Accept),
-                    true,
-                    false,
-                    width,
-                ),
-                choice_line(
-                    "Cancel",
-                    &keys(Mode::Input, Action::Cancel),
-                    true,
-                    false,
-                    width,
-                ),
+                choice_line("Create and clone", "", true, false, usize::from(width)),
             ]);
             (
                 POPUP,
                 "New repository on GitHub".to_owned(),
                 lines,
                 format!(
-                    "{} · Tab next field · {}",
-                    hint(Mode::Input, Action::Accept, "create and clone"),
-                    hint(Mode::Input, Action::Cancel, "cancel")
+                    "Tab focus · Space toggle · {} · {}",
+                    hint(Mode::Input, Action::Accept, "choose"),
+                    hint(Mode::Input, Action::Cancel, "back")
                 ),
             )
         }
@@ -925,10 +917,7 @@ pub(super) fn draw(
                 .ok()
                 .filter(|_| remote::valid_name(text))
                 .and_then(|renamed| warehouse::destination(&session.config, &renamed, home).ok());
-            let mut lines = vec![
-                Line::raw(format!("New name · same owner: {}", escape(owner))),
-                text_line(text, true, ""),
-            ];
+            let mut lines = vec![Line::styled("name", dim()), text_line(text, true, "")];
             lines.extend(rejected_line(rejected));
             lines.push(Line::default());
             lines.extend(exact_field_lines(
@@ -979,21 +968,7 @@ pub(super) fn draw(
             ));
             lines.extend([
                 Line::default(),
-                choice_line(
-                    "Rename",
-                    &keys(Mode::Input, Action::Accept),
-                    true,
-                    false,
-                    usize::from(width),
-                ),
-                choice_line(
-                    "Cancel",
-                    &keys(Mode::Input, Action::Cancel),
-                    true,
-                    false,
-                    usize::from(width),
-                ),
-                Line::styled("GitHub redirects the old URL.", dim()),
+                choice_line("Rename", "", true, false, usize::from(width)),
             ]);
             (
                 WIDE_POPUP,
@@ -1001,8 +976,8 @@ pub(super) fn draw(
                 lines,
                 format!(
                     "{} · {}",
-                    hint(Mode::Input, Action::Accept, "rename"),
-                    hint(Mode::Input, Action::Cancel, "cancel")
+                    hint(Mode::Input, Action::Accept, "choose"),
+                    hint(Mode::Input, Action::Cancel, "back")
                 ),
             )
         }
@@ -1076,7 +1051,7 @@ pub(super) fn draw(
             ));
             let ready = deletable(reference, checkout, text);
             let reason = if text != &reference.path {
-                format!("type {} first", escape(&reference.path))
+                "name does not match yet".to_owned()
             } else if matches!(checkout, Some((_, Err(_)))) {
                 "checkout could not be checked · see CHECKOUT".to_owned()
             } else if !ready {
@@ -1089,7 +1064,7 @@ pub(super) fn draw(
                 Line::raw(format!("Type {} to confirm", escape(&reference.path))),
                 text_line(text, true, ""),
                 Line::default(),
-                choice_line("Cancel", "default", true, !delete, usize::from(width)),
+                choice_line("Cancel", "", true, !delete, usize::from(width)),
                 choice_line(
                     "Delete everywhere",
                     &reason,
@@ -1122,12 +1097,12 @@ pub(super) fn draw(
                 vec![
                     Line::raw(escape(remote::visibility_question(reference, *target))),
                     Line::default(),
-                    choice_line("Cancel", "default", true, !confirm, width),
+                    choice_line("Cancel", "", true, !confirm, width),
                     choice_line(label, "", true, *confirm, width),
                 ],
                 format!(
                     "{} focus · {} · {}",
-                    super::rows_hint(bindings, Mode::Confirmation, true),
+                    super::rows_hint(bindings, Mode::Confirmation, false),
                     hint(Mode::Confirmation, Action::Accept, "choose"),
                     hint(Mode::Confirmation, Action::Cancel, "cancel")
                 ),

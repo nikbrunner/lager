@@ -13367,11 +13367,24 @@ fn inventory_creates_a_github_repository_and_clones_it_into_a_new_row() {
                     "New repository on GitHub",
                     "github.com/",
                     "[x] Private",
-                    "[x] Register after cloning",
+                    "[x] Register",
+                    "absent: after cloning",
+                    "absent: Lager creates",
+                    "absent: Cancel",
+                    "Tab focus · Space toggle · Enter choose · Esc back",
+                    "Scan complete · 0 repositories · 0 declarations",
                 ],
                 b"org/demo\tA demo".to_vec(),
             ),
-            (vec!["github.com/org/demo", "A demo█"], b"\r".to_vec()),
+            (
+                vec![
+                    "github.com/org/demo",
+                    "A demo█",
+                    "pair: to ~/repos/org/demo",
+                    "absent: Space toggles",
+                ],
+                b"\r".to_vec(),
+            ),
             (
                 vec![
                     "Batch / Clone + register",
@@ -13413,7 +13426,7 @@ fn inventory_renames_a_github_repository_and_moves_its_row() {
                 b"m\rjjjjjj\r".to_vec(),
             ),
             (
-                vec!["Rename on github.com", "same owner: org"],
+                vec!["Rename on github.com", "absent: same owner"],
                 b"-cli".to_vec(),
             ),
             (
@@ -13478,7 +13491,11 @@ fn inventory_delete_stays_disabled_until_the_typed_name_matches() {
                     "nothing local would be lost",
                     "declaration removed",
                     "Type org/jqk to confirm",
-                    "type org/jqk first",
+                    "name does not match yet",
+                    "absent: first",
+                    "absent: default",
+                    "Tab focus · Enter choose · Esc cancel",
+                    "No active operation",
                 ],
                 b"org/jq".to_vec(),
             ),
@@ -13486,7 +13503,7 @@ fn inventory_delete_stays_disabled_until_the_typed_name_matches() {
                 vec![
                     "Delete everywhere / org/jqk",
                     "org/jq█",
-                    "type org/jqk first",
+                    "name does not match yet",
                 ],
                 b"k\r".to_vec(),
             ),
@@ -13674,19 +13691,26 @@ fn inventory_make_private_asks_first_with_its_consequences() {
         &[
             (vec!["NORMAL · 1 row", "absent: Scanning"], b"V".to_vec()),
             (
-                vec!["Change visibility / demo", "pair: private… asks"],
+                vec!["Change visibility / demo", "Make private…", "absent: asks"],
                 b"j\r".to_vec(),
             ),
             (
                 vec![
                     "Make private / org/demo",
                     "its stars and watchers",
-                    "pair: Cancel default",
+                    "Cancel",
+                    "absent: default",
+                    "j/k focus · Enter choose · Esc cancel",
+                    "No active operation",
                 ],
                 b"j".to_vec(),
             ),
             (vec!["Make private / org/demo"], b"\r".to_vec()),
-            (vec!["org/demo: made private"], b"q".to_vec()),
+            (vec!["org/demo: made private"], b"m\r".to_vec()),
+            (
+                vec!["Repository actions / demo", "pair: public… private"],
+                vec![17],
+            ),
         ],
         32,
         132,
@@ -13732,6 +13756,69 @@ fn inventory_a_refused_rename_reopens_its_form_with_the_reason() {
             .iter()
             .any(|call| call.contains("repo rename"))
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_rename_form_holds_one_hint_row_over_an_empty_hint_bar_and_refuses_a_bad_name() {
+    let fixture = GhFixture::new(
+        "[providers.\"github.com\"]\npreset = \"github\"\nremote_actions = [\"rename\"]\n\n\
+         [inventory.keys.normal]\nrename = [\"N\"]\n\n\
+         [[repositories]]\nurl = \"github.com/org/demo\"\n",
+    );
+    let mut refused = String::new();
+    run_inventory_pty_with_exit_observing(
+        &mut fixture.command(),
+        &[
+            (vec!["NORMAL · 1 row", "absent: Scanning"], b"N".to_vec()),
+            (
+                vec![
+                    "Rename on github.com",
+                    "demo█",
+                    "pair: GitHub org/demo",
+                    "Enter choose · Esc back",
+                    "No active operation",
+                    "absent: same owner",
+                    "absent: redirects",
+                    "absent: Cancel",
+                ],
+                b"/x\r".to_vec(),
+            ),
+            (
+                vec!["Rejected: use letters, digits, -, _ and . without a leading -"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL", "Rename cancelled · nothing changed"],
+                b"q".to_vec(),
+            ),
+        ],
+        24,
+        80,
+        0,
+        |action, _, frame| {
+            if action == 2 {
+                refused = frame.to_owned();
+            }
+        },
+    );
+    let screen = screen_text(&refused, 24, 80);
+    let lines = screen.split('\n').collect::<Vec<_>>();
+    assert!(
+        lines.iter().any(|line| line
+            .split('│')
+            .nth(1)
+            .is_some_and(|body| body.trim() == "Enter choose · Esc back")),
+        "{screen}"
+    );
+    assert_eq!(lines[23], "", "{screen}");
+    assert!(
+        styled_screen(&refused, 24, 80)[23]
+            .iter()
+            .all(|(_, reversed)| *reversed),
+        "the empty hint bar stays a bar:\n{screen}"
+    );
+    assert!(fixture.calls().iter().all(|call| !call.contains("rename")));
 }
 
 #[cfg(unix)]

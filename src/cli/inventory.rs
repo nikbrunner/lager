@@ -3006,14 +3006,7 @@ fn status_lines(
     if let Some(RemoteState::Failed(failures)) = remote
         && complete
         && message.is_none()
-        && !matches!(
-            view,
-            View::Search
-                | View::RemoteCreateInput
-                | View::RemoteRenameInput
-                | View::RemoteDeleteConfirm
-                | View::RemoteVisibilityConfirm
-        )
+        && view != View::Search
     {
         lines.push(Line::styled(format!("! {failures}"), warn()));
         return lines;
@@ -3033,12 +3026,6 @@ fn status_lines(
         ),
         _ if message.is_some() && complete => message.unwrap_or_default().to_owned(),
         _ if message.is_some() => format!("{state} · {}", message.unwrap_or_default()),
-        View::RemoteDeleteConfirm | View::RemoteVisibilityConfirm => {
-            "Nothing changes until you confirm".to_owned()
-        }
-        View::RemoteCreateInput | View::RemoteRenameInput => {
-            "Ordinary keys type text · nothing changes on GitHub yet".to_owned()
-        }
         View::Inspect
         | View::Preview
         | View::AddInput
@@ -3052,7 +3039,11 @@ fn status_lines(
         | View::WorktreeInput
         | View::WorktreePlan
         | View::WorktreeConfirm
-        | View::WorktreeBlocked => state.to_owned(),
+        | View::WorktreeBlocked
+        | View::RemoteCreateInput
+        | View::RemoteRenameInput
+        | View::RemoteDeleteConfirm
+        | View::RemoteVisibilityConfirm => state.to_owned(),
         View::Normal if complete && host_notice.is_some() => {
             host_notice.unwrap_or_default().to_owned()
         }
