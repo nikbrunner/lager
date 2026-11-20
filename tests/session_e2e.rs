@@ -639,6 +639,43 @@ fn a_removed_worktree_cannot_be_opened_but_its_session_closes() {
 }
 
 #[test]
+fn a_worktree_removed_through_git_closes_its_session_by_path() {
+    let fixture = Fixture::new();
+    let spike = fixture.linked("spike");
+    assert!(
+        fixture
+            .session(&["create", "acme/core", "spike"])
+            .status
+            .success()
+    );
+    git(
+        &fixture.primary,
+        &["worktree", "remove", spike.to_str().unwrap()],
+    );
+
+    let output = fixture.session(&["close", spike.to_str().unwrap()]);
+    assert_eq!(stderr(&output), "");
+    assert_eq!(stdout(&output), "Closed session core · Spike\n");
+    assert!(output.status.success());
+    assert_eq!(
+        fixture
+            .calls()
+            .iter()
+            .filter(|call| call.contains("session.destroy"))
+            .count(),
+        1
+    );
+    assert_eq!(stdout(&fixture.session(&["list"])), "");
+
+    let again = fixture.session(&["close", spike.to_str().unwrap()]);
+    assert_eq!(
+        stderr(&again),
+        format!("error: not a Git checkout: {}\n", spike.display())
+    );
+    assert_eq!(again.status.code(), Some(1));
+}
+
+#[test]
 fn a_worktree_named_or_reached_by_path_has_one_session() {
     let fixture = Fixture::new();
     let listed = fixture.linked("spike");

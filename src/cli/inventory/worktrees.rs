@@ -243,6 +243,8 @@ pub(super) fn open(
                 .position(|(record, ..)| record.is_primary)
                 .unwrap_or(0);
             selection.worktrees = Some(popup);
+            // A session made outside this inventory gets its mark and its close line.
+            session.list_sessions();
         }
         Err(reason) => {
             session.message = Some(format!("Worktrees unavailable: {}", escape(reason)));

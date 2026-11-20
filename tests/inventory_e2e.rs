@@ -14737,6 +14737,51 @@ fn inventory_worktree_popup_closes_a_session_only_when_ticked_and_after_the_remo
 
 #[cfg(unix)]
 #[test]
+fn inventory_worktree_popup_sees_a_session_created_after_the_inventory_started() {
+    let temp = temp_dir();
+    let (home, config, core) = worktree_fixture(temp.path(), SESSION_SECTION);
+    let draft = linked_worktree(&core, "draft", &["-b", "draft"]);
+    let (mut command, state) = session_tui(temp.path(), &home, &config);
+
+    run_inventory_pty_with_exit(
+        &mut command,
+        &[
+            // `s session` shows once the first lookup has been answered.
+            (
+                [&POPUP_READY[..], &["pair: s session"]].concat(),
+                b"w".to_vec(),
+            ),
+            (
+                vec!["pair: ● ~/repos/org/core.worktrees/draft"],
+                b"jr".to_vec(),
+            ),
+            (
+                vec!["Remove worktree / draft", "[x] Close session"],
+                b"j\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Removed worktree ~/repos/org/core.worktrees/draft · branch draft kept · Closed session core · Draft",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "absent: Worktrees /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        0,
+        |action| {
+            if action == 0 {
+                create_sessions(temp.path(), &home, &config, &[&draft]);
+            }
+        },
+    );
+    assert!(!draft.exists());
+    assert_eq!(rex_calls(&state, "session.destroy"), 1);
+}
+
+#[cfg(unix)]
+#[test]
 fn inventory_worktree_popup_keeps_the_session_of_a_blocked_worktree_open() {
     let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), SESSION_SECTION);

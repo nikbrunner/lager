@@ -7,7 +7,9 @@ use serde::Serialize;
 
 use super::args::{SessionArgs, SessionCommand};
 use super::worktree::{Settings, error, is_path};
-use crate::application::ports::{HostError, Recorded, WorktreeFilesystem, WorktreeGit};
+use crate::application::ports::{
+    HostError, Recorded, SessionRecords, WorktreeFilesystem, WorktreeGit,
+};
 use crate::application::sessions::{self, Ensured, SessionError};
 use crate::application::worktrees;
 use crate::domain::session::Layout;
@@ -67,13 +69,14 @@ pub(super) fn run(config_path: &Path, command: SessionCommand) -> i32 {
                         Ok(())
                     }
                 }),
-            SessionCommand::Close(args) => checkout(&settings, &args).and_then(|(path, _)| {
-                match sessions::close(&host, &records, &path).map_err(failure)? {
-                    Some(recorded) => println!("Closed session {}", escape(&recorded.label)),
-                    None => println!("No session for {}", escape(path.display())),
-                }
-                Ok(())
-            }),
+            SessionCommand::Close(args) => recorded_or_checkout(&settings, &args, &records)
+                .and_then(|path| {
+                    match sessions::close(&host, &records, &path).map_err(failure)? {
+                        Some(recorded) => println!("Closed session {}", escape(&recorded.label)),
+                        None => println!("No session for {}", escape(path.display())),
+                    }
+                    Ok(())
+                }),
             SessionCommand::List(args) => sessions::list(&host, &records)
                 .map_err(failure)
                 .and_then(|listed| {
@@ -160,6 +163,30 @@ fn checkout(settings: &Settings, args: &SessionArgs) -> Result<(PathBuf, String)
     };
     let label = label(&repository.primary, &checkout);
     Ok((checkout, label))
+}
+
+/// The checkout `args` names for closing. A path Git no longer knows still names the session
+/// recorded under it, so a worktree removed outside lager keeps a way to close its session.
+fn recorded_or_checkout(
+    settings: &Settings,
+    args: &SessionArgs,
+    records: &SessionFile,
+) -> Result<PathBuf, Lines> {
+    let missing = match checkout(settings, args) {
+        Ok((path, _)) => return Ok(path),
+        Err(lines) => lines,
+    };
+    if args.name.is_some() || !is_path(&args.repository) {
+        return Err(missing);
+    }
+    let path = key(&worktrees::absolute(
+        &settings.cwd,
+        Path::new(&args.repository),
+    ));
+    match records.update(|records| records.contains_key(&path)) {
+        Ok(true) => Ok(path),
+        _ => Err(missing),
+    }
 }
 
 /// The session label of `checkout`, a linked worktree unless it is `primary`.
