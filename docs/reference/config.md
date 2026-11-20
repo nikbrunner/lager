@@ -178,7 +178,7 @@ The section is validated whenever the configuration is loaded, by every lager co
 | `session.layouts.default: tab T: pane "X" is named twice` | A split's `pane` names a pane that tab `T` already has. |
 | `session.layouts.default: ratio R is not between 0 and 1` | A `ratio` is 0, 1 or outside that range. |
 
-`lager session` prints these as `error: invalid config: MESSAGE`; `status` and the other repository commands print `lager: invalid config: MESSAGE`.
+`lager session` and `lager worktree` print these as `error: invalid config: MESSAGE`; `status` and the other repository commands print `lager: invalid config: MESSAGE`.
 
 Unknown keys inside `[session]` are errors, unlike unknown keys at the top level, which only warn. A missing `host`, an unknown host, an unknown direction or an unknown key fails with the TOML parser's message, for example:
 

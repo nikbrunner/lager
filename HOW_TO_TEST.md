@@ -11,10 +11,11 @@ For the inventory TUI, use the [inventory acceptance walkthrough](docs/how-to/ve
 - Agent platform: macOS ARM64. Linux evidence is outstanding.
 - Change: atomic registration, URL retention, guarded removal, child-result cancellation,
   terminal-safe human fields, config/provider acceptance evidence, worktree
-  commands and the Worktrees popup, remote discovery in the inventory, and the
-  session commands.
+  commands and the Worktrees popup, remote discovery in the inventory, the
+  session commands, the session flags of the worktree commands, sessions in the
+  inventory and its Worktrees popup, and the lean popups.
 - Local evidence: formatting, warning-denying Clippy, the locked all-target suite
-  (516 tests), and the release build passed on macOS ARM64.
+  and the release build passed on macOS ARM64.
 - Boundary: native OS/shell signal and job-control behavior is unchanged.
   Custom signal forwarding and universal signal-driven terminal restoration are
   deferred; this checklist does not claim those guarantees.
@@ -91,7 +92,7 @@ export PRIMARY
 ```
 
 - [ ] Run `lager worktree list "$PRIMARY"`; expect one line with the primary path, branch and `primary`. Run `lager worktree add "$REF" review </dev/null`; expect Git's own output and `Created worktree $PRIMARY.worktrees/review on new branch review`. List again, then with `--json`; expect two records, the new one with `"branch": "refs/heads/review"` and `"is_primary": false`.
-  - Agent check: PASS — run in a sandbox on macOS ARM64 with the debug binary (the primary's branch was Git's default `master`); `worktree_e2e` (80 tests) covers branch modes, placement, collisions and JSON failures.
+  - Agent check: PASS — run in a sandbox on macOS ARM64 with the debug binary (the primary's branch was Git's default `master`); `worktree_e2e` covers branch modes, placement, collisions and JSON failures.
 
 - [ ] Run `lager worktree add "$REF" review </dev/null` a second time; expect exit 1 with `branch already exists: review; --branch checks it out`, and nothing new on disk. Run `lager worktree add "$REF" spike --path "$(cd "$SANDBOX" && pwd -P)/spike" --start HEAD </dev/null`; expect the worktree at the explicit path and the configuration file unchanged. The physical path matters on macOS, where `/var` is a symlink and a destination below a symlink is refused.
   - Agent check: PASS — run in the same sandbox.
@@ -100,7 +101,7 @@ export PRIMARY
   - Agent check: PASS — run in the same sandbox.
 
 - [ ] In a real terminal, open `lager tui`, select the `remote` row and press `w`. Expect a popup listing the primary checkout and `spike` with path, branch and state. Press `a`, type `popup`, press Enter; expect the planned path `$PRIMARY.worktrees/popup` and a new branch, and nothing on disk before "Create worktree" is chosen. Create it, then select it, press `r` and choose Cancel; it stays. Press `r` again and remove it. On a missing or wildcard row, `w` reports that worktrees are unavailable.
-  - Agent check: PASS — `inventory_worktree_popup_*` PTY tests (14) cover listing, copy, add through plan, removal with losses, blockers, unavailable rows, keys typed before a confirmation, and Ctrl-C during Git. Real-terminal acceptance remains for the tester.
+  - Agent check: PASS — `inventory_worktree_popup_*` PTY tests cover listing, copy, add through plan, removal with losses, blockers, unavailable rows, keys typed before a confirmation, and Ctrl-C during Git. Real-terminal acceptance remains for the tester.
 
 ## Remote discovery
 
@@ -210,7 +211,7 @@ session_tui() {
 - [ ] In the first pane, run `session_tui`, select `remote` and press `w`, then `a`. Type `desk` and press Enter. Expect the plan with `session  remote · Desk`, the line `[x] Open session` above `Create worktree`, and the hint row `j/k select · s session · Enter choose · Esc back`. Press Enter. Expect Git's output, then the inventory closes and the shell's last two lines read `Created worktree ~/repos/remote.worktrees/desk on new branch desk` and `Opened session remote · Desk`. `echo $?` prints `0`, and Rex comes to the front on a new session `remote · Desk`.
   - Agent check: NOT RUN — moves the Rex view. `inventory_e2e::inventory_worktree_popup_opens_the_session_of_a_worktree_it_creates` passes against a fake `rex`.
 
-- [ ] Go back to the first pane, run `session_tui` and press `w` on `remote`. Expect `●` before the `desk` row only and `s session` in the hint row. Select `desk` and press `r`. Expect `session  remote · Desk · open` and `[x] Close session` with `ends its programs`, and the hint row `j/k focus · s session · Enter choose · Esc cancel`. Press `j`, then Enter. Expect `Removed worktree ~/repos/remote.worktrees/desk · branch desk kept · Closed session remote · Desk` in the status line, the inventory still open, and no `remote · Desk` session in Rex.
+- [ ] Go back to the first pane, run `session_tui` and press `w` on `remote`. Expect `●` before the primary row and before `desk`, none before `spike`, and `s session` in the hint row. Select `desk` and press `r`. Expect `session  remote · Desk · open` and `[x] Close session` with `ends its programs`, and the hint row `j/k focus · s session · Enter choose · Esc cancel`. Press `j`, then Enter. Expect `Removed worktree ~/repos/remote.worktrees/desk · branch desk kept · Closed session remote · Desk` in the status line, the inventory still open, and no `remote · Desk` session in Rex.
   - Agent check: NOT RUN — needs the real Rex. `inventory_worktree_popup_closes_a_session_only_when_ticked_and_after_the_removal` passes against the fake; its log shows no destroy for the cleared tick and one destroy after the ticked removal.
 
 - [ ] Create the worktree `inside` from the popup as you created `desk`, so Rex shows the session `remote · Inside`. In a pane of that session, set `SANDBOX=…` and `BIN=…`, define `session_tui` as above, run it and press `w` on `remote`. Select `inside`, press `r`, then `j` and Enter. Expect the session to close with the inventory in it. From the first pane, `session_lager session list` prints no `remote · Inside` line, and `session_lager worktree list "$PRIMARY"` has no `inside` row.

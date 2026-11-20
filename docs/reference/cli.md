@@ -387,7 +387,7 @@ The inventory stays open in these cases:
 
 When Rex is missing or stopped, its first answer turns the status line into `Sessions unavailable: REASON` until the next refresh, and the marks and the `s session` hint stay hidden. A missing Rex does not change the exit status. A list that fails on a running Rex, or a record file that cannot be read, is a problem as well.
 
-An inventory that quits while a session opens restores the terminal, prints `lager: waiting for session LABEL to open…` on stderr and waits for Rex, so lager records the session. Each Rex call is cut off after 10 seconds, and keys or signals do not end the wait. Then it prints the session line, or the status line of a failed open after `lager: `, and a failure on a running Rex makes it exit `1`. Without the section the inventory shows nothing about sessions and never calls Rex.
+An inventory that quits while a session opens restores the terminal, prints `lager: waiting for session LABEL to open…` on stderr and waits for Rex, so lager records the session. An open makes up to four Rex calls, each cut off after 10 seconds, and keys or signals do not end the wait. Then it prints the session line, or the status line of a failed open after `lager: `, and a failure on a running Rex makes it exit `1`. Without the section the inventory shows nothing about sessions and never calls Rex.
 
 #### Sessions in the Worktrees popup
 
@@ -401,6 +401,8 @@ The plan of a new worktree shows its session label in a `session` field and the 
 Created worktree ~/repos/org/core.worktrees/fix on new branch fix
 Opened session core · Fix
 ```
+
+When a session for that path is still running, the second line reads `Switched to session LABEL`.
 
 When that open cannot run, the worktree stays created and the inventory stays open. The status line starts with the worktree line, which reads `on branch BRANCH` for a branch that existed:
 
@@ -615,7 +617,7 @@ Lager checks again immediately before it calls Git. If the worktree differs from
 
 `--close-session` closes the worktree's [session](#sessions) once Git has removed the worktree. A refused, blocked or declined removal leaves the session running. After the `Removed worktree` line comes `Closed session LABEL`, or `No session for PATH` when the worktree has no live session. Closing a session ends every program in its panes.
 
-A `--close-session` without a `[session]` section exits `1` with `error: sessions are not configured; add [session] to CONFIG` before lager inspects or removes anything. When the worktree is removed and closing fails, the command prints `error: worktree removed, session not closed: REASON` and exits `1`; the session keeps running and stays in `lager session list`.
+A `--close-session` without a `[session]` section exits `1` with `error: sessions are not configured; add [session] to CONFIG` before lager inspects or removes anything. When the worktree is removed and closing fails, the command prints `error: worktree removed, session not closed: REASON` and exits `1`; the session keeps running and stays in `lager session list`. `lager session close PATH` closes it by the worktree's path.
 
 The worktree commands print `error:` and `hint:` lines, the session commands print `error:` lines, and the other commands prefix diagnostics with `lager:`.
 
@@ -645,7 +647,7 @@ error: several linked worktrees are named spike
   /home/dev/two/spike
 ```
 
-`open` and `create` need the checkout's directory and exit `1` with `error: not a Git checkout: PATH` without it; for a reference, `PATH` is the destination under the root. `close` also reaches a worktree whose directory is gone, as long as Git still lists it.
+`open` and `create` need the checkout's directory and exit `1` with `error: not a Git checkout: PATH` without it; for a reference, `PATH` is the destination under the root. `close` also reaches a worktree whose directory is gone. While Git still lists the worktree, `REPOSITORY NAME` names it. A worktree removed with `git worktree remove`, or by `lager worktree remove` without `--close-session`, leaves its session running and in `lager session list`. Git does not list that worktree, so `REPOSITORY NAME` cannot name it; `lager session close PATH` closes the session recorded under its path. With no session recorded there, `close` exits `1` with `error: not a Git checkout: PATH`.
 
 ### Labels
 
@@ -659,6 +661,7 @@ A session's label is the primary checkout's directory name, such as `core`. A li
 | `create`, the session exists | `Session LABEL already exists` | `0` |
 | `open`, new or existing | `Opened session LABEL` | `0` |
 | `close` | `Closed session LABEL` | `0` |
+| `close PATH` of a removed worktree with a recorded session | `Closed session LABEL` | `0` |
 | `close`, no live session | `No session for PATH` | `0` |
 | No `[session]` section, or no configuration file | `error: sessions are not configured; add [session] to CONFIG` | `1` |
 | Rex is not installed or not running | `error: session host unavailable: REASON` | `1` |
