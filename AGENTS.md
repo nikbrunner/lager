@@ -21,3 +21,7 @@ Use the five canonical triage labels. Before triaging, read `docs/agents/triage-
 ### Domain docs
 
 Use a single-context layout. Before exploring the codebase, read `docs/agents/domain.md`.
+
+### Design canvas
+
+The Design canvas "Lager" is the working space for all design work: https://claude.ai/artifact/VqhtkQHMxKMFd6T2hN8X9p. Before drawing or changing a screen, a layout or UI wording, read `docs/agents/design-canvas.md`.
