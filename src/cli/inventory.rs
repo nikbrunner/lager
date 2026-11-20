@@ -1991,7 +1991,6 @@ impl TerminalSession {
                     bindings,
                     view,
                     area.width.saturating_sub(4),
-                    acknowledges,
                     !report.rows.is_empty(),
                     hosted.is_some(),
                 );
@@ -2263,7 +2262,7 @@ impl TerminalSession {
                                 (hint(Action::Accept, "choose"), hint(Action::Cancel, "cancel"));
                             // A narrow popup cuts the end of the line: in a removal
                             // confirmation scrolling comes first, since every loss has to be
-                            // seen, then the exit routes; focus also shows in the key bar.
+                            // seen, then the exit routes.
                             let hints = if acknowledges {
                                 let acknowledge = hint(Action::Acknowledge, "acknowledge");
                                 [scroll, acknowledge, choose, cancel, focus_hint]
@@ -2713,7 +2712,6 @@ fn footer_widget(
     bindings: &Bindings,
     view: View,
     width: u16,
-    acknowledges: bool,
     has_rows: bool,
     sessions: bool,
 ) -> Paragraph<'static> {
@@ -2730,89 +2728,6 @@ fn footer_widget(
             (first(Mode::Search, Action::Cancel), "cancel"),
             ("Backspace".to_owned(), "delete"),
         ],
-        View::Menu => vec![
-            (rows_hint(bindings, Mode::Menu, false), "select"),
-            (first(Mode::Menu, Action::Accept), "choose"),
-            (first(Mode::Menu, Action::Cancel), "back"),
-        ],
-        View::AddInput | View::WorktreeInput => vec![
-            (first(Mode::Input, Action::Accept), "preview"),
-            (first(Mode::Input, Action::Cancel), "back"),
-        ],
-        View::RemoteCreateInput => vec![
-            (first(Mode::Input, Action::Accept), "create"),
-            ("Tab".to_owned(), "next field"),
-            (first(Mode::Input, Action::Cancel), "cancel"),
-        ],
-        View::RemoteRenameInput => vec![
-            (first(Mode::Input, Action::Accept), "rename"),
-            (first(Mode::Input, Action::Cancel), "cancel"),
-        ],
-        View::RemoteDeleteConfirm => vec![
-            ("Tab".to_owned(), "focus"),
-            (first(Mode::Input, Action::Accept), "choose"),
-            (first(Mode::Input, Action::Cancel), "cancel"),
-        ],
-        View::RemoteVisibilityConfirm => vec![
-            (rows_hint(bindings, Mode::Confirmation, false), "focus"),
-            (first(Mode::Confirmation, Action::Accept), "choose"),
-            (first(Mode::Confirmation, Action::Cancel), "cancel"),
-        ],
-        View::AddPreview => vec![
-            (rows_hint(bindings, Mode::Confirmation, false), "select"),
-            (first(Mode::Confirmation, Action::Accept), "choose"),
-            (
-                first(Mode::Confirmation, Action::Cancel),
-                "back to reference",
-            ),
-        ],
-        View::WorktreePlan => vec![
-            (rows_hint(bindings, Mode::Confirmation, false), "select"),
-            (first(Mode::Confirmation, Action::Accept), "choose"),
-            (first(Mode::Confirmation, Action::Cancel), "back to name"),
-        ],
-        View::WorktreeConfirm => vec![
-            (rows_hint(bindings, Mode::Confirmation, false), "focus"),
-            (first(Mode::Confirmation, Action::Accept), "choose"),
-            (first(Mode::Confirmation, Action::Cancel), "cancel"),
-        ],
-        View::WorktreeBlocked => vec![(first(Mode::Inspection, Action::Cancel), "back")],
-        View::Worktrees => vec![
-            (rows_hint(bindings, Mode::Worktrees, false), "select"),
-            (first(Mode::Worktrees, Action::Add), "add"),
-            (first(Mode::Worktrees, Action::Remove), "remove"),
-            (first(Mode::Worktrees, Action::Copy), "copy path"),
-            (first(Mode::Worktrees, Action::Cancel), "close"),
-        ],
-        View::QuitBatch => vec![
-            (rows_hint(bindings, Mode::Confirmation, false), "focus"),
-            (first(Mode::Confirmation, Action::Accept), "choose"),
-            (first(Mode::Confirmation, Action::Cancel), "return"),
-        ],
-        View::Preview => vec![
-            (rows_hint(bindings, Mode::Confirmation, false), "focus"),
-            (
-                if acknowledges {
-                    first(Mode::Confirmation, Action::Acknowledge)
-                } else {
-                    String::new()
-                },
-                "acknowledge",
-            ),
-            (
-                paired_keys(
-                    &bindings.keys(Mode::Confirmation, Action::PageUp),
-                    &bindings.keys(Mode::Confirmation, Action::PageDown),
-                ),
-                "scroll",
-            ),
-            (first(Mode::Confirmation, Action::Accept), "choose"),
-            (first(Mode::Confirmation, Action::Cancel), "cancel"),
-        ],
-        View::Help | View::Problems | View::Batch => vec![
-            (rows_hint(bindings, Mode::Inspection, false), "scroll"),
-            (first(Mode::Inspection, Action::Cancel), "close"),
-        ],
         // With no rows only the actions that need none are offered.
         View::Normal if !has_rows => [
             (Action::Add, "add"),
@@ -2823,7 +2738,7 @@ fn footer_widget(
         ]
         .map(|(action, label)| (first(Mode::Normal, action), label))
         .to_vec(),
-        View::Normal | View::Inspect => {
+        View::Normal => {
             let mut items = vec![(rows_hint(bindings, Mode::Normal, false), "rows")];
             items.extend(
                 [
@@ -2845,6 +2760,8 @@ fn footer_widget(
             );
             items
         }
+        // A popup carries its own hint row.
+        _ => Vec::new(),
     };
     let mut items = items
         .into_iter()
@@ -2859,7 +2776,6 @@ fn footer_widget(
     };
     // Least needed first; exit, help and menu routes always stay visible.
     for dropped in [
-        "scroll",
         "session",
         "worktrees",
         "mark",

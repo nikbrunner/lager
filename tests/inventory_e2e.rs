@@ -295,9 +295,16 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         );
 
         let screen = screen_text(inspect, rows, cols);
-        let lines = screen.lines().collect::<Vec<_>>();
+        let lines = screen.split('\n').collect::<Vec<_>>();
         assert!(lines[0].ends_with("INSPECT · 2 rows"), "{screen}");
-        assert_eq!(&lines[rows - footer.len()..], footer, "{screen}");
+        assert_eq!(lines[rows - 1], "", "{screen}");
+        assert_eq!(
+            styled_screen(inspect, rows, cols)[rows - 1]
+                .iter()
+                .all(|(_, reversed)| *reversed),
+            !no_color,
+            "under a popup the hint bar stays, empty:\n{screen}"
+        );
         let title = lines
             .iter()
             .position(|line| line.contains("│  Inspect / alpha  "))
@@ -364,10 +371,10 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         );
 
         let screen = screen_text(help, rows, cols);
-        let lines = screen.lines().collect::<Vec<_>>();
+        let lines = screen.split('\n').collect::<Vec<_>>();
         assert!(lines[0].ends_with("HELP · 2 rows"), "{screen}");
         assert_eq!(lines[rows - 2], "  No active operation", "{screen}");
-        assert_eq!(lines[rows - 1], "  j/k scroll  Esc close", "{screen}");
+        assert_eq!(lines[rows - 1], "", "{screen}");
         let title = lines
             .iter()
             .position(|line| line.contains("Keyboard / effective bindings"))
@@ -4632,9 +4639,8 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
                     "Remove checkouts / keep registration",
                     "LOSS ACKNOWLEDGMENT REQUIRED alpha",
                     "no upstream",
-                    // At 80 columns the exit routes stay in the popup and in the hint line.
+                    // At 80 columns the exit routes stay in the popup.
                     "Space acknowledge · Enter choose · Esc cancel",
-                    "Space acknowledge  Enter choose  Esc cancel",
                 ],
                 b"\x1b".to_vec(),
             ),
@@ -11401,10 +11407,10 @@ const REMOTE_READY: [&str; 3] = [
 ];
 
 /// The regions every remote board draws, top to bottom: header bar, source line, search row,
-/// table, status line and hint footer.
+/// table, status line and hint footer, which is empty under a popup.
 #[cfg(unix)]
 fn assert_remote_regions(screen: &str, header: &str, source: &str, status: &str, footer: &str) {
-    let lines = screen.lines().collect::<Vec<_>>();
+    let lines = screen.split('\n').collect::<Vec<_>>();
     assert!(
         lines[0].starts_with("  LAGER / inventory") && lines[0].ends_with(header),
         "{screen}"
@@ -11413,8 +11419,9 @@ fn assert_remote_regions(screen: &str, header: &str, source: &str, status: &str,
     assert!(lines[2].starts_with("  / "), "{screen}");
     assert_eq!(lines[3], "", "{screen}");
     assert!(lines[4].trim_start().starts_with("repository"), "{screen}");
-    let last = lines.iter().rposition(|line| !line.is_empty()).unwrap();
+    let last = lines.len() - 1;
     assert!(lines[last].contains(footer), "{screen}");
+    assert_eq!(lines[last].is_empty(), footer.is_empty(), "{screen}");
     assert_eq!(lines[last - 1], format!("  {status}"), "{screen}");
 }
 
@@ -11585,7 +11592,7 @@ fn inventory_remote_menu_retries_only_the_failed_provider() {
         "MENU · 5 rows · 1 problem",
         "Local: ready · bitbucket.org: failed · github.com: ready, 3 candidates",
         "! bitbucket.org failed: bitbucket request failed with status 500 Internal Server Error",
-        "back",
+        "",
     );
     let position = |text: &str| {
         controls

@@ -340,6 +340,8 @@ configuration and keeps the query, cursor and marks.
 Problems… lists every failure that makes the inventory exit `1`; the header
 shows their count.
 Popup content scrolls independently of its title and effective action hints.
+A popup shows its hints inside its frame, and the hint bar at the bottom of the
+screen stays empty while it is open.
 In Menu, Inspect, Help, the batch preview, the removal confirmation and the Add preview, q or Esc closes
 the current popup (the Add preview returns to its reference);
 Ctrl-Q quits the app. Normal-mode q and Esc quit.
