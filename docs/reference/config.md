@@ -131,7 +131,7 @@ A canonical ID for a custom host requires a matching provider entry. Full clone 
 
 ## Session
 
-The `[session]` section turns on [`lager session`](cli.md#sessions). It names the terminal host and the layout every new session starts with. Without the section, lager calls no terminal host: the session commands exit `1` and name the missing section, and every other command is unaffected.
+The `[session]` section turns on [`lager session`](cli.md#sessions). It names the terminal host and the layout every new session starts with. Without the section, lager calls no terminal host: the session commands and the session flags of `lager worktree` exit `1` and name the missing section, and every other command is unaffected. With it, `lager worktree list` adds a session column.
 
 ```toml
 [session]

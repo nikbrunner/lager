@@ -31,8 +31,10 @@ the child returns; the session then exits `143` or `129`.
 
 For `worktree`, `1` covers a repository that cannot be found, a refused
 destination or branch, a blocked removal, local losses without `--force`, a
-worktree that changed after its summary was shown, a failed Git command and any
-entry in the `errors` of `worktree list --json`. `2` covers invalid `NAME` or
+worktree that changed after its summary was shown, a failed Git command, any
+entry in the `errors` of `worktree list --json`, a session flag without a
+`[session]` section, and a session that fails after its worktree was created or
+removed. `2` covers invalid `NAME` or
 branch names, `--start` without a new branch, `worktree list` outside a
 repository without a target, `worktree_root` placement of a primary checkout
 outside `root` without `--path`, and `worktree remove` without `--yes` outside a
@@ -40,7 +42,8 @@ terminal. Declining the removal question exits `0`; Ctrl-C at it exits `130`.
 
 For `session`, `0` covers a created, existing, opened or closed session and a `close` that finds no session. `1` covers a missing `[session]` section, an invalid configuration, Rex that is not installed or not running, a Rex call that fails, a missing checkout, a `NAME` that matches no linked worktree or several, and a record file that cannot be locked, read or written. `2` covers invalid arguments.
 
-Native Git and hooks inherit stdin, stdout, and stderr. Ordinary child failures
+Native Git and hooks inherit stdin, stdout, and stderr; under `worktree add --json`
+their stdout goes to stderr. Ordinary child failures
 return aggregate status `1` and allow independent later targets to run.
 An observed child cancellation stops the batch: later targets do not run, and a cancelled clone is
 not registered and does not run its hook. Completed clones and configuration

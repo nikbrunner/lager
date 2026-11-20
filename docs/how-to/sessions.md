@@ -52,6 +52,17 @@ The answer names the session and maps every pane name to Rex's pane id, so an ag
 
 For a session that already existed, the pane ids come from the record lager wrote when it created the session. A pane closed in Rex since then keeps its old id there, so treat the ids of an existing session as possibly stale.
 
+## Start and finish a worktree with its session
+
+The worktree commands open and close the session in the same step:
+
+```sh
+lager worktree add org/project hotfix --open-session
+lager worktree remove ~/repos/org/project.worktrees/hotfix --close-session
+```
+
+`--create-session` on `add` creates the session without switching Rex to it. The [worktrees how-to](worktrees.md#start-a-topic-in-its-own-session) has the details.
+
 ## Close a session
 
 ```sh
@@ -76,7 +87,7 @@ The listing shows the label, path and session id of every checkout with a live s
 - Lager knows only the sessions it created. A session you made by hand in Rex, or one another tool made, is not found. `open` creates a session of its own beside it.
 - The record of sessions lives on this machine, in `sessions.json` in lager's cache directory, `LAGER_CACHE_DIR` or `~/.cache/lager`. Deleting that file makes lager forget its sessions while they keep running in Rex. The next `open` creates a new session. Close the old ones in Rex.
 - A session closed in Rex is gone for lager too. The next `open` or `create` makes a new one.
-- Close a worktree's session before you remove the worktree: run `lager session close REPOSITORY NAME` first. Once Git no longer lists the worktree, whether `lager worktree remove` or `git worktree remove` removed it, lager can no longer name it, and its session stays in `lager session list`. Close that session in Rex. A worktree directory deleted without Git is still listed by Git, and `lager session close REPOSITORY NAME` closes its session.
+- Remove a worktree with `lager worktree remove PATH --close-session` to close its session in the same step. Once Git no longer lists a worktree, lager can no longer name it, so a session left behind by a plain removal stays in `lager session list`. Close that session in Rex. A worktree directory deleted without Git is still listed by Git, and `lager session close REPOSITORY NAME` closes its session.
 
 ## What `open` needs from Rex
 

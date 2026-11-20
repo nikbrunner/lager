@@ -21,6 +21,16 @@ lager worktree add . spike --new-branch dev/spike --start v2.3.0
 
 `--start` takes a local commit, tag or branch. Lager never fetches, so fetch first when the branch or tag lives on the remote only.
 
+## Start a topic in its own session
+
+With a [`[session]` section](sessions.md#set-up-the-section) in the configuration, one command creates the worktree and opens it as a session in Rex:
+
+```sh
+lager worktree add org/project hotfix --open-session
+```
+
+After Git's output and the `Created worktree` line, lager prints `Opened session project · Hotfix` and Rex shows the new session, every pane in the worktree. `--create-session` makes the same session and leaves Rex where it is. When the session cannot be opened, the worktree stays and the command names what went wrong.
+
 ## Put worktrees somewhere else
 
 For one worktree, pass the destination:
@@ -45,7 +55,7 @@ lager worktree list org/project
 lager worktree list --json
 ```
 
-Without an argument the command lists the repository of the working directory. It shows the primary checkout and every linked worktree Git knows, also those created by other tools or placed elsewhere, with branch and `locked` or `prunable` state.
+Without an argument the command lists the repository of the working directory. It shows the primary checkout and every linked worktree Git knows, also those created by other tools or placed elsewhere, with branch and `locked` or `prunable` state. With a `[session]` section, a last column names each worktree's session.
 
 ## Remove a worktree
 
@@ -56,6 +66,14 @@ lager worktree remove ~/repos/org/project.worktrees/hotfix
 Lager shows the path, the branch it keeps and the local files that would be lost, then asks; the answer defaults to no. The branch always stays, so a removed worktree can be added again with `--branch`. With modified, untracked or ignored files the command refuses unless you add `--force`, which accepts exactly those losses. A locked worktree, a detached HEAD that no branch or tag holds, or a populated submodule blocks the removal even with `--force`; the error names the Git command that resolves it.
 
 In scripts, pass `--yes`, and `--force` as well when losses are expected.
+
+To end the worktree's session with it, add `--close-session`:
+
+```sh
+lager worktree remove ~/repos/org/project.worktrees/hotfix --close-session
+```
+
+Lager closes the session only once Git has removed the worktree, and prints `Closed session project · Hotfix`. When the removal is refused or you decline it, the session keeps running.
 
 ## From the inventory
 

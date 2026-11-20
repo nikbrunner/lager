@@ -141,7 +141,7 @@ remote_lager() { PATH="$SANDBOX/tools:$PATH" lager --config "$SANDBOX/remote.tom
 
 ## Sessions
 
-These steps use your real Rex, because they check what it shows. They create one throwaway session for the sandbox `remote` checkout (`$PRIMARY` from Worktrees), labelled `remote`, and close it at the end. Rex must be running, with its app open.
+These steps use your real Rex, because they check what it shows. They create throwaway sessions for the sandbox `remote` checkout (`$PRIMARY` from Worktrees) and for its worktree `topic`, labelled `remote` and `remote · Topic`, and close them at the end. Rex must be running, with its app open.
 
 The wrapper keeps your real `HOME`, unlike `lager` above: lager finds the bundled `rex` under `HOME`, and Rex may find its server through it. Only the configuration and the session record are sandboxed. Name the checkout by path, never by reference.
 
@@ -184,7 +184,13 @@ session_lager() {
 - [ ] In a pane of the `remote` session, set `SANDBOX=…` and `BIN=…` as before and run `env LAGER_CONFIG="$SANDBOX/session.toml" LAGER_CACHE_DIR="$SANDBOX/cache" "$BIN" session close .`. Expect the whole session to close, the pane with it, so the `Closed session remote` line is never seen. From another shell, `session_lager session list` prints nothing, and Rex no longer lists `remote`.
   - Agent check: NOT RUN — closes the session the command runs in. `close_ends_the_session_and_forgets_it` passes against the fake; the record is saved before Rex is asked to close.
 
-- [ ] Clean up if a step failed before the close: `session_lager session close "$PRIMARY"`. Expect `Closed session remote` or `No session for …`, and no `remote` session left in Rex.
+- [ ] From a shell outside the Rex session you want to test, run `session_lager worktree add "$PRIMARY" topic --open-session </dev/null`. Expect Git's output, then `Created worktree …/remote.worktrees/topic on new branch topic` and `Opened session remote · Topic`, and exit 0. Rex comes to the front on a new session `remote · Topic`; `pwd -P` in `Agent I` prints the physical path of `$PRIMARY.worktrees/topic`. `session_lager worktree list "$PRIMARY"` shows `remote · Topic` at the end of the `topic` row.
+  - Agent check: NOT RUN — moves the Rex view. `worktree_e2e::add_open_session_creates_the_session_and_shows_it` and `list_shows_each_worktrees_session_once_sessions_are_configured` pass against a fake `rex`.
+
+- [ ] From a shell outside that session, run `session_lager worktree remove "$PRIMARY.worktrees/topic" --yes --close-session`. Expect the removal summary, `Removed worktree … · branch topic kept` and `Closed session remote · Topic`, exit 0, and the session gone from Rex.
+  - Agent check: NOT RUN — needs the real Rex. `remove_close_session_destroys_only_after_a_successful_removal` passes against the fake; its log shows the close after Git's removal and none after a refused one.
+
+- [ ] Clean up if a step failed before the close: `session_lager session close "$PRIMARY"`. Expect `Closed session remote` or `No session for …`, and no `remote` session left in Rex. If the `topic` worktree is still there, run `session_lager worktree remove "$PRIMARY.worktrees/topic" --yes --force --close-session`.
   - Agent check: NOT RUN — needs the real Rex.
 
 ## Important edge cases

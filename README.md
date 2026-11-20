@@ -101,7 +101,7 @@ See the [configuration reference](docs/reference/config.md) for every field, def
 | `ensure` | Creates missing declared checkouts. | `--include-archived` |
 | `hook` | Runs a declared repository's post-clone hook again. | — |
 | `status`, `list`, `ls` | Prints the rows `tui` shows: declarations, checkouts and their state. With `--remote`, `tui` adds unregistered and excluded candidates that `status` omits. | `--remote`, `--include-archived`, `--registered`, `--json` |
-| `worktree list`, `add`, `remove` | Lists, creates and removes linked worktrees of one repository through native Git. | `--json`, `--branch`, `--new-branch`, `--start`, `--path`, `--yes`, `--force` |
+| `worktree list`, `add`, `remove` | Lists, creates and removes linked worktrees of one repository through native Git. | `--json`, `--branch`, `--new-branch`, `--start`, `--path`, `--open-session`, `--create-session`, `--yes`, `--force`, `--close-session` |
 | `session open`, `create`, `close`, `list` | Opens a checkout's terminal session in Rex, creates it without switching to it, closes it, and lists the checkouts that have one. Needs a `[session]` section in the configuration. | `--json` |
 | `tui` | Opens the inventory in a terminal: it registers, unregisters, clones and removes repositories and browses what the providers list. | `--remote`, `--include-archived`; `r` removes a checkout after confirmation; `w` opens its worktrees; `m` opens the actions; `R` refreshes local state; `q` or Esc quits. |
 

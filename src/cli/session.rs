@@ -38,9 +38,9 @@ pub(super) fn run(config_path: &Path, command: SessionCommand) -> i32 {
                 checkout(&settings, &args)
                     .and_then(present)
                     .and_then(|(path, label)| {
-                        let recorded = sessions::open(&host, &records, &path, &label, &layout)
+                        let opened = sessions::open(&host, &records, &path, &label, &layout)
                             .map_err(failure)?;
-                        println!("Opened session {}", escape(&recorded.label));
+                        println!("Opened session {}", escape(&opened.recorded().label));
                         Ok(())
                     })
             }
@@ -102,7 +102,7 @@ pub(super) fn run(config_path: &Path, command: SessionCommand) -> i32 {
 }
 
 /// The default layout of the `[session]` section; an error when there is none.
-fn layout(config_path: &Path) -> Result<Layout, String> {
+pub(super) fn layout(config_path: &Path) -> Result<Layout, String> {
     let not_configured = || {
         format!(
             "sessions are not configured; add [session] to {}",
@@ -126,13 +126,17 @@ fn line(message: impl std::fmt::Display) -> Lines {
 }
 
 fn failure(error: SessionError) -> Lines {
-    line(match error {
+    line(reason(error))
+}
+
+pub(super) fn reason(error: SessionError) -> String {
+    match error {
         SessionError::Host(HostError::Unavailable(reason)) => {
             format!("session host unavailable: {reason}")
         }
         SessionError::Host(HostError::Failed(reason)) => format!("session host failed: {reason}"),
         SessionError::Records(reason) => reason,
-    })
+    }
 }
 
 /// The canonical checkout `args` names, and its session label. A path names the working tree
@@ -154,14 +158,19 @@ fn checkout(settings: &Settings, args: &SessionArgs) -> Result<(PathBuf, String)
         None => path,
         Some(name) => named(&repository, name)?,
     };
+    let label = label(&repository.primary, &checkout);
+    Ok((checkout, label))
+}
+
+/// The session label of `checkout`, a linked worktree unless it is `primary`.
+pub(super) fn label(primary: &Path, checkout: &Path) -> String {
     let directory = |path: &Path| {
         path.file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default()
     };
-    let worktree = (checkout != repository.primary).then(|| directory(&checkout));
-    let label = sessions::label(&directory(&repository.primary), worktree.as_deref());
-    Ok((checkout, label))
+    let worktree = (checkout != primary).then(|| directory(checkout));
+    sessions::label(&directory(primary), worktree.as_deref())
 }
 
 /// Opening and creating need the checkout's directory; closing also reaches a removed
@@ -184,18 +193,7 @@ fn named(repository: &worktrees::Repository, name: &str) -> Result<PathBuf, Line
         .filter(|record| record.path.file_name() == Some(name.as_ref()))
         .collect();
     let (message, paths): (_, Vec<_>) = match matching.as_slice() {
-        [record] => {
-            // A removed worktree keeps its key through its parent's real path.
-            let canonical = FILES.canonicalize(&record.path).or_else(|_| {
-                let parent = record.path.parent().ok_or_else(String::new)?;
-                Ok::<_, String>(
-                    FILES
-                        .canonicalize(parent)?
-                        .join(record.path.file_name().unwrap_or_default()),
-                )
-            });
-            return Ok(canonical.unwrap_or_else(|_| record.path.clone()));
-        }
+        [record] => return Ok(key(&record.path)),
         [] => (
             format!(
                 "no linked worktree of {} is named {name}",
@@ -221,6 +219,20 @@ fn named(repository: &worktrees::Repository, name: &str) -> Result<PathBuf, Line
         }));
     }
     Err(lines)
+}
+
+/// The record key of a worktree Git lists: its real path, which a removed worktree keeps
+/// through its parent's real path.
+pub(super) fn key(path: &Path) -> PathBuf {
+    let canonical = FILES.canonicalize(path).or_else(|_| {
+        let parent = path.parent().ok_or_else(String::new)?;
+        Ok::<_, String>(
+            FILES
+                .canonicalize(parent)?
+                .join(path.file_name().unwrap_or_default()),
+        )
+    });
+    canonical.unwrap_or_else(|_| path.to_path_buf())
 }
 
 #[derive(Serialize)]

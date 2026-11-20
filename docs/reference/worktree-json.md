@@ -1,6 +1,8 @@
-# `worktree list --json` reference
+# Worktree JSON reference
 
-`lager worktree list [REPOSITORY] --json` writes exactly one JSON object and a newline to stdout. Diagnostics go to stderr, one line each. This schema is separate from [`status --json`](status-json.md).
+`lager worktree list [REPOSITORY] --json` and `lager worktree add … --json` each write exactly one JSON object and a newline to stdout. Diagnostics go to stderr, one line each. These schemas are separate from [`status --json`](status-json.md) and [session JSON](session-json.md).
+
+## `worktree list --json`
 
 ```json
 {
@@ -25,13 +27,13 @@
 
 | Key              | Type    | Meaning                                                                    |
 | ---------------- | ------- | -------------------------------------------------------------------------- |
-| `schema_version` | integer | `1`.                                                                       |
+| `schema_version` | integer | `1`, or `2` with a [`[session]` section](config.md#session).               |
 | `worktrees`      | array   | One record per working tree Git lists for the repository, sorted by `path`. |
 | `errors`         | array   | Every failure that makes the command exit `1`. Empty on success.           |
 
-Keys appear in the order listed here, and every key is present on every record.
+Keys appear in the order listed here. Every key of the schema version is present on every record, so `session` appears on every record in version `2` and on none in version `1`.
 
-## Records
+### Records
 
 The records include the primary checkout and every linked worktree, wherever it sits on disk and whichever tool created it.
 
@@ -47,10 +49,29 @@ The records include the primary checkout and every linked worktree, wherever it 
 | `lock_reason`         | string or null | The reason given with the lock. `null` without a lock or without a reason.                           |
 | `prunable`            | boolean        | Whether Git considers the worktree prunable. Independent of `locked`.                                |
 | `prune_reason`        | string or null | Git's reason, such as `gitdir file points to non-existent location`.                                 |
+| `session`             | object, null or string | Schema version `2` only. The working tree's live session, `null` without one, or `"unknown"` when Rex could not answer. |
 
 Values are original: no escaping beyond JSON's own. Paths are converted to UTF-8; a byte that is not valid UTF-8 becomes U+FFFD.
 
-## Errors
+### Sessions
+
+With a `[session]` section in the configuration, `schema_version` is `2` and every record ends with `session`. Without the section the document is schema version `1` and has no `session` key.
+
+A session object has the keys `id`, `label` and `tabs` of a session in [`session list --json`](session-json.md#list---json):
+
+```json
+"session": {
+  "id": "session:01a1f8ab-8ffc-76ae-836e-30d02892582e",
+  "label": "core · Pinned",
+  "tabs": [
+    { "name": "Agents", "panes": { "Agent I": "block:01a1f8ab-9a0e-7f21-b6c4-2d8e5f7a1c30" } }
+  ]
+}
+```
+
+The command asks Rex once. When Rex is missing, stopped or fails, or lager cannot read its session record file, every record holds `"unknown"`, one `lager: warning:` line on stderr gives the reason, and the exit status stays what the listing makes it. A session lager cannot determine is never reported as `null`.
+
+### Errors
 
 | Key     | Type           | Meaning                                                    |
 | ------- | -------------- | ---------------------------------------------------------- |
@@ -68,7 +89,7 @@ Errors are sorted by `path`, `null` first, then by `code`. Each one is repeated 
 
 Git leaves worktree entries it cannot read out of its own listing. Lager reads the `worktrees` directory itself and reports each such entry, so a short list always comes with an error.
 
-## Exit status
+### Exit status
 
 | Situation                                                    | stdout                                             | Exit |
 | ------------------------------------------------------------ | -------------------------------------------------- | ---- |
@@ -78,3 +99,47 @@ Git leaves worktree entries it cannot read out of its own listing. Lager reads t
 | No `REPOSITORY` outside a repository, or invalid arguments    | Nothing                                            | `2`  |
 
 A record never states a fact Lager could not read. When the origin lookup fails, `repository_identity` is `null` and `errors` names the failure.
+
+## `worktree add --json`
+
+```json
+{
+  "schema_version": 1,
+  "path": "/home/dev/repos/acme/core.worktrees/hotfix",
+  "branch": "hotfix",
+  "new_branch": true,
+  "session": {
+    "created": true,
+    "id": "session:01a1f8ab-8ffc-76ae-836e-30d02892582e",
+    "label": "core · Hotfix",
+    "tabs": [
+      {
+        "name": "Agents",
+        "panes": {
+          "Agent I": "block:01a1f8ab-9a0e-7f21-b6c4-2d8e5f7a1c30",
+          "Agent II": "block:01a1f8ab-9a0e-7f21-b6c4-2d8e5f7a2b14"
+        }
+      }
+    ]
+  }
+}
+```
+
+| Key              | Type           | Meaning                                                                                  |
+| ---------------- | -------------- | ---------------------------------------------------------------------------------------- |
+| `schema_version` | integer        | `1`.                                                                                     |
+| `path`           | string         | The absolute path of the new worktree, as the `Created worktree` line names it.          |
+| `branch`         | string         | The checked-out branch's short name, such as `hotfix` or `dev/spike`.                    |
+| `new_branch`     | boolean        | `true` when the command created the branch, `false` for `--branch EXISTING`.             |
+| `session`        | object or null | The worktree's session with `--open-session` or `--create-session`; `null` without them. |
+
+The session object has the keys of [`session create --json`](session-json.md#create---json) except `schema_version` and `path`: `created`, `id`, `label` and `tabs`. `created` is `false` when a session for the same path was still running, and its pane ids then come from lager's record and can be stale.
+
+Keys appear in the order listed here, and every key is always present. Git's own output, `HEAD is now at …` included, goes to stderr for this run, so stdout holds the document alone.
+
+| Situation                                                          | stdout       | Exit |
+| ------------------------------------------------------------------ | ------------ | ---- |
+| The worktree was created, and its session when a flag asked for it | The object   | `0`  |
+| The worktree was created and its session failed                    | Nothing      | `1`  |
+| A refused request, a failed Git command or a missing `[session]` section | Nothing | `1`  |
+| Invalid arguments                                                  | Nothing      | `2`  |

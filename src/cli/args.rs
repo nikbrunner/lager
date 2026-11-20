@@ -169,6 +169,19 @@ pub struct WorktreeAddArgs {
         help = "Destination, absolute or relative to the working directory"
     )]
     pub path: Option<PathBuf>,
+    #[arg(
+        long = "open-session",
+        conflicts_with = "create_session",
+        help = "Open the new worktree's session and show it"
+    )]
+    pub open_session: bool,
+    #[arg(
+        long = "create-session",
+        help = "Create the new worktree's session without showing it"
+    )]
+    pub create_session: bool,
+    #[arg(long, help = "Render one stable JSON document")]
+    pub json: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -179,6 +192,11 @@ pub struct WorktreeRemoveArgs {
     pub yes: bool,
     #[arg(long, help = "Accept the listed losses; safety checks still apply")]
     pub force: bool,
+    #[arg(
+        long = "close-session",
+        help = "Close the worktree's session once it is removed"
+    )]
+    pub close_session: bool,
 }
 
 #[derive(Debug, ClapArgs)]

@@ -14,13 +14,33 @@ lager status --remote --json > repositories.json
 Use `status --json` as the automation boundary. It prints the rows `lager tui`
 shows, as one [JSON document](../reference/status-json.md) on stdout. With `--remote`, `tui` adds the providers' unregistered and excluded repositories as candidates that `status` does not print; warnings and
 problems use stderr, and any problem makes it exit `1`. Git and hook subprocesses inherit stdin,
-stdout, and stderr.
+stdout, and stderr; under `worktree add --json` their stdout goes to stderr.
 
 Human field values are presentation-escaped (`\n`, `\r`, `\t`, `\xNN`,
 and `\\`) without changing renderer-owned separators. Do not decode those rows
 into operational paths: JSON preserves the original serialized values.
 Native Git and hook output is deliberately not filtered and may contain terminal
 controls. Only run trusted hooks.
+
+## Start an agent in a new worktree
+
+An agent that works on a topic of its own gets a worktree and a session in one call, and Rex stays where you are:
+
+```sh
+lager worktree add org/project fix-login --create-session --json
+```
+
+stdout holds one [JSON document](../reference/worktree-json.md#worktree-add---json) with the worktree's path and branch and, under `session`, Rex's id for every pane by name. Git's own output goes to stderr. Read the id of the pane you want, such as `.session.tabs[0].panes["Agent I"]`, and send the agent's work there through Rex. With exit `1` stdout is empty: either nothing was created, or the stderr line `error: worktree created, session not opened: …` says the worktree exists without its session.
+
+When the topic is done:
+
+```sh
+lager worktree remove ~/repos/org/project.worktrees/fix-login --yes --close-session
+```
+
+The session closes only after Git has removed the worktree. See [sessions](sessions.md) for the `[session]` section this needs.
+
+## Batches and interruption
 
 An `add`, `ensure`, or `hook` batch continues after ordinary independent failures
 and returns aggregate status `1`. A native child reported as terminated by SIGINT

@@ -26,8 +26,8 @@ Lager selects the configuration path in this order:
 | `status`, `list`, `ls` | `status [--remote] [--include-archived] [--registered] [--json]` | Prints the rows `tui` shows, once its scan has finished: a table, or one JSON document with `--json`. `--remote` expands wildcards through providers; `tui` with remote discovery on shows those rows and adds the providers' unregistered and excluded repositories as candidates. `--registered` keeps declared repositories and wildcard patterns. |
 | `tui` | `tui [--remote] [--include-archived]` | Opens the inventory with its repository actions; requires TTY stdin and stdout. `--remote` starts with remote discovery on. |
 | `worktree list` | `worktree list [REPOSITORY] [--json]` | Lists the primary checkout and every linked worktree of one repository. |
-| `worktree add` | `worktree add <REPOSITORY> <NAME> [--branch EXISTING \| --new-branch NEW] [--start REF] [--path PATH]` | Creates a linked worktree through `git worktree add`. |
-| `worktree remove` | `worktree remove <PATH> [--yes] [--force]` | Removes one linked worktree through `git worktree remove` and keeps its branch. |
+| `worktree add` | `worktree add <REPOSITORY> <NAME> [--branch EXISTING \| --new-branch NEW] [--start REF] [--path PATH] [--open-session \| --create-session] [--json]` | Creates a linked worktree through `git worktree add`. |
+| `worktree remove` | `worktree remove <PATH> [--yes] [--force] [--close-session]` | Removes one linked worktree through `git worktree remove` and keeps its branch. |
 | `session open` | `session open <REPOSITORY> [NAME]` | Shows the checkout's terminal session in Rex, creating it first when there is none. |
 | `session create` | `session create <REPOSITORY> [NAME] [--json]` | Creates the checkout's session without showing it. |
 | `session close` | `session close <REPOSITORY> [NAME]` | Closes the checkout's session. |
@@ -436,6 +436,16 @@ acceptance testing without your normal repositories or configuration.
 
 The human listing has one line per working tree with three columns, two spaces apart: the path, the branch, and the state. A detached HEAD reads `detached` followed by the short commit ID. The state column holds `primary`, `locked` and `prunable`, the last two with Git's reason when there is one. Worktrees placed outside the default location and worktrees created by other tools are listed too. With `--json` the command prints one document; see [worktree JSON](worktree-json.md).
 
+With a [`[session]` section](config.md#session), a fourth column shows the label of each working tree's live session and stays empty for one without a session. The command asks Rex once. When Rex cannot answer, the column reads `unknown` on every row, one line on stderr gives the reason, and the exit status stays what the listing makes it:
+
+```text
+$ lager worktree list org/project
+/home/dev/repos/org/project                   main    primary  project
+/home/dev/repos/org/project.worktrees/hotfix  hotfix           project · Hotfix
+```
+
+The stderr line reads `lager: warning: REASON`, where `REASON` is one of the session errors in [Outcomes](#outcomes) without its `error:`, such as `session host unavailable: …`.
+
 A failure after the repository is found is one line on stderr and exit `1`, with the readable rows still printed.
 
 ### `worktree add`
@@ -471,6 +481,24 @@ Created worktree /home/dev/repos/org/project.worktrees/hotfix on new branch hotf
 A new worktree holds what Git checks out. Lager copies no environment files, dependencies or ignored files into it and runs none of its own hooks for it. Git runs the repository's `post-checkout` hook as it does for any `git worktree add`.
 
 When Git fails, Lager rolls nothing back. It exits `1` and names what is left, one `remaining:` line each for a directory, a new branch and worktree metadata, or `remaining: nothing`.
+
+`--json` prints one document about the new worktree on stdout and sends Git's output to stderr; see [worktree JSON](worktree-json.md#worktree-add---json).
+
+#### Sessions on `add`
+
+`--open-session` opens the new worktree's [session](#sessions) and shows it in Rex. `--create-session` creates the session and leaves Rex where it is, which suits agents and scripts. The two flags conflict. Without either one, `add` calls no Rex.
+
+The session belongs to the worktree's canonical path and carries its label, such as `project · Hotfix`. After the `Created worktree` line comes one more:
+
+| Flag and outcome | Line |
+| --- | --- |
+| `--open-session` | `Opened session LABEL` |
+| `--create-session`, a new session | `Created session LABEL` |
+| `--create-session`, the session exists | `Session LABEL already exists` |
+
+A session exists already when an earlier worktree at the same path left its session running. With `--json` the lines are left out and the document's `session` holds the session.
+
+A session flag without a `[session]` section exits `1` with `error: sessions are not configured; add [session] to CONFIG` before lager creates anything. When the worktree is created and the session fails, the worktree stays, the command prints `error: worktree created, session not opened: REASON` and exits `1`. `REASON` is the session error without its `error:`, such as `session host unavailable: …`; [Outcomes](#outcomes) lists them. With `--json`, stdout stays empty then.
 
 ### `worktree remove`
 
@@ -511,6 +539,12 @@ A detached commit counts as held when it is an ancestor of a commit under `refs/
 For an absent path Lager names the owning repository when the command runs inside it. No remote origin is needed for any of this.
 
 Lager checks again immediately before it calls Git. If the worktree differs from what the summary showed (its losses, its HEAD, its lock, its ownership), the command exits `1` and removes nothing.
+
+#### Sessions on `remove`
+
+`--close-session` closes the worktree's [session](#sessions) once Git has removed the worktree. A refused, blocked or declined removal leaves the session running. After the `Removed worktree` line comes `Closed session LABEL`, or `No session for PATH` when the worktree has no live session. Closing a session ends every program in its panes.
+
+A `--close-session` without a `[session]` section exits `1` with `error: sessions are not configured; add [session] to CONFIG` before lager inspects or removes anything. When the worktree is removed and closing fails, the command prints `error: worktree removed, session not closed: REASON` and exits `1`; the session keeps running and stays in `lager session list`.
 
 The worktree commands print `error:` and `hint:` lines, the session commands print `error:` lines, and the other commands prefix diagnostics with `lager:`.
 
@@ -594,7 +628,7 @@ Outside a terminal, Lager never prompts:
 
 ## Output and exit status
 
-Flag-driven and JSON output contain no interactive styling. `status --json` writes one stable JSON document to stdout; warnings and problems use stderr. Git and hook processes retain their native streams. A selected repository without a post-clone hook reports that on stderr.
+Flag-driven and JSON output contain no interactive styling. `status --json` writes one stable JSON document to stdout; warnings and problems use stderr. Git and hook processes retain their native streams, except under `worktree add --json`, where their stdout goes to stderr. A selected repository without a post-clone hook reports that on stderr.
 
 Lager-owned human fields escape C0, DEL, and C1 controls: newline, carriage
 return, and tab appear as `\n`, `\r`, and `\t`; other controls appear as

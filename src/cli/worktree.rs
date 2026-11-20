@@ -7,14 +7,19 @@ use serde::Serialize;
 
 use super::args::{WorktreeAddArgs, WorktreeCommand, WorktreeListArgs, WorktreeRemoveArgs};
 use super::interaction::{Interaction, InteractionError};
-use crate::application::ports::WorktreeLosses;
+use super::session;
+use crate::application::ports::{Recorded, WorktreeGit, WorktreeLosses};
+use crate::application::sessions::{self, Ensured};
 use crate::application::worktrees::{
-    self, AddError, AddRequest, Blocker, BranchChoice, Placement, RemovalInspection, RemoveError,
-    Repository, WorktreeListing, short_id,
+    self, AddError, AddPlan, AddRequest, Blocker, BranchChoice, Placement, RemovalInspection,
+    RemoveError, Repository, WorktreeListing, short_id,
 };
 use crate::domain::config::{Config, resolve_worktree_root};
 use crate::domain::repository::{RepositoryRef, validate_reference_safety};
-use crate::infrastructure::{filesystem::Filesystem, git::NativeGit};
+use crate::domain::session::Layout;
+use crate::infrastructure::{
+    filesystem::Filesystem, git::NativeGit, rex::Rex, session_record::SessionFile,
+};
 use crate::presentation::escape;
 
 const GIT: NativeGit = NativeGit;
@@ -117,9 +122,28 @@ pub(super) fn run(
         Ok(settings) => settings,
         Err(code) => return code,
     };
+    let layout = match &command {
+        WorktreeCommand::List(_) => session::layout(config_path).ok(),
+        WorktreeCommand::Add(WorktreeAddArgs {
+            open_session: false,
+            create_session: false,
+            ..
+        })
+        | WorktreeCommand::Remove(WorktreeRemoveArgs {
+            close_session: false,
+            ..
+        }) => None,
+        _ => match session::layout(config_path) {
+            Ok(layout) => Some(layout),
+            Err(message) => {
+                error(message);
+                return 1;
+            }
+        },
+    };
     match command {
-        WorktreeCommand::List(args) => list(&settings, args),
-        WorktreeCommand::Add(args) => add(&settings, args),
+        WorktreeCommand::List(args) => list(&settings, args, layout.is_some()),
+        WorktreeCommand::Add(args) => add(&settings, args, layout.as_ref()),
         WorktreeCommand::Remove(args) => remove(&settings, args, interaction),
     }
 }
@@ -137,7 +161,7 @@ fn add_request(args: &WorktreeAddArgs) -> AddRequest<'_> {
     }
 }
 
-fn list(settings: &Settings, args: WorktreeListArgs) -> i32 {
+fn list(settings: &Settings, args: WorktreeListArgs, configured: bool) -> i32 {
     let repository = match &args.repository {
         Some(argument) => settings.repository(argument),
         None => worktrees::resolve_repository(&GIT, &FILES, &settings.cwd, false),
@@ -154,8 +178,22 @@ fn list(settings: &Settings, args: WorktreeListArgs) -> i32 {
         }
     };
     let listing = worktrees::list(&GIT, &FILES, &repository);
+    let hosted = configured.then(|| {
+        sessions::list(&Rex, &SessionFile)
+            .map_err(|failure| eprintln!("lager: warning: {}", escape(session::reason(failure))))
+    });
+    let sessions = hosted.as_ref().map(|hosted| {
+        listing
+            .worktrees
+            .iter()
+            .map(|record| match hosted {
+                Ok(hosted) => Hosted::Known(hosted.get(&session::key(&record.path))),
+                Err(()) => Hosted::Unknown("unknown"),
+            })
+            .collect::<Vec<_>>()
+    });
     let stdout = if args.json {
-        match serde_json::to_string_pretty(&Document::new(&listing)) {
+        match serde_json::to_string_pretty(&Document::new(&listing, sessions.as_deref())) {
             Ok(document) => document + "\n",
             Err(source) => {
                 error(format!("could not render the worktree list: {source}"));
@@ -163,7 +201,7 @@ fn list(settings: &Settings, args: WorktreeListArgs) -> i32 {
             }
         }
     } else {
-        table(&listing)
+        table(&listing, sessions.as_deref())
     };
     let written = std::io::stdout().lock().write_all(stdout.as_bytes());
     for fault in &listing.errors {
@@ -180,14 +218,14 @@ fn list(settings: &Settings, args: WorktreeListArgs) -> i32 {
 }
 
 #[derive(Serialize)]
-struct Document {
+struct Document<'a> {
     schema_version: u8,
-    worktrees: Vec<Record>,
+    worktrees: Vec<Record<'a>>,
     errors: Vec<Fault>,
 }
 
 #[derive(Serialize)]
-struct Record {
+struct Record<'a> {
     repository_identity: Option<String>,
     primary_path: String,
     path: String,
@@ -198,6 +236,17 @@ struct Record {
     lock_reason: Option<String>,
     prunable: bool,
     prune_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<Hosted<'a>>,
+}
+
+/// A worktree's session as the host reports it: the record, or `null` for none; `unknown`
+/// when the host could not answer.
+#[derive(Clone, Copy, Serialize)]
+#[serde(untagged)]
+enum Hosted<'a> {
+    Known(Option<&'a Recorded>),
+    Unknown(&'static str),
 }
 
 #[derive(Serialize)]
@@ -207,15 +256,17 @@ struct Fault {
     error: String,
 }
 
-impl Document {
-    fn new(listing: &WorktreeListing) -> Self {
+impl<'a> Document<'a> {
+    /// Schema version 2 adds `session` to every record.
+    fn new(listing: &WorktreeListing, sessions: Option<&[Hosted<'a>]>) -> Self {
         let text = |path: &Path| path.to_string_lossy().into_owned();
         Self {
-            schema_version: 1,
+            schema_version: if sessions.is_some() { 2 } else { 1 },
             worktrees: listing
                 .worktrees
                 .iter()
-                .map(|record| Record {
+                .enumerate()
+                .map(|(index, record)| Record {
                     repository_identity: record.repository_identity.clone(),
                     primary_path: text(&record.primary_path),
                     path: text(&record.path),
@@ -226,6 +277,7 @@ impl Document {
                     lock_reason: record.lock_reason.clone(),
                     prunable: record.prunable,
                     prune_reason: record.prune_reason.clone(),
+                    session: sessions.map(|sessions| sessions[index]),
                 })
                 .collect(),
             errors: listing
@@ -252,12 +304,13 @@ pub(super) fn branch_label(branch: Option<&str>, head: Option<&str>) -> String {
     }
 }
 
-/// Path, branch and state, two spaces apart.
-fn table(listing: &WorktreeListing) -> String {
+/// Path, branch and state, and with sessions configured the session's label, two spaces apart.
+fn table(listing: &WorktreeListing, sessions: Option<&[Hosted]>) -> String {
     let rows = listing
         .worktrees
         .iter()
-        .map(|record| {
+        .enumerate()
+        .map(|(index, record)| {
             let reason = |label: &str, reason: &Option<String>| match reason {
                 Some(reason) if !reason.is_empty() => format!("{label}: {reason}"),
                 _ => label.to_owned(),
@@ -272,14 +325,20 @@ fn table(listing: &WorktreeListing) -> String {
             if record.prunable {
                 states.push(reason("prunable", &record.prune_reason));
             }
-            [
+            let mut row = vec![
                 escape(record.path.display()),
                 escape(branch_label(
                     record.branch.as_deref(),
                     record.head.as_deref(),
                 )),
                 escape(states.join(", ")),
-            ]
+            ];
+            row.extend(sessions.map(|sessions| match sessions[index] {
+                Hosted::Known(Some(recorded)) => escape(&recorded.label),
+                Hosted::Known(None) => String::new(),
+                Hosted::Unknown(unknown) => unknown.to_owned(),
+            }));
+            row
         })
         .collect::<Vec<_>>();
     let width = |column: usize| {
@@ -288,10 +347,18 @@ fn table(listing: &WorktreeListing) -> String {
             .max()
             .unwrap_or(0)
     };
-    let (path, branch) = (width(0), width(1));
+    let widths = (0..rows.first().map_or(0, |row| row.len() - 1))
+        .map(width)
+        .collect::<Vec<_>>();
     rows.iter()
         .map(|row| {
-            format!("{:path$}  {:branch$}  {}", row[0], row[1], row[2])
+            row.iter()
+                .enumerate()
+                .map(|(column, cell)| match widths.get(column) {
+                    Some(width) => format!("{cell:width$}  "),
+                    None => cell.clone(),
+                })
+                .collect::<String>()
                 .trim_end()
                 .to_owned()
                 + "\n"
@@ -299,7 +366,7 @@ fn table(listing: &WorktreeListing) -> String {
         .collect()
 }
 
-fn add(settings: &Settings, args: WorktreeAddArgs) -> i32 {
+fn add(settings: &Settings, args: WorktreeAddArgs, layout: Option<&Layout>) -> i32 {
     let request = add_request(&args);
     let repository = match settings.repository(&args.repository) {
         Ok(repository) => repository,
@@ -340,27 +407,101 @@ fn add(settings: &Settings, args: WorktreeAddArgs) -> i32 {
             return 1;
         }
     };
-    match worktrees::add(&GIT, &FILES, &plan) {
-        Ok(()) => {
-            println!(
-                "Created worktree {} on {}branch {}",
-                escape(plan.destination.display()),
-                if plan.start.is_some() { "new " } else { "" },
-                escape(&plan.branch)
-            );
-            0
+    let added = if args.json {
+        crate::infrastructure::git::stdout_to_stderr(|| worktrees::add(&GIT, &FILES, &plan))
+    } else {
+        worktrees::add(&GIT, &FILES, &plan)
+    };
+    if let Err(failure) = added {
+        error(format!("worktree was not created: {}", failure.message));
+        if failure.remaining.is_empty() {
+            eprintln!("remaining: nothing");
         }
-        Err(failure) => {
-            error(format!("worktree was not created: {}", failure.message));
-            if failure.remaining.is_empty() {
-                eprintln!("remaining: nothing");
-            }
-            for remaining in &failure.remaining {
-                eprintln!("remaining: {}", escape(remaining));
-            }
-            if failure.cancelled { 130 } else { 1 }
+        for remaining in &failure.remaining {
+            eprintln!("remaining: {}", escape(remaining));
+        }
+        return if failure.cancelled { 130 } else { 1 };
+    }
+    if !args.json {
+        println!(
+            "Created worktree {} on {}branch {}",
+            escape(plan.destination.display()),
+            if plan.start.is_some() { "new " } else { "" },
+            escape(&plan.branch)
+        );
+    }
+    let ensured = match layout.map(|layout| add_session(&plan, layout, args.open_session)) {
+        None => None,
+        Some(Ok(ensured)) => Some(ensured),
+        Some(Err(reason)) => {
+            error(format!("worktree created, session not opened: {reason}"));
+            return 1;
+        }
+    };
+    if args.json {
+        let document = Added {
+            schema_version: 1,
+            path: plan.destination.to_string_lossy().into_owned(),
+            branch: &plan.branch,
+            new_branch: plan.start.is_some(),
+            session: ensured.as_ref().map(|ensured| AddedSession {
+                created: matches!(ensured, Ensured::Created(_)),
+                recorded: ensured.recorded(),
+            }),
+        };
+        let written = serde_json::to_string_pretty(&document)
+            .map_err(|source| format!("could not render the worktree: {source}"))
+            .and_then(|document| {
+                std::io::stdout()
+                    .lock()
+                    .write_all((document + "\n").as_bytes())
+                    .map_err(|source| format!("could not write the worktree: {source}"))
+            });
+        if let Err(message) = written {
+            error(message);
+            return 1;
+        }
+    } else if let Some(ensured) = &ensured {
+        let label = escape(&ensured.recorded().label);
+        match ensured {
+            _ if args.open_session => println!("Opened session {label}"),
+            Ensured::Created(_) => println!("Created session {label}"),
+            Ensured::Existing(_) => println!("Session {label} already exists"),
         }
     }
+    0
+}
+
+/// Creates the new worktree's session, keyed by its real path, and shows it when `open`.
+fn add_session(plan: &AddPlan, layout: &Layout, open: bool) -> Result<Ensured, String> {
+    let checkout = GIT
+        .locate(&plan.destination)
+        .map_err(|_| format!("not a Git checkout: {}", plan.destination.display()))?
+        .top_level;
+    let label = session::label(&plan.repository.primary, &checkout);
+    let (host, records) = (Rex, SessionFile);
+    if open {
+        sessions::open(&host, &records, &checkout, &label, layout)
+    } else {
+        sessions::ensure(&host, &records, &checkout, &label, layout)
+    }
+    .map_err(session::reason)
+}
+
+#[derive(Serialize)]
+struct Added<'a> {
+    schema_version: u8,
+    path: String,
+    branch: &'a str,
+    new_branch: bool,
+    session: Option<AddedSession<'a>>,
+}
+
+#[derive(Serialize)]
+struct AddedSession<'a> {
+    created: bool,
+    #[serde(flatten)]
+    recorded: &'a Recorded,
 }
 
 fn print_blockers(blockers: &[Blocker]) {
@@ -481,6 +622,20 @@ fn remove(settings: &Settings, args: WorktreeRemoveArgs, interaction: &mut dyn I
                 _ => kept_label(&inspection),
             };
             println!("Removed worktree {shown} · {}", escape(kept));
+            if !args.close_session {
+                return 0;
+            }
+            match sessions::close(&Rex, &SessionFile, &inspection.path) {
+                Ok(Some(recorded)) => println!("Closed session {}", escape(&recorded.label)),
+                Ok(None) => println!("No session for {shown}"),
+                Err(failure) => {
+                    error(format!(
+                        "worktree removed, session not closed: {}",
+                        session::reason(failure)
+                    ));
+                    return 1;
+                }
+            }
             0
         }
         Err(RemoveError::Stale) => {

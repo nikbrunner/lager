@@ -15,6 +15,8 @@ struct Fixture {
     home: PathBuf,
     config: PathBuf,
     primary: PathBuf,
+    /// The fake `rex`'s directory and state, first on `PATH` when present.
+    rex: Option<(PathBuf, PathBuf)>,
 }
 
 /// Runs Git and returns whatever it did; a stopped rebase or merge exits non-zero.
@@ -97,21 +99,26 @@ fn short(id: &str) -> &str {
     &id[..7]
 }
 
-/// The rows `worktree list` prints: path, branch and state, two spaces apart.
-fn table(rows: &[[&str; 3]]) -> String {
-    let width = |column: usize| rows.iter().map(|row| row[column].len()).max().unwrap();
+/// The rows `worktree list` prints: path, branch, state and with sessions the session, two
+/// spaces apart.
+fn table<const N: usize>(rows: &[[&str; N]]) -> String {
+    let width = |column: usize| {
+        rows.iter()
+            .map(|row| row[column].chars().count())
+            .max()
+            .unwrap()
+    };
     rows.iter()
         .map(|row| {
-            format!(
-                "{:a$}  {:b$}  {}",
-                row[0],
-                row[1],
-                row[2],
-                a = width(0),
-                b = width(1)
-            )
-            .trim_end()
-            .to_owned()
+            row.iter()
+                .enumerate()
+                .map(|(column, cell)| match column + 1 < N {
+                    true => format!("{cell:width$}  ", width = width(column)),
+                    false => (*cell).to_owned(),
+                })
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
                 + "\n"
         })
         .collect()
@@ -132,13 +139,74 @@ impl Fixture {
             home,
             config,
             primary,
+            rex: None,
         }
     }
 
+    /// The fake `rex` first on `PATH`, with a `[session]` section when `configured`. No call
+    /// can reach a real Rex: the environment is cleared, and `REX_SERVER` names a socket that
+    /// does not exist.
+    fn with_rex(configured: bool) -> Self {
+        let mut fixture = Self::new();
+        if configured {
+            fs::write(&fixture.config, format!("root = \"repos\"\n{SESSION}")).unwrap();
+        }
+        fixture.rex = Some(support::install_fake_rex(&fixture.base.join("rex")));
+        fixture
+    }
+
     fn command(&self, cwd: &Path) -> Command {
-        let mut command = support::lager(&self.home, &self.config);
-        command.current_dir(cwd);
+        let Some((bin, state)) = &self.rex else {
+            let mut command = support::lager(&self.home, &self.config);
+            command.current_dir(cwd);
+            return command;
+        };
+        let mut command = support::lager_with_path(&self.home, &self.config, Some(bin));
         command
+            .current_dir(cwd)
+            .env("REX_ARGS_LOG", state.join("args.log"))
+            .env("REX_STATE", state)
+            .env(
+                "REX_SERVER",
+                format!("unix://{}", self.base.join("none.sock").display()),
+            )
+            .env("REX_RUNTIME_DIR", self.base.join("rex-runtime"));
+        command
+    }
+
+    fn rex_state(&self) -> &Path {
+        &self.rex.as_ref().expect("a fixture with the fake rex").1
+    }
+
+    /// Every rex call so far, global flags removed.
+    fn calls(&self) -> Vec<String> {
+        let log = fs::read_to_string(self.rex_state().join("args.log")).unwrap_or_default();
+        log.lines()
+            .map(|line| {
+                line.strip_prefix("--autostart=false --timeout 8s ")
+                    .unwrap_or_else(|| panic!("rex call without the global flags: {line}"))
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn creates(&self) -> Vec<Value> {
+        self.calls()
+            .iter()
+            .filter_map(|call| call.strip_prefix("do - --json --args "))
+            .map(|args| serde_json::from_str(args).unwrap())
+            .collect()
+    }
+
+    fn destroys(&self) -> Vec<String> {
+        self.calls()
+            .into_iter()
+            .filter(|call| call.contains("session.destroy"))
+            .collect()
+    }
+
+    fn mode(&self, name: &str) {
+        fs::write(self.rex_state().join(name), "").unwrap();
     }
 
     fn run(&self, cwd: &Path, args: &[&str]) -> Output {
@@ -3061,4 +3129,642 @@ fn worktree_commands_run_without_a_configuration_file() {
         "error: a repository reference needs a configuration; pass a checkout path\n"
     );
     assert!(!fixture.config.exists());
+}
+
+// ---- sessions ----------------------------------------------------------------------------
+
+const SESSION: &str = r#"
+[session]
+host = "rex"
+
+[session.layouts.default]
+[session.layouts.default.tabs.Agents]
+root = { pane = "Agent I" }
+splits = [{ source = "Agent I", pane = "Agent II", direction = "right" }]
+"#;
+
+fn expected_create(label: &str, cwd: &Path) -> Value {
+    let block = |pane: &str| {
+        json!({ "block": {
+            "flavor": "com.superlogical.terminal.shell",
+            "options": { "cwd": text(cwd) },
+            "label": pane,
+        }})
+    };
+    json!({
+        "label": label,
+        "initial_windows": [{
+            "window_label": "Agents",
+            "layout": { "split": {
+                "direction": "horizontal",
+                "ratio": 0.5,
+                "before": block("Agent I"),
+                "after": block("Agent II"),
+            }},
+        }],
+        "focus": null,
+    })
+}
+
+fn destroy(id: &str) -> String {
+    format!("api call session.destroy {{\"session_id\":\"{id}\"}}")
+}
+
+fn tabs(n: usize) -> Value {
+    json!([{ "name": "Agents", "panes": {
+        "Agent I": format!("block:{n}-1-1"),
+        "Agent II": format!("block:{n}-1-2"),
+    }}])
+}
+
+#[test]
+fn session_flags_need_a_session_section_before_git_runs() {
+    let fixture = Fixture::with_rex(false);
+    let hotfix = fixture.linked("hotfix", &["-b", "hotfix"]);
+    let before = (fixture.state(), tree(&fixture.container()));
+    let message = format!(
+        "error: sessions are not configured; add [session] to {}\n",
+        fixture.config.display()
+    );
+    let runs: [&[&str]; 4] = [
+        &["add", ".", "spike", "--open-session"],
+        &["add", ".", "spike", "--create-session"],
+        &["add", ".", "spike", "--create-session", "--json"],
+        &["remove", text(&hotfix), "--yes", "--close-session"],
+    ];
+
+    for args in runs {
+        let output = fixture.worktree(args);
+        assert_exit(&output, 1);
+        assert_eq!(stdout(&output), "", "{args:?}");
+        assert_eq!(stderr(&output), message, "{args:?}");
+        assert_eq!((fixture.state(), tree(&fixture.container())), before);
+    }
+    fs::remove_file(&fixture.config).unwrap();
+    let output = fixture.worktree(&["add", ".", "spike", "--create-session"]);
+    assert_exit(&output, 1);
+    assert_eq!(stderr(&output), message);
+    assert_eq!(fixture.state(), before.0);
+
+    let both = fixture.worktree(&["add", ".", "spike", "--open-session", "--create-session"]);
+    assert_exit(&both, 2);
+    assert!(stderr(&both).contains("cannot be used with"), "{both:?}");
+    assert_eq!(fixture.calls(), Vec::<String>::new());
+}
+
+#[test]
+fn without_a_flag_the_worktree_commands_leave_sessions_alone() {
+    let fixture = Fixture::with_rex(true);
+    let head = fixture.head();
+    let hotfix = fixture.container().join("hotfix");
+
+    let added = fixture.worktree(&["add", ".", "hotfix"]);
+    assert_exit(&added, 0);
+    assert_eq!(
+        stdout(&added),
+        format!(
+            "HEAD is now at {} initial\nCreated worktree {} on new branch hotfix\n",
+            short(&head),
+            hotfix.display()
+        )
+    );
+    assert_eq!(stderr(&added), "Preparing worktree (new branch 'hotfix')\n");
+    let removed = fixture.worktree(&["remove", text(&hotfix), "--yes"]);
+    assert_exit(&removed, 0);
+    assert_eq!(
+        stdout(&removed),
+        format!(
+            "{}Removed worktree {} · branch hotfix kept\n",
+            summary(&hotfix, "hotfix · kept", "none"),
+            hotfix.display()
+        )
+    );
+    assert_eq!(stderr(&removed), "");
+    assert_eq!(fixture.calls(), Vec::<String>::new());
+}
+
+#[test]
+fn add_create_session_creates_the_worktree_then_its_session() {
+    let fixture = Fixture::with_rex(true);
+    let head = fixture.head();
+    let hotfix = fixture.container().join("hotfix");
+
+    let output = fixture.worktree(&["add", ".", "hotfix", "--create-session"]);
+
+    assert_exit(&output, 0);
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "HEAD is now at {} initial\nCreated worktree {} on new branch hotfix\nCreated session core · Hotfix\n",
+            short(&head),
+            hotfix.display()
+        )
+    );
+    assert_eq!(
+        stderr(&output),
+        "Preparing worktree (new branch 'hotfix')\n"
+    );
+    assert_eq!(
+        fixture.creates(),
+        [expected_create("core · Hotfix", &hotfix)]
+    );
+    assert!(
+        !fixture
+            .calls()
+            .iter()
+            .any(|call| call.contains("client.perform")),
+        "{:?}",
+        fixture.calls()
+    );
+
+    let again = fixture.run(&fixture.base, &["session", "create", "acme/core", "hotfix"]);
+    assert_eq!(stdout(&again), "Session core · Hotfix already exists\n");
+    assert_eq!(fixture.creates().len(), 1);
+}
+
+#[test]
+fn add_open_session_creates_the_session_and_shows_it() {
+    let fixture = Fixture::with_rex(true);
+
+    let output = fixture.worktree(&["add", ".", "hotfix", "--open-session"]);
+
+    assert_exit(&output, 0);
+    assert!(
+        stdout(&output).ends_with(&format!(
+            "Created worktree {} on new branch hotfix\nOpened session core · Hotfix\n",
+            fixture.container().join("hotfix").display()
+        )),
+        "{output:?}"
+    );
+    assert_eq!(fixture.creates().len(), 1);
+    assert_eq!(
+        fixture.calls().last().unwrap(),
+        "api call client.perform {\"action\":\"session.select\",\"args\":{\"session_id\":\"session:1\"},\"client_id\":\"client:app\"}"
+    );
+}
+
+#[test]
+fn add_json_prints_one_document_and_sends_git_output_to_stderr() {
+    let fixture = Fixture::with_rex(true);
+    let head = fixture.head();
+    git(&fixture.primary, &["branch", "review"]);
+
+    let plain = fixture.worktree(&["add", ".", "hotfix", "--json"]);
+    assert_exit(&plain, 0);
+    let raw = stdout(&plain);
+    assert!(raw.starts_with("{\n") && raw.ends_with("}\n"), "{raw}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).unwrap(),
+        json!({
+            "schema_version": 1,
+            "path": text(&fixture.container().join("hotfix")),
+            "branch": "hotfix",
+            "new_branch": true,
+            "session": null,
+        })
+    );
+    assert_eq!(
+        stderr(&plain),
+        format!(
+            "Preparing worktree (new branch 'hotfix')\nHEAD is now at {} initial\n",
+            short(&head)
+        )
+    );
+    assert_eq!(fixture.calls(), Vec::<String>::new());
+
+    for (name, flag, created, id) in [
+        ("review", "--create-session", true, 1),
+        ("spike", "--open-session", true, 2),
+    ] {
+        let mut args = vec!["add", ".", name, flag, "--json"];
+        if name == "review" {
+            args.extend(["--branch", "review"]);
+        }
+        let output = fixture.worktree(&args);
+        assert_exit(&output, 0);
+        let label = format!("core · {}{}", name[..1].to_uppercase(), &name[1..]);
+        assert_eq!(
+            serde_json::from_str::<Value>(&stdout(&output)).unwrap(),
+            json!({
+                "schema_version": 1,
+                "path": text(&fixture.container().join(name)),
+                "branch": name,
+                "new_branch": name != "review",
+                "session": {
+                    "created": created,
+                    "id": format!("session:{id}"),
+                    "label": label,
+                    "tabs": tabs(id),
+                },
+            }),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
+fn add_reports_a_session_that_a_plain_git_removal_left_running() {
+    let fixture = Fixture::with_rex(true);
+    let hotfix = fixture.container().join("hotfix");
+    assert_exit(
+        &fixture.worktree(&["add", ".", "hotfix", "--create-session"]),
+        0,
+    );
+    git(&fixture.primary, &["worktree", "remove", text(&hotfix)]);
+
+    let output = fixture.worktree(&[
+        "add",
+        ".",
+        "hotfix",
+        "--branch",
+        "hotfix",
+        "--create-session",
+    ]);
+
+    assert_exit(&output, 0);
+    assert!(
+        stdout(&output).ends_with(&format!(
+            "Created worktree {} on branch hotfix\nSession core · Hotfix already exists\n",
+            hotfix.display()
+        )),
+        "{output:?}"
+    );
+    assert_eq!(fixture.creates().len(), 1);
+}
+
+#[test]
+fn a_failed_session_keeps_the_new_worktree_and_exits_one() {
+    let fixture = Fixture::with_rex(true);
+    fixture.mode("offline");
+    let reason = format!(
+        "session host unavailable: no Rex server is running at {}/server.sock, and autostart is disabled",
+        fixture.rex_state().display()
+    );
+    let hotfix = fixture.container().join("hotfix");
+
+    let output = fixture.worktree(&["add", ".", "hotfix", "--create-session"]);
+
+    assert_exit(&output, 1);
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "HEAD is now at {} initial\nCreated worktree {} on new branch hotfix\n",
+            short(&fixture.head()),
+            hotfix.display()
+        )
+    );
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "Preparing worktree (new branch 'hotfix')\nerror: worktree created, session not opened: {reason}\n"
+        )
+    );
+    assert!(fixture.listed().contains(&hotfix));
+
+    let json = fixture.worktree(&["add", ".", "spike", "--open-session", "--json"]);
+    assert_exit(&json, 1);
+    assert_eq!(stdout(&json), "");
+    assert!(
+        stderr(&json).ends_with(&format!(
+            "error: worktree created, session not opened: {reason}\n"
+        )),
+        "{json:?}"
+    );
+    assert!(
+        fixture
+            .listed()
+            .contains(&fixture.container().join("spike"))
+    );
+}
+
+/// A `git` in the fake rex's directory that logs each `worktree remove` with its exit status
+/// to the rex log, and fails it while `<state>/git-fails` exists.
+fn logging_git(fixture: &Fixture) {
+    let state = fixture.rex_state();
+    let bin = &fixture.rex.as_ref().unwrap().0;
+    let script = format!(
+        "#!/bin/sh\ncase \" $* \" in\n  *\" worktree remove \"*)\n    if [ -e '{fails}' ]; then status=3; echo boom >&2; else '{git}' \"$@\"; status=$?; fi\n    echo \"git worktree remove exit $status\" >> '{log}'\n    exit $status;;\nesac\nexec '{git}' \"$@\"\n",
+        fails = state.join("git-fails").display(),
+        log = state.join("args.log").display(),
+        git = support::real_tool("git").display()
+    );
+    fs::write(bin.join("git"), script).unwrap();
+    fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn remove_close_session_destroys_only_after_a_successful_removal() {
+    let fixture = Fixture::with_rex(true);
+    let hotfix = fixture.container().join("hotfix");
+    assert_exit(
+        &fixture.worktree(&["add", ".", "hotfix", "--create-session"]),
+        0,
+    );
+    logging_git(&fixture);
+    let log = || fs::read_to_string(fixture.rex_state().join("args.log")).unwrap();
+    let close = ["remove", text(&hotfix), "--yes", "--close-session"];
+
+    fs::write(hotfix.join("draft"), "draft\n").unwrap();
+    let refused = fixture.worktree(&close);
+    assert_exit(&refused, 1);
+    assert_eq!(stderr(&refused), LOSSES_REFUSED);
+    fs::remove_file(hotfix.join("draft")).unwrap();
+
+    git(&fixture.primary, &["worktree", "lock", text(&hotfix)]);
+    let blocked = fixture.worktree(&close);
+    assert_exit(&blocked, 1);
+    git(&fixture.primary, &["worktree", "unlock", text(&hotfix)]);
+
+    fixture.mode("git-fails");
+    let failed = fixture.worktree(&close);
+    assert_exit(&failed, 1);
+    assert!(
+        stderr(&failed).contains("git worktree remove failed"),
+        "{failed:?}"
+    );
+    assert!(!log().contains("session.destroy"), "{}", log());
+    fs::remove_file(fixture.rex_state().join("git-fails")).unwrap();
+
+    let output = fixture.worktree(&close);
+
+    assert_exit(&output, 0);
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "{}Removed worktree {} · branch hotfix kept\nClosed session core · Hotfix\n",
+            summary(&hotfix, "hotfix · kept", "none"),
+            hotfix.display()
+        )
+    );
+    assert_eq!(stderr(&output), "");
+    assert!(!hotfix.exists());
+    let tail: Vec<_> = log().lines().rev().take(3).map(str::to_owned).collect();
+    assert_eq!(
+        tail,
+        [
+            format!("--autostart=false --timeout 8s {}", destroy("session:1")),
+            "--autostart=false --timeout 8s api call session.list".to_owned(),
+            "git worktree remove exit 0".to_owned(),
+        ]
+    );
+    assert_eq!(
+        log().matches("git worktree remove exit").count(),
+        2,
+        "the refused and blocked removals never reached Git: {}",
+        log()
+    );
+    assert_eq!(
+        stdout(&fixture.run(&fixture.base, &["session", "list"])),
+        ""
+    );
+}
+
+#[test]
+fn remove_close_session_reports_a_failed_close_and_a_missing_session() {
+    let fixture = Fixture::with_rex(true);
+    let hotfix = fixture.container().join("hotfix");
+    let plain = fixture.linked("plain", &["-b", "plain"]);
+    assert_exit(
+        &fixture.worktree(&["add", ".", "hotfix", "--create-session"]),
+        0,
+    );
+
+    let none = fixture.worktree(&["remove", text(&plain), "--yes", "--close-session"]);
+    assert_exit(&none, 0);
+    assert!(
+        stdout(&none).ends_with(&format!(
+            "Removed worktree {0} · branch plain kept\nNo session for {0}\n",
+            plain.display()
+        )),
+        "{none:?}"
+    );
+
+    fixture.mode("destroy-fails");
+    let output = fixture.worktree(&["remove", text(&hotfix), "--yes", "--close-session"]);
+
+    assert_exit(&output, 1);
+    assert!(
+        stdout(&output).ends_with(&format!(
+            "Removed worktree {} · branch hotfix kept\n",
+            hotfix.display()
+        )),
+        "{output:?}"
+    );
+    assert_eq!(
+        stderr(&output),
+        "error: worktree removed, session not closed: session host failed: stream response \"control-1\" failed: internal error (status=500 code=internal)\n"
+    );
+    assert!(!hotfix.exists());
+    let listed = fixture.run(&fixture.base, &["session", "list"]);
+    assert!(stdout(&listed).starts_with("core · Hotfix  "), "{listed:?}");
+}
+
+#[test]
+fn a_symlinked_checkout_path_maps_to_the_same_session() {
+    let fixture = Fixture::with_rex(true);
+    let link = fixture.base.join("link");
+    std::os::unix::fs::symlink(&fixture.home, &link).unwrap();
+    let hotfix = fixture.container().join("hotfix");
+
+    let added = fixture.run(
+        &fixture.base,
+        &[
+            "worktree",
+            "add",
+            text(&link.join("repos/acme/core")),
+            "hotfix",
+            "--create-session",
+        ],
+    );
+    assert_exit(&added, 0);
+    assert!(
+        stdout(&added).ends_with("Created session core · Hotfix\n"),
+        "{added:?}"
+    );
+    for args in [
+        &["session", "create", "acme/core", "hotfix"][..],
+        &[
+            "session",
+            "create",
+            text(&link.join("repos/acme/core.worktrees/hotfix")),
+        ],
+    ] {
+        let again = fixture.run(&fixture.base, args);
+        assert_eq!(
+            stdout(&again),
+            "Session core · Hotfix already exists\n",
+            "{args:?}"
+        );
+    }
+
+    let removed = fixture.run(
+        &fixture.base,
+        &[
+            "worktree",
+            "remove",
+            text(&link.join("repos/acme/core.worktrees/hotfix")),
+            "--yes",
+            "--close-session",
+        ],
+    );
+
+    assert_exit(&removed, 0);
+    assert!(
+        stdout(&removed).ends_with("Closed session core · Hotfix\n"),
+        "{removed:?}"
+    );
+    assert!(!hotfix.exists());
+    assert_eq!(fixture.creates().len(), 1);
+    assert_eq!(fixture.destroys(), [destroy("session:1")]);
+}
+
+#[test]
+fn list_shows_each_worktrees_session_once_sessions_are_configured() {
+    let fixture = Fixture::with_rex(true);
+    let hotfix = fixture.container().join("hotfix");
+    assert_exit(
+        &fixture.worktree(&["add", ".", "hotfix", "--create-session"]),
+        0,
+    );
+    let plain = fixture.linked("plain", &["-b", "plain"]);
+    assert_exit(
+        &fixture.run(&fixture.base, &["session", "create", "acme/core"]),
+        0,
+    );
+
+    let output = fixture.worktree(&["list"]);
+
+    assert_exit(&output, 0);
+    assert_eq!(stderr(&output), "");
+    assert_eq!(
+        stdout(&output),
+        table(&[
+            [text(&fixture.primary), "main", "primary", "core"],
+            [text(&hotfix), "hotfix", "", "core · Hotfix"],
+            [text(&plain), "plain", "", ""],
+        ])
+    );
+    let json = fixture.worktree(&["list", "--json"]);
+    assert_exit(&json, 0);
+    let document: Value = serde_json::from_str(&stdout(&json)).unwrap();
+    assert_eq!(document["schema_version"], 2);
+    let sessions: Vec<_> = document["worktrees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|record| record["session"].clone())
+        .collect();
+    assert_eq!(
+        sessions,
+        [
+            json!({ "id": "session:2", "label": "core", "tabs": tabs(2) }),
+            json!({ "id": "session:1", "label": "core · Hotfix", "tabs": tabs(1) }),
+            Value::Null,
+        ]
+    );
+    let raw = stdout(&json);
+    let first = &raw[..raw.find("},").unwrap()];
+    assert!(
+        first.find("prune_reason").unwrap() < first.find("\"session\"").unwrap(),
+        "{first}"
+    );
+
+    fixture.mode("offline");
+    let warning = format!(
+        "lager: warning: session host unavailable: no Rex server is running at {}/server.sock, and autostart is disabled\n",
+        fixture.rex_state().display()
+    );
+    let offline = fixture.worktree(&["list"]);
+    assert_exit(&offline, 0);
+    assert_eq!(stderr(&offline), warning);
+    assert_eq!(
+        stdout(&offline),
+        table(&[
+            [text(&fixture.primary), "main", "primary", "unknown"],
+            [text(&hotfix), "hotfix", "", "unknown"],
+            [text(&plain), "plain", "", "unknown"],
+        ])
+    );
+    let offline = fixture.worktree(&["list", "--json"]);
+    assert_exit(&offline, 0);
+    assert_eq!(stderr(&offline), warning);
+    let document: Value = serde_json::from_str(&stdout(&offline)).unwrap();
+    assert_eq!(document["schema_version"], 2);
+    assert!(
+        document["worktrees"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|record| record["session"] == "unknown"),
+        "{document}"
+    );
+}
+
+#[test]
+fn list_without_a_session_section_keeps_three_columns_and_schema_one() {
+    let fixture = Fixture::with_rex(false);
+    let hotfix = fixture.linked("hotfix", &["-b", "hotfix"]);
+
+    let output = fixture.worktree(&["list"]);
+    assert_exit(&output, 0);
+    assert_eq!(
+        stdout(&output),
+        table(&[
+            [text(&fixture.primary), "main", "primary"],
+            [text(&hotfix), "hotfix", ""],
+        ])
+    );
+    let json = fixture.worktree(&["list", "--json"]);
+    let document: Value = serde_json::from_str(&stdout(&json)).unwrap();
+    assert_eq!(document["schema_version"], 1);
+    assert!(
+        document["worktrees"][0].get("session").is_none(),
+        "{document}"
+    );
+    assert_eq!(fixture.calls(), Vec::<String>::new());
+}
+
+#[test]
+fn list_asks_the_host_once_and_warns_once_when_it_cannot_tell() {
+    let fixture = Fixture::with_rex(true);
+    fixture.linked("hotfix", &["-b", "hotfix"]);
+    let lists = || {
+        fixture
+            .calls()
+            .iter()
+            .filter(|call| *call == "api call session.list")
+            .count()
+    };
+    let unknown = |output: &Output, warning: &str| {
+        assert_exit(output, 0);
+        assert_eq!(stderr(output), warning);
+        let rows = stdout(output);
+        assert_eq!(rows.lines().count(), 2, "{rows}");
+        assert!(rows.lines().all(|row| row.ends_with("  unknown")), "{rows}");
+    };
+
+    assert_exit(&fixture.worktree(&["list"]), 0);
+    assert_eq!(lists(), 1);
+
+    fixture.mode("bad-list");
+    unknown(
+        &fixture.worktree(&["list"]),
+        "lager: warning: session host failed: rex listed no session ids\n",
+    );
+    assert_eq!(lists(), 2);
+    fs::remove_file(fixture.rex_state().join("bad-list")).unwrap();
+
+    let record = fixture.base.join("lager-test-cache/sessions.json");
+    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    fs::write(&record, "not json").unwrap();
+    let output = fixture.worktree(&["list"]);
+    let warning = stderr(&output);
+    assert!(
+        warning.starts_with(&format!(
+            "lager: warning: could not read sessions {}: ",
+            record.display()
+        )) && warning.lines().count() == 1,
+        "{warning}"
+    );
+    unknown(&output, &warning);
 }

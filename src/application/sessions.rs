@@ -108,10 +108,10 @@ pub fn open<H: SessionHost, R: SessionRecords>(
     checkout: &Path,
     label: &str,
     layout: &Layout,
-) -> Result<Recorded, SessionError> {
+) -> Result<Ensured, SessionError> {
     let ensured = ensure(host, records, checkout, label, layout)?;
     host.show(&ensured.recorded().id)?;
-    Ok(ensured.recorded().clone())
+    Ok(ensured)
 }
 
 /// Closes the session of `checkout`; `None` when it has none. The record is saved without it

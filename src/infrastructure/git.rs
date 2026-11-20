@@ -834,8 +834,24 @@ fn captured_text(command: &mut Command) -> Result<String, String> {
     captured(command).map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
 }
 
+thread_local! {
+    static STDOUT_TO_STDERR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `run` with the stdout of Git's worktree mutations on stderr, so the caller's stdout
+/// carries only its own output.
+pub(crate) fn stdout_to_stderr<T>(run: impl FnOnce() -> T) -> T {
+    STDOUT_TO_STDERR.set(true);
+    let result = run();
+    STDOUT_TO_STDERR.set(false);
+    result
+}
+
 /// Runs a mutation on the caller's own streams.
 fn native(command: &mut Command) -> Result<(), WorktreeCommandError> {
+    if STDOUT_TO_STDERR.get() {
+        command.stdout(std::io::stderr());
+    }
     match command.status() {
         Ok(status) if status.success() => Ok(()),
         Ok(status) => Err(WorktreeCommandError {
