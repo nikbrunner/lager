@@ -30,9 +30,9 @@ pub(super) fn error(message: impl std::fmt::Display) {
 }
 
 pub(super) struct Settings {
-    home: PathBuf,
+    pub(super) home: PathBuf,
     pub(super) cwd: PathBuf,
-    config: Option<Config>,
+    pub(super) config: Option<Config>,
     worktree_root: Option<PathBuf>,
 }
 

@@ -38,6 +38,8 @@ lager session open org/project hotfix
 
 The first form opens the repository's primary checkout. The second opens the checkout or worktree of the working directory. The third opens the linked worktree whose directory is named `hotfix`.
 
+Run `lager session open` alone to pick the checkout in `fzf`. It lists every checkout under the root and the worktrees of each repository, and a trailing `●` marks those with a session. Outside a terminal it fails at once, so scripts and agents name the checkout.
+
 The first `open` creates the session and switches Rex to it: `Opened session project`. The next `open` of the same checkout switches to the same session.
 
 ## Open a session from the inventory
@@ -85,6 +87,8 @@ lager session close org/project hotfix
 ```
 
 This prints `Closed session project · Hotfix`, or `No session for PATH` when the checkout has none. Closing a session ends every program in its panes.
+
+`lager session close` alone lets you pick from the checkouts that have a session.
 
 You can close the session you are working in. The pane closes with the session, so the `Closed session` line never shows, but the session is closed and lager forgets it.
 

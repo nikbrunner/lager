@@ -5,13 +5,15 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::args::{SessionArgs, SessionCommand};
+use super::args::{SessionArgs, SessionCommand, SessionPickArgs};
 use super::worktree::{Settings, error, is_path};
 use crate::application::ports::{
-    HostError, Recorded, SessionRecords, WorktreeFilesystem, WorktreeGit,
+    HostError, Recorded, RepositorySelector, SelectionCandidate, SelectionError, SessionRecords,
+    WorktreeFilesystem, WorktreeGit,
 };
 use crate::application::sessions::{self, Ensured, SessionError};
 use crate::application::worktrees;
+use crate::domain::repository::RepositoryRef;
 use crate::domain::session::Layout;
 use crate::infrastructure::{
     filesystem::Filesystem, git::NativeGit, rex::Rex, session_record::SessionFile,
@@ -21,7 +23,12 @@ use crate::presentation::escape;
 const GIT: NativeGit = NativeGit;
 const FILES: Filesystem = Filesystem;
 
-pub(super) fn run(config_path: &Path, command: SessionCommand) -> i32 {
+pub(super) fn run(
+    config_path: &Path,
+    command: SessionCommand,
+    selector: &dyn RepositorySelector,
+    interactive: bool,
+) -> i32 {
     let settings = match Settings::load(config_path) {
         Ok(settings) => settings,
         Err(code) => return code,
@@ -34,9 +41,20 @@ pub(super) fn run(config_path: &Path, command: SessionCommand) -> i32 {
         }
     };
     let (host, records) = (Rex, SessionFile);
+    let target = |args: SessionPickArgs, close: bool| match args.repository {
+        Some(repository) => Ok(SessionArgs {
+            repository,
+            name: args.name,
+        }),
+        None => choose(&settings, &records, selector, interactive, close),
+    };
     let result =
         match command {
             SessionCommand::Open(args) => {
+                let args = match target(args, false) {
+                    Ok(args) => args,
+                    Err(code) => return code,
+                };
                 checkout(&settings, &args)
                     .and_then(present)
                     .and_then(|(path, label)| {
@@ -69,14 +87,19 @@ pub(super) fn run(config_path: &Path, command: SessionCommand) -> i32 {
                         Ok(())
                     }
                 }),
-            SessionCommand::Close(args) => recorded_or_checkout(&settings, &args, &records)
-                .and_then(|path| {
+            SessionCommand::Close(args) => {
+                let args = match target(args, true) {
+                    Ok(args) => args,
+                    Err(code) => return code,
+                };
+                recorded_or_checkout(&settings, &args, &records).and_then(|path| {
                     match sessions::close(&host, &records, &path).map_err(failure)? {
                         Some(recorded) => println!("Closed session {}", escape(&recorded.label)),
                         None => println!("No session for {}", escape(path.display())),
                     }
                     Ok(())
-                }),
+                })
+            }
             SessionCommand::List(args) => sessions::list(&host, &records)
                 .map_err(failure)
                 .and_then(|listed| {
@@ -93,15 +116,14 @@ pub(super) fn run(config_path: &Path, command: SessionCommand) -> i32 {
                     }
                 }),
         };
-    match result {
-        Ok(()) => 0,
-        Err(lines) => {
-            for line in lines {
-                eprintln!("{line}");
-            }
-            1
-        }
+    result.map_or_else(fail, |()| 0)
+}
+
+fn fail(lines: Lines) -> i32 {
+    for line in lines {
+        eprintln!("{line}");
     }
+    1
 }
 
 /// The default layout of the `[session]` section; an error when there is none.
@@ -163,6 +185,132 @@ fn checkout(settings: &Settings, args: &SessionArgs) -> Result<(PathBuf, String)
     };
     let label = label(&repository.primary, &checkout);
     Ok((checkout, label))
+}
+
+/// The checkout a person picks to open, from every checkout, or to close, from those with a
+/// live session; otherwise the exit code, `0` when there is nothing to pick.
+fn choose(
+    settings: &Settings,
+    records: &SessionFile,
+    selector: &dyn RepositorySelector,
+    interactive: bool,
+    close: bool,
+) -> Result<SessionArgs, i32> {
+    let verb = if close { "close" } else { "open" };
+    if !interactive {
+        error(format!(
+            "session {verb} requires a repository outside a terminal"
+        ));
+        return Err(2);
+    }
+    let live = sessions::list(&Rex, records)
+        .map_err(failure)
+        .map_err(fail)?;
+    let rows: Vec<(PathBuf, String, bool)> = if close {
+        live.into_iter()
+            .map(|(path, recorded)| (path, recorded.label, false))
+            .collect()
+    } else {
+        checkouts(settings)
+            .map_err(line)
+            .map_err(fail)?
+            .into_iter()
+            .map(|(path, label)| {
+                let open = live.contains_key(&path);
+                (path, label, open)
+            })
+            .collect()
+    };
+    let width = rows
+        .iter()
+        .map(|(_, label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let candidates: Vec<_> = rows
+        .iter()
+        .map(|(path, label, open)| SelectionCandidate {
+            // The selector hands the candidate back; nothing parses this reference.
+            reference: RepositoryRef {
+                clone_url: String::new(),
+                host: "local".to_owned(),
+                path: path.display().to_string(),
+                destination_segments: Vec::new(),
+                wildcard: false,
+            },
+            display: format!(
+                "{label:width$}  {}{}",
+                path.display(),
+                if *open { " ●" } else { "" }
+            ),
+            archived: false,
+            exact_path: None,
+        })
+        .collect();
+    let picked = selector
+        .select(&candidates)
+        .map_err(|failure| match failure {
+            SelectionError::Cancelled => 130,
+            SelectionError::Unavailable(message) | SelectionError::Failed(message) => {
+                error(message);
+                1
+            }
+        })?;
+    let index = match picked.as_slice() {
+        [] => return Err(0),
+        [one] => candidates
+            .iter()
+            .position(|candidate| candidate == one)
+            .expect("the selector returns an offered candidate"),
+        many => {
+            error(format!(
+                "session {verb} takes one checkout; {} were picked",
+                many.len()
+            ));
+            return Err(2);
+        }
+    };
+    Ok(SessionArgs {
+        repository: rows[index].0.to_string_lossy().into_owned(),
+        name: None,
+    })
+}
+
+/// Each checkout under the root and every working tree of its repository whose directory
+/// exists, by record key, with its label. A bare repository and a checkout Git cannot list are
+/// left out.
+fn checkouts(settings: &Settings) -> Result<std::collections::BTreeMap<PathBuf, String>, String> {
+    let mut checkouts = std::collections::BTreeMap::new();
+    let Some(config) = &settings.config else {
+        return Ok(checkouts);
+    };
+    let root = config
+        .resolve_root(&settings.home)
+        .map_err(|source| source.to_string())?;
+    if !root.is_dir() {
+        return Ok(checkouts);
+    }
+    let found = crate::application::ports::RemovalFilesystem::discover_checkouts(&FILES, &root)
+        .map_err(|source| source.to_string())?;
+    for path in found {
+        if checkouts.contains_key(&key(&path)) {
+            continue;
+        }
+        let Ok(entries) = GIT.entries(&path) else {
+            continue;
+        };
+        let Some(primary) = entries
+            .first()
+            .filter(|entry| !entry.bare)
+            .map(|entry| key(&entry.path))
+        else {
+            continue;
+        };
+        for entry in entries.iter().filter(|entry| entry.path.is_dir()) {
+            let checkout = key(&entry.path);
+            checkouts.insert(checkout.clone(), label(&primary, &checkout));
+        }
+    }
+    Ok(checkouts)
 }
 
 /// The checkout `args` names for closing. A path Git no longer knows still names the session

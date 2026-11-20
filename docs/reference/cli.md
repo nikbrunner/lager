@@ -28,9 +28,9 @@ Lager selects the configuration path in this order:
 | `worktree list` | `worktree list [REPOSITORY] [--json]` | Lists the primary checkout and every linked worktree of one repository. |
 | `worktree add` | `worktree add <REPOSITORY> <NAME> [--branch EXISTING \| --new-branch NEW] [--start REF] [--path PATH] [--open-session \| --create-session] [--json]` | Creates a linked worktree through `git worktree add`. |
 | `worktree remove` | `worktree remove <PATH> [--yes] [--force] [--close-session]` | Removes one linked worktree through `git worktree remove` and keeps its branch. |
-| `session open` | `session open <REPOSITORY> [NAME]` | Shows the checkout's terminal session in Rex, creating it first when there is none. |
+| `session open` | `session open [REPOSITORY] [NAME]` | Shows the checkout's terminal session in Rex, creating it first when there is none. |
 | `session create` | `session create <REPOSITORY> [NAME] [--json]` | Creates the checkout's session without showing it. |
-| `session close` | `session close <REPOSITORY> [NAME]` | Closes the checkout's session. |
+| `session close` | `session close [REPOSITORY] [NAME]` | Closes the checkout's session. |
 | `session list` | `session list [--json]` | Lists the checkouts that have a session. |
 
 `list` and `ls` are visible aliases of `status`. All three names accept the same arguments, options, and configuration selection, and produce identical output and exit statuses.
@@ -650,6 +650,12 @@ error: several linked worktrees are named spike
 
 `open` and `create` need the checkout's directory and exit `1` with `error: not a Git checkout: PATH` without it; for a reference, `PATH` is the destination under the root. `close` also reaches a worktree whose directory is gone. While Git still lists the worktree, `REPOSITORY NAME` names it. A worktree removed with `git worktree remove`, or by `lager worktree remove` without `--close-session`, leaves its session running and in `lager session list`. Git does not list that worktree, so `REPOSITORY NAME` cannot name it; `lager session close PATH` closes the session recorded under its path. With no session recorded there, `close` exits `1` with `error: not a Git checkout: PATH`.
 
+### Picking the checkout
+
+`open` and `close` without `REPOSITORY` let you pick the checkout in `fzf`. Each row shows a label and a path. `open` offers every checkout under the root and every worktree of their repositories, and a trailing ` ●` marks a checkout with a live session. `close` offers only the checkouts with a live session. Lager then acts as if the picked checkout's path were given as `REPOSITORY`.
+
+A pick acts on one checkout. Marking more than one exits `2` with `error: session open takes one checkout; N were picked`. Esc or Ctrl-C in `fzf` exits `130` and changes nothing. With no rows to offer, `fzf` does not start and the command exits `0`. Outside a terminal there is no picker: the command exits `2` with `error: session open requires a repository outside a terminal` and starts no `fzf`. For `close`, both lines say `session close`. Without a `[session]` section the command fails as above before any of this.
+
 ### Labels
 
 A session's label is the primary checkout's directory name, such as `core`. A linked worktree's label adds its directory name in words: `-` and `_` become spaces and the first letter is upper-cased, so `dev_spike-one` gives `core · Dev spike one`. Control characters are dropped, the label is cut to at most 128 bytes on a character boundary, and surrounding whitespace is trimmed. For an existing session lager prints the label it recorded at creation, also when the label was edited in Rex since.
@@ -669,11 +675,15 @@ A session's label is the primary checkout's directory name, such as `core`. A li
 | A Rex call fails on a running Rex | `error: session host failed: REASON` | `1` |
 | The checkout is missing | `error: not a Git checkout: PATH` | `1` |
 | The record cannot be locked, read or written | `error: could not lock sessions: …`, `error: could not read sessions PATH: …` or `error: could not write sessions PATH: …` | `1` |
+| `open` or `close` without `REPOSITORY` outside a terminal | `error: session open requires a repository outside a terminal` | `2` |
+| More than one checkout picked | `error: session open takes one checkout; N were picked` | `2` |
+| The picker is cancelled | nothing | `130` |
+| `fzf` is missing or fails, or the `open` picker cannot resolve or walk the root | `error: REASON`, such as `error: fzf is required for interactive repository selection; install fzf and try again` | `1` |
 | Invalid arguments | clap's usage error | `2` |
 
 Success lines go to stdout, error lines to stderr. `PATH` is the canonical checkout path. `REASON` is Rex's own first line, such as `no Rex server is running at SOCKET, and autostart is disabled`, or one of lager's: `rex is not installed`, `no Rex app connected`, `rex did not answer within 10 s`, `rex listed no session ids`.
 
-Every command, `list` and a `close` that finds nothing included, asks Rex first, so with Rex unavailable each one exits `1`. Lager never starts the Rex server. `open` creates the session before it asks Rex to show it, so when showing fails the session stays and `list` shows it.
+Every command that gets past its arguments asks Rex first, `list` and a `close` that finds nothing included, so with Rex unavailable each one exits `1`. An `open` or `close` without `REPOSITORY` outside a terminal fails before that and calls no Rex. Lager never starts the Rex server. `open` creates the session before it asks Rex to show it, so when showing fails the session stays and `list` shows it.
 
 `close` forgets the session, then asks Rex to end it. When Rex fails, the record comes back. Closing a session ends every program in its panes. Run from inside the session it closes, the command ends with the session, so its `Closed session` line is not seen; the session is closed and forgotten all the same.
 

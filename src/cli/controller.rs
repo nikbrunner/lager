@@ -73,7 +73,9 @@ pub fn run(
         Command::Worktree(command) => {
             super::worktree::run(&config_path, command, interaction, interactive)
         }
-        Command::Session(command) => super::session::run(&config_path, command),
+        Command::Session(command) => {
+            super::session::run(&config_path, command, selector, interactive)
+        }
     }
 }
 

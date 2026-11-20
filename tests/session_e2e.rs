@@ -487,6 +487,8 @@ fn without_a_session_section_no_rex_call_happens() {
         &["create", "acme/core", "--json"],
         &["close", "acme/core"],
         &["list"],
+        &["open"],
+        &["close"],
     ] {
         let output = fixture.session(args);
         assert_eq!(stdout(&output), "");
@@ -816,4 +818,181 @@ fn an_unknown_host_or_direction_is_refused() {
         );
         assert_eq!(output.status.code(), Some(1));
     }
+}
+
+/// A fake `fzf` in the fixture's `bin`: it logs each start and the rows it was given, then
+/// prints the rows the `sed` script `$FZF_PICK` selects, or cancels without one.
+fn install_fake_fzf(fixture: &Fixture) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let fzf = fixture.bin.join("fzf");
+    fs::write(
+        &fzf,
+        "#!/bin/sh\nprintf 'started\\n' >> \"$FZF_LOG\"\ncat > \"$FZF_INPUT\"\n[ -n \"$FZF_PICK\" ] || exit 130\nsed -n \"$FZF_PICK\" \"$FZF_INPUT\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fzf, fs::Permissions::from_mode(0o755)).unwrap();
+    fixture.base.join("fzf-log")
+}
+
+impl Fixture {
+    /// `lager session VERB` without a repository, on a terminal, with the fake `fzf` picking
+    /// `pick`; the rows it was offered come back too.
+    fn pick(&self, verb: &str, pick: &str) -> (Output, String) {
+        let input = self.base.join("fzf-input");
+        let _ = fs::remove_file(&input);
+        let mut command = self.command(&self.base);
+        command
+            .env("FZF_LOG", self.base.join("fzf-log"))
+            .env("FZF_INPUT", &input)
+            .env("FZF_PICK", pick)
+            .args(["session", verb]);
+        let output = support::terminal_output(command);
+        (output, fs::read_to_string(&input).unwrap_or_default())
+    }
+}
+
+#[test]
+fn open_and_close_without_a_repository_fail_outside_a_terminal_before_fzf() {
+    let fixture = Fixture::new();
+    assert!(fixture.session(&["create", "acme/core"]).status.success());
+    let calls = fixture.calls();
+    let log = install_fake_fzf(&fixture);
+    for verb in ["open", "close"] {
+        let started = std::time::Instant::now();
+        let output = fixture
+            .command(&fixture.base)
+            .env("FZF_LOG", &log)
+            .args(["session", verb])
+            .output()
+            .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(
+            stderr(&output),
+            format!("error: session {verb} requires a repository outside a terminal\n")
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stdout(&output), "");
+        assert!(!log.exists(), "fzf started for {verb}");
+    }
+    assert_eq!(fixture.calls(), calls);
+}
+
+#[test]
+fn open_without_a_repository_offers_every_checkout_and_marks_live_sessions() {
+    let fixture = Fixture::new();
+    let review = fixture.linked("review");
+    let spike = fixture.linked("spike");
+    let gone = fixture.linked("gone");
+    git(
+        &fixture.primary,
+        &["worktree", "lock", gone.to_str().unwrap()],
+    );
+    fs::remove_dir_all(&gone).unwrap();
+    let bare = fixture.home.join("repos/acme/bare.git");
+    let primary = fixture.primary.to_str().unwrap();
+    git(
+        &fixture.base,
+        &["clone", "-q", "--bare", primary, bare.to_str().unwrap()],
+    );
+    let tree = fixture.home.join("repos/acme/bare-tree");
+    git(
+        &bare,
+        &["worktree", "add", "-q", tree.to_str().unwrap(), "main"],
+    );
+    assert!(
+        fixture
+            .session(&["create", "acme/core", "review"])
+            .status
+            .success()
+    );
+    install_fake_fzf(&fixture);
+    let rows = format!(
+        "0\tcore           {}\n1\tcore · Review  {} ●\n2\tcore · Spike   {}\n",
+        fixture.primary.display(),
+        review.display(),
+        spike.display()
+    );
+
+    let (output, offered) = fixture.pick("open", "3p");
+    assert_eq!(offered, rows);
+    assert_eq!(stderr(&output), "");
+    assert_eq!(stdout(&output), "Opened session core · Spike\n");
+    assert!(output.status.success());
+    assert_eq!(fixture.creates().len(), 2);
+
+    let (output, _) = fixture.pick("open", "2p");
+    assert_eq!(stdout(&output), "Opened session core · Review\n");
+    assert!(output.status.success());
+    assert_eq!(fixture.creates().len(), 2);
+    let selects = fixture
+        .calls()
+        .iter()
+        .filter(|call| call.contains("session.select"))
+        .count();
+    assert_eq!(selects, 2);
+
+    let (output, _) = fixture.pick("open", "1p;3p");
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        "error: session open takes one checkout; 2 were picked\n"
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(fixture.creates().len(), 2);
+}
+
+#[test]
+fn close_without_a_repository_offers_the_live_sessions_only() {
+    let fixture = Fixture::new();
+    let review = fixture.linked("review");
+    fixture.linked("spike");
+    for args in [
+        &["create", "acme/core"][..],
+        &["create", "acme/core", "review"],
+    ] {
+        assert!(fixture.session(args).status.success());
+    }
+    install_fake_fzf(&fixture);
+
+    let (output, offered) = fixture.pick("close", "2p");
+    assert_eq!(
+        offered,
+        format!(
+            "0\tcore           {}\n1\tcore · Review  {}\n",
+            fixture.primary.display(),
+            review.display()
+        )
+    );
+    assert_eq!(stderr(&output), "");
+    assert_eq!(stdout(&output), "Closed session core · Review\n");
+    assert!(output.status.success());
+    let destroys: Vec<_> = fixture
+        .calls()
+        .into_iter()
+        .filter(|call| call.contains("session.destroy"))
+        .collect();
+    assert_eq!(
+        destroys,
+        ["api call session.destroy {\"session_id\":\"session:2\"}"]
+    );
+}
+
+#[test]
+fn a_cancelled_picker_only_looks_the_sessions_up() {
+    let fixture = Fixture::new();
+    assert!(fixture.session(&["create", "acme/core"]).status.success());
+    install_fake_fzf(&fixture);
+    for verb in ["open", "close"] {
+        let before = fixture.calls().len();
+        let (output, offered) = fixture.pick(verb, "");
+        assert!(!offered.is_empty(), "{verb} offered nothing");
+        assert_eq!(output.status.code(), Some(130), "{verb}");
+        assert_eq!(stdout(&output), "");
+        assert_eq!(
+            fixture.calls()[before..],
+            ["api call session.list"],
+            "{verb}"
+        );
+    }
+    assert_eq!(fixture.creates().len(), 1);
 }

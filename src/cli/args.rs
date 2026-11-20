@@ -72,11 +72,11 @@ pub enum SessionCommand {
         about = "Show the checkout's session, creating it first when there is none",
         after_help = "Examples:\n  lager session open org/project\n  lager session open .\n  lager session open org/project hotfix"
     )]
-    Open(SessionArgs),
+    Open(SessionPickArgs),
     #[command(about = "Create the checkout's session without showing it")]
     Create(SessionCreateArgs),
     #[command(about = "Close the checkout's session")]
-    Close(SessionArgs),
+    Close(SessionPickArgs),
     #[command(about = "List the checkouts that have a session")]
     List(SessionListArgs),
 }
@@ -88,6 +88,20 @@ pub struct SessionArgs {
         help = "Checkout path (absolute, or starting with . or ..) or repository reference"
     )]
     pub repository: String,
+    #[arg(
+        value_name = "NAME",
+        help = "Directory name of a linked worktree of the repository"
+    )]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct SessionPickArgs {
+    #[arg(
+        value_name = "REPOSITORY",
+        help = "Checkout path (absolute, or starting with . or ..) or repository reference; omit to pick one"
+    )]
+    pub repository: Option<String>,
     #[arg(
         value_name = "NAME",
         help = "Directory name of a linked worktree of the repository"
