@@ -2356,12 +2356,7 @@ impl TerminalSession {
                                 frame,
                                 POPUP,
                                 "Add / URL or reference",
-                                add_input_widget(
-                                    form,
-                                    session.marks.len(),
-                                    bindings,
-                                    popup_body_width(area, POPUP),
-                                ),
+                                add_input_widget(form, popup_body_width(area, POPUP)),
                                 format!(
                                     "{} · Tab focus · {}",
                                     first_key_hint(
@@ -2384,9 +2379,7 @@ impl TerminalSession {
                             let (fields, choices) = add_preview_lines(
                                 preview,
                                 form.choice,
-                                session.marks.len(),
                                 home,
-                                bindings,
                                 popup_body_width(area, WIDE_POPUP),
                             );
                             let mut sizing = fields.clone();
@@ -2398,7 +2391,7 @@ impl TerminalSession {
                             );
                             let fields = Paragraph::new(fields).wrap(Wrap { trim: false });
                             let choices = Paragraph::new(choices).wrap(Wrap { trim: false });
-                            // The note under the choices gives way first, then the fields.
+                            // The fields give way before the choices do.
                             let room = content
                                 .height
                                 .saturating_sub(fields.line_count(content.width) as u16);
@@ -2419,7 +2412,7 @@ impl TerminalSession {
                             frame.render_widget(
                                 Paragraph::new(format!(
                                     "{} select · {} · {}",
-                                    rows_hint(bindings, Mode::Confirmation, true),
+                                    rows_hint(bindings, Mode::Confirmation, false),
                                     first_key_hint(
                                         bindings,
                                         Mode::Confirmation,
@@ -3019,9 +3012,7 @@ fn status_lines(
             View::Search
                 | View::Preview
                 | View::WorktreeConfirm
-                | View::AddInput
                 | View::WorktreeInput
-                | View::AddPreview
                 | View::WorktreePlan
                 | View::Worktrees
                 | View::RemoteCreateInput
@@ -3055,11 +3046,12 @@ fn status_lines(
         View::RemoteCreateInput | View::RemoteRenameInput => {
             "Ordinary keys type text · nothing changes on GitHub yet".to_owned()
         }
-        View::AddInput => "Ordinary keys type text · nothing is saved yet".to_owned(),
         View::WorktreeInput => "Ordinary keys type text · nothing is created yet".to_owned(),
-        View::AddPreview | View::WorktreePlan => "Nothing changes until you choose".to_owned(),
+        View::WorktreePlan => "Nothing changes until you choose".to_owned(),
         View::Worktrees => "Worktrees target the current row · marks are not used".to_owned(),
         View::Inspect
+        | View::AddInput
+        | View::AddPreview
         | View::Menu
         | View::Help
         | View::Problems
@@ -4717,8 +4709,7 @@ fn open_add(session: &mut InventorySession, selection: &mut Selection) {
         return;
     }
     enable_remote(session);
-    session.message =
-        Some("Remote enabled by Add · providers loading · typed input works meanwhile".to_owned());
+    session.message = Some("Remote enabled by Add · providers loading".to_owned());
 }
 
 fn enable_remote(session: &mut InventorySession) {
@@ -4874,25 +4865,20 @@ struct AddForm {
     browse: bool,
 }
 
-/// A spacer and the four preview choices, kept in view before the note and the fields.
+/// A spacer and the four preview choices, kept in view before the fields.
 const ADD_CHOICES_HEIGHT: u16 = 5;
 
 /// The preview's choices in board order; the cursor index past them is "Back to reference".
-const ADD_CHOICES: [(AddChoice, &str); 3] = [
-    (AddChoice::Register, "configuration only"),
-    (AddChoice::Clone, "files only"),
-    (AddChoice::CloneRegister, "files, then configuration"),
+const ADD_CHOICES: [AddChoice; 3] = [
+    AddChoice::Register,
+    AddChoice::Clone,
+    AddChoice::CloneRegister,
 ];
 
-fn add_input_widget(
-    form: &AddForm,
-    marked: usize,
-    bindings: &Bindings,
-    width: u16,
-) -> Paragraph<'static> {
+fn add_input_widget(form: &AddForm, width: u16) -> Paragraph<'static> {
     let width = usize::from(width);
     let mut lines = vec![
-        Line::raw("Repository reference"),
+        Line::styled("reference", dim()),
         Line::styled(format!("{}█", escape(&form.text)), focus()),
     ];
     if let Some(reason) = &form.rejected {
@@ -4902,66 +4888,27 @@ fn add_input_widget(
         ));
     }
     lines.extend([
-        Line::styled(
-            "Shorthand, canonical identity or a supported clone URL. One concrete repository, no wildcards. Nothing is saved yet.",
-            dim(),
-        ),
         Line::default(),
-        choice_line(
-            "Preview destination",
-            &bindings.keys(Mode::Input, Action::Accept).join("/"),
-            true,
-            !form.browse,
-            width,
-        ),
-        choice_line(
-            "Browse remote candidates",
-            "closes this form",
-            true,
-            form.browse,
-            width,
-        ),
-        choice_line(
-            "Cancel",
-            &bindings.keys(Mode::Input, Action::Cancel).join("/"),
-            true,
-            false,
-            width,
-        ),
+        choice_line("Preview destination", "", true, !form.browse, width),
+        choice_line("Browse remote candidates", "", true, form.browse, width),
     ]);
-    if marked > 0 {
-        lines.extend([
-            Line::default(),
-            Line::styled(
-                if marked == 1 {
-                    "1 marked row is not a target of Add.".to_owned()
-                } else {
-                    format!("{marked} marked rows are not targets of Add.")
-                },
-                dim(),
-            ),
-        ]);
-    }
     Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 
-/// The preview's fields, and its choices with the closing note; the choices stay in view when
-/// long values leave too little room.
+/// The preview's fields, and its choices; the choices stay in view when long values leave too
+/// little room.
 fn add_preview_lines(
     preview: &AddPreview,
     choice: usize,
-    marked: usize,
     home: &Path,
-    bindings: &Bindings,
     width: u16,
 ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
     let checkout = match preview.checkout {
-        model::CheckoutState::Missing => "missing · verified just now",
-        model::CheckoutState::Cloned => "cloned · matching checkout at the destination",
-        model::CheckoutState::Conflict => "conflict · another checkout is at the destination",
-        model::CheckoutState::Unreadable => "unreadable · the state is unknown",
-        _ if preview.pending => "unknown · not observed yet",
-        _ => "unknown · no checkout observed here",
+        model::CheckoutState::Missing => "missing",
+        model::CheckoutState::Cloned => "cloned",
+        model::CheckoutState::Conflict => "conflict",
+        model::CheckoutState::Unreadable => "unreadable",
+        _ => "unknown",
     };
     let checkout_style = match preview.checkout {
         model::CheckoutState::Cloned => Style::default(),
@@ -4969,36 +4916,30 @@ fn add_preview_lines(
         _ => tint(Color::Red),
     };
     let fields = [
-        ("Reference", escape(&preview.reference), Style::default()),
-        ("Identity", escape(&preview.identity), Style::default()),
+        ("identity", escape(&preview.identity), Style::default()),
         (
-            "Destination",
+            "destination",
             home_relative(&preview.destination, home),
             Style::default(),
         ),
-        ("Checkout", checkout.to_owned(), checkout_style),
+        ("checkout", checkout.to_owned(), checkout_style),
         (
-            "Registration",
+            "registration",
             preview.registration.label().to_owned(),
             dim(),
         ),
         (
-            "Post-clone hook",
+            "hook",
             preview
                 .hook
                 .as_deref()
-                .map_or_else(|| "none declared".to_owned(), escape),
+                .map_or_else(|| "none".to_owned(), escape),
             dim(),
-        ),
-        (
-            "Existing marks",
-            format!("{marked} · unaffected by this action"),
-            Style::default(),
         ),
     ]
     .into_iter()
     .flat_map(|(name, value, style)| {
-        if matches!(name, "Checkout" | "Registration" | "Existing marks") {
+        if matches!(name, "checkout" | "registration") {
             field_lines(name, &value, style, width)
         } else {
             exact_field_lines(name, &value, style, width)
@@ -5007,9 +4948,9 @@ fn add_preview_lines(
     .collect::<Vec<_>>();
     let mut lines = vec![Line::default()];
     let width = usize::from(width);
-    for (index, (action, hint)) in ADD_CHOICES.into_iter().enumerate() {
+    for (index, action) in ADD_CHOICES.into_iter().enumerate() {
         let (hint, enabled) = match preview.eligibility(action) {
-            Eligibility::Available => (hint.to_owned(), true),
+            Eligibility::Available => (String::new(), true),
             Eligibility::Noop(reason) => (format!("no-op · {reason}"), true),
             Eligibility::Unavailable(reason) => (reason.to_owned(), false),
         };
@@ -5021,20 +4962,13 @@ fn add_preview_lines(
             width,
         ));
     }
-    lines.extend([
-        choice_line(
-            "Back to reference",
-            &bindings.keys(Mode::Confirmation, Action::Cancel).join("/"),
-            true,
-            choice == ADD_CHOICES.len(),
-            width,
-        ),
-        Line::default(),
-        Line::styled(
-            "An unknown checkout state disables Clone until it is observed. It is never shown as missing.",
-            dim(),
-        ),
-    ]);
+    lines.push(choice_line(
+        "Back to reference",
+        "",
+        true,
+        choice == ADD_CHOICES.len(),
+        width,
+    ));
     (fields, lines)
 }
 
@@ -5046,7 +4980,7 @@ fn choose_add(session: &mut InventorySession, selection: &mut Selection) {
     let Some(preview) = &form.preview else {
         return;
     };
-    let Some((choice, _)) = ADD_CHOICES.get(form.choice).copied() else {
+    let Some(choice) = ADD_CHOICES.get(form.choice).copied() else {
         form.preview = None;
         return;
     };
@@ -5081,27 +5015,6 @@ fn choose_add(session: &mut InventorySession, selection: &mut Selection) {
             return;
         }
     });
-}
-
-/// What an action touches, under its preview and its outcomes.
-fn batch_note(action: BatchAction) -> &'static str {
-    match action {
-        BatchAction::Register | BatchAction::Unregister => {
-            "Registration changes configuration only. Checkouts and their files stay as they are."
-        }
-        BatchAction::Clone => {
-            "Clone only creates checkouts at configured destinations. Configuration stays as it is. Git owns the terminal while it clones."
-        }
-        BatchAction::CloneRegister => {
-            "A target registers only after its clone succeeded or was a no-op. A failed configuration write does not undo a checkout. Git owns the terminal while it clones."
-        }
-        BatchAction::Remove => {
-            "Registration and exclusions stay unchanged. ensure can recreate these checkouts."
-        }
-        BatchAction::RemoveUnregister => {
-            "An identity is unregistered only after every selected checkout of it is gone. A failed configuration write does not undo a deletion."
-        }
-    }
 }
 
 fn start_batch(session: &mut InventorySession, selection: &mut Selection, batch: Batch) {
@@ -5299,23 +5212,7 @@ fn path_first_lines(detail: &[String], width: u16) -> Vec<Line<'static>> {
 /// Every frozen target before the batch runs: its exact path and identity, and whether it is
 /// eligible, a no-op or blocked, with the reason.
 fn preview_lines(batch: &Batch, home: &Path, width: u16) -> Vec<Line<'static>> {
-    let hidden = batch.targets.iter().filter(|target| target.hidden).count();
-    let mut summary = format!(
-        "{} exact {}",
-        batch.targets.len(),
-        if batch.targets.len() == 1 {
-            "target"
-        } else {
-            "targets"
-        }
-    );
-    if hidden > 0 {
-        summary.push_str(&format!(" · {hidden} hidden by filter"));
-    }
-    let mut lines = vec![
-        Line::raw(summary),
-        Line::styled(batch_note(batch.action), dim()),
-    ];
+    let mut lines = Vec::new();
     for target in &batch.targets {
         let (label, style, reason) = match (&target.blocked, &target.noop) {
             (Some(reason), _) => ("BLOCKED", tint(Color::Red), Some(reason)),
@@ -5362,7 +5259,10 @@ fn preview_lines(batch: &Batch, home: &Path, width: u16) -> Vec<Line<'static>> {
                 "clean".to_owned()
             });
         }
-        lines.extend([Line::default(), Line::from(heading)]);
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.push(Line::from(heading));
         if lossy {
             // The losses to acknowledge come first, one per line; the identity follows.
             let identity = detail.remove(1);

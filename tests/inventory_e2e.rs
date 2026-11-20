@@ -5810,7 +5810,7 @@ fn inventory_registers_every_marked_row_including_hidden_ones_and_reports_each_o
                 vec![
                     "CONFIRM",
                     "Register / preview",
-                    "3 exact targets · 2 hidden by filter",
+                    "absent: exact target",
                     "NO-OP alpha (hidden by filter)",
                     "~/repos/org/alpha · github.com/org/alpha · identity is already registered",
                     "ELIGIBLE beta",
@@ -6007,7 +6007,7 @@ fn inventory_cancelled_preview_changes_nothing_and_keeps_query_cursor_and_marks(
             (
                 vec![
                     "Register / preview",
-                    "1 exact target · 1 hidden by filter",
+                    "absent: exact target",
                     "ELIGIBLE zeta (hidden by filter)",
                     "~/repos/org/zeta · github.com/org/zeta",
                     "Register 1 target",
@@ -6046,6 +6046,112 @@ fn inventory_cancelled_preview_changes_nothing_and_keeps_query_cursor_and_marks(
 
 #[cfg(unix)]
 #[test]
+fn inventory_add_follows_its_boards_with_one_hint_row_over_an_empty_hint_bar() {
+    let temp = temp_dir();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos/org")).unwrap();
+    fs::create_dir_all(temp.path().join("elsewhere")).unwrap();
+    std::os::unix::fs::symlink(temp.path().join("elsewhere"), home.join("repos/org/link")).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    for (rows, cols) in [(32, 132), (24, 80)] {
+        let mut frames = Vec::new();
+        run_inventory_pty_with_exit_observing(
+            support::lager(&home, &config).arg("tui"),
+            &[
+                (vec!["NORMAL · 0 rows", "absent: Scanning"], b"a".to_vec()),
+                (vec!["Add / URL or reference"], b"org/*\r".to_vec()),
+                (
+                    vec!["Rejected: wildcards are not accepted"],
+                    [vec![0x7f; 5], b"org/link\r".to_vec()].concat(),
+                ),
+                (
+                    vec!["Add / preview", "pair: checkout unreadable"],
+                    b"kkkkj\r".to_vec(),
+                ),
+                (
+                    vec!["Clone only unavailable: destination is unreadable"],
+                    b"\x1b".to_vec(),
+                ),
+                (vec!["Add / URL or reference"], b"\x1b".to_vec()),
+                (
+                    vec!["NORMAL", "Add cancelled · nothing changed"],
+                    b"q".to_vec(),
+                ),
+            ],
+            rows,
+            cols,
+            0,
+            |action, _, frame| frames.push((action, frame.to_owned())),
+        );
+        let (rows, cols) = (rows as usize, cols as usize);
+        let frame = |index: usize| {
+            let (_, frame) = frames.iter().find(|(action, _)| *action == index).unwrap();
+            let screen = screen_text(frame, rows, cols);
+            assert_eq!(screen.split('\n').nth(rows - 1), Some(""), "{screen}");
+            assert!(
+                styled_screen(frame, rows, cols)[rows - 1]
+                    .iter()
+                    .all(|(_, reversed)| *reversed),
+                "the empty hint bar stays a bar:\n{screen}"
+            );
+            let body = screen
+                .split('\n')
+                .map(|line| line.split('│').nth(1).unwrap_or_default().trim().to_owned())
+                .collect::<Vec<_>>();
+            (screen, body)
+        };
+        let (screen, body) = frame(1);
+        for line in [
+            "reference",
+            "Preview destination",
+            "Browse remote candidates",
+            "Enter preview · Tab focus · Esc back",
+        ] {
+            assert!(body.iter().any(|body| body == line), "{line}:\n{screen}");
+        }
+        for absent in ["Shorthand", "Cancel", "type text"] {
+            assert!(!screen.contains(absent), "{absent}:\n{screen}");
+        }
+        for index in [3, 4] {
+            let (screen, body) = frame(index);
+            for line in [
+                "Register only",
+                "Back to reference",
+                "j/k select · Enter choose · Esc back",
+            ] {
+                assert!(body.iter().any(|body| body == line), "{line}:\n{screen}");
+            }
+            for (label, value) in [
+                ("identity", "github.com/org/link"),
+                ("checkout", "unreadable"),
+                ("hook", "none"),
+            ] {
+                assert!(
+                    body.iter().any(|body| body.starts_with(label)
+                        && body.split_whitespace().nth(1) == Some(value)),
+                    "{label} {value}:\n{screen}"
+                );
+            }
+            for absent in [
+                "Reference",
+                "marks",
+                "never shown as missing",
+                "until you choose",
+            ] {
+                assert!(!screen.contains(absent), "{absent}:\n{screen}");
+            }
+        }
+        assert!(
+            frame(4)
+                .0
+                .contains("Clone only unavailable: destination is unreadable")
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn inventory_add_rejects_wildcards_and_credentials_without_showing_them() {
     let temp = temp_dir();
     let home = temp.path().join("home");
@@ -6068,7 +6174,7 @@ fn inventory_add_rejects_wildcards_and_credentials_without_showing_them() {
                 vec![
                     "INPUT · 1 row",
                     "Add / URL or reference",
-                    "Repository reference",
+                    "Browse remote candidates",
                     "Enter preview · Tab focus · Esc back",
                     "absent: marked row",
                 ],
@@ -6194,27 +6300,24 @@ fn inventory_cancelled_add_changes_nothing_and_keeps_query_cursor_and_marks() {
                 b"a".to_vec(),
             ),
             (
-                vec![
-                    "Add / URL or reference",
-                    "1 marked row is not a target of Add.",
-                ],
+                vec!["Add / URL or reference", "absent: target of Add"],
                 b"qam/new\r".to_vec(),
             ),
             (
                 vec![
                     "Add / preview",
-                    "pair: Reference qam/new",
-                    "pair: Identity github.com/qam/new",
+                    "absent: Reference",
+                    "pair: identity github.com/qam/new",
                     "~/repos/qam/new",
-                    "pair: Checkout missing",
-                    "pair: Registration unregistered",
+                    "pair: checkout missing",
+                    "pair: registration unregistered",
                     "pair: hook none",
-                    "1 · unaffected by this action",
+                    "absent: unaffected",
                     "Register only",
                     "Clone only",
                     "Clone + register",
                     "Back to reference",
-                    "j/k ↑/↓ select · Enter choose · Esc back",
+                    "j/k select · Enter choose · Esc back",
                 ],
                 b"kkkkjjj\r".to_vec(),
             ),
@@ -6227,7 +6330,10 @@ fn inventory_cancelled_add_changes_nothing_and_keeps_query_cursor_and_marks() {
                 vec!["Add / URL or reference", "absent: qam/new"],
                 b"x/y\r".to_vec(),
             ),
-            (vec!["Add / preview", "pair: Reference x/y"], b"q".to_vec()),
+            (
+                vec!["Add / preview", "pair: identity github.com/x/y"],
+                b"q".to_vec(),
+            ),
             (
                 vec!["Add / URL or reference", "x/y", "absent: Add / preview"],
                 b"\x1b".to_vec(),
@@ -6269,25 +6375,25 @@ fn inventory_add_never_offers_an_unknown_destination_as_missing() {
     for (reference, checkout, clone_only, clone_register) in [
         (
             "org/plain",
-            "unknown · no checkout observed here",
+            "pair: checkout unknown",
             "Clone only unavailable: the destination exists and holds no observed checkout",
             "Clone + register unavailable: the destination exists and holds no observed checkout",
         ),
         (
             "org/link",
-            "pair: Checkout unreadable",
+            "pair: checkout unreadable",
             "Clone only unavailable: destination is unreadable",
             "Clone + register unavailable: destination is unreadable",
         ),
         (
             "org/other",
-            "pair: Checkout conflict",
+            "pair: checkout conflict",
             "Clone only unavailable: destination conflicts with repository",
             "Clone + register unavailable: destination conflicts with repository",
         ),
         // The controls: both clone choices are offered here, so they are not pressed.
-        ("org/alpha", "pair: Checkout cloned", "", ""),
-        ("org/fresh", "pair: Checkout missing", "", ""),
+        ("org/alpha", "pair: checkout cloned", "", ""),
+        ("org/fresh", "pair: checkout missing", "", ""),
     ] {
         actions.push((
             vec!["Add / URL or reference"],
@@ -6375,8 +6481,7 @@ fn inventory_add_stays_usable_while_a_probe_is_pending_and_keeps_its_state_unkno
             (
                 vec![
                     "Add / preview",
-                    "pair: Checkout unknown",
-                    "unknown · not observed yet",
+                    "pair: checkout unknown",
                     "pending",
                     "checkout state is unknown until it is observed",
                 ],
@@ -6424,19 +6529,16 @@ fn inventory_add_registers_a_typed_reference_through_the_batch_and_keeps_marks()
         &[
             (vec!["NORMAL · 1 row", "absent: Scanning"], b"kk a".to_vec()),
             (
-                vec![
-                    "Add / URL or reference",
-                    "1 marked row is not a target of Add.",
-                ],
+                vec!["Add / URL or reference", "absent: target of Add"],
                 format!("{reference}\r").into_bytes(),
             ),
             (
                 vec![
                     "Add / preview",
-                    "pair: Identity github.com/org/beta",
-                    "pair: Checkout missing",
-                    "pair: Registration unregistered",
-                    "pair: only configuration",
+                    "pair: identity github.com/org/beta",
+                    "pair: checkout missing",
+                    "pair: registration unregistered",
+                    "absent: configuration only",
                 ],
                 b"kkkk\r".to_vec(),
             ),
@@ -6555,8 +6657,8 @@ fn inventory_clone_register_hands_the_terminal_to_git_and_returns_with_the_new_s
                 vec![
                     "Add / preview",
                     "~/repos/beta",
-                    "pair: Checkout missing",
-                    "pair: Registration unregistered",
+                    "pair: checkout missing",
+                    "pair: registration unregistered",
                 ],
                 // Typed ahead of the handoff: it must not answer Git's prompt.
                 b"kkkkjj\rleak\r".to_vec(),
@@ -6871,7 +6973,6 @@ fn inventory_clone_batch_reports_each_target_and_continues_past_a_failed_and_a_s
                 vec![
                     "CONFIRM",
                     "Clone only / preview",
-                    "4 exact targets",
                     "ELIGIBLE alpha",
                     "ELIGIBLE broken",
                     "ELIGIBLE delta",
@@ -6991,7 +7092,6 @@ fn inventory_ctrl_c_during_a_clone_handoff_exits_130_and_keeps_the_earlier_clone
             (
                 vec![
                     "Clone + register / preview",
-                    "2 exact targets",
                     "ELIGIBLE alpha",
                     "found at ~/repos/misc/one · clones at ~/repos/alpha",
                     "ELIGIBLE beta",
@@ -7054,8 +7154,8 @@ fn inventory_clone_register_on_a_matching_checkout_registers_without_cloning() {
             (
                 vec![
                     "Add / preview",
-                    "pair: Checkout cloned",
-                    "pair: Registration unregistered",
+                    "pair: checkout cloned",
+                    "pair: registration unregistered",
                 ],
                 b"kkkkjj\r".to_vec(),
             ),
@@ -7116,7 +7216,7 @@ fn inventory_add_blocks_a_clone_whose_destination_appeared_after_the_preview() {
                 format!("{reference}\r").into_bytes(),
             ),
             (
-                vec!["Add / preview", "pair: Checkout missing"],
+                vec!["Add / preview", "pair: checkout missing"],
                 b"kkkkjj\r".to_vec(),
             ),
             (
@@ -7351,7 +7451,7 @@ fn inventory_keeps_keys_typed_at_it_when_a_suspend_starts_no_child() {
             // The target is stale, so no child starts: the second Enter belongs to the
             // inventory and closes the outcomes.
             (
-                vec!["Add / preview", "pair: Checkout missing"],
+                vec!["Add / preview", "pair: checkout missing"],
                 b"kkkkjj\r\r".to_vec(),
             ),
             (
@@ -7559,7 +7659,6 @@ fn inventory_long_preview_scrolls_its_targets_while_the_choices_stay_in_view() {
                 [
                     &[
                         "Register / preview",
-                        "12 exact targets",
                         "ELIGIBLE r00",
                         "absent: ELIGIBLE r11",
                         "PageUp/PageDown scroll",
@@ -7804,8 +7903,8 @@ fn inventory_removal_confirmation_lists_clean_loss_and_blocked_targets_and_cance
                 vec![
                     "CONFIRM",
                     "Remove checkouts / keep registration",
-                    "4 exact targets · 3 hidden by filter",
-                    "Registration and exclusions stay unchanged. ensure can recreate these checkouts.",
+                    "absent: exact target",
+                    "absent: ensure can recreate",
                     "ELIGIBLE alpha (hidden by filter)",
                     "~/repos/org/alpha · github.com/org/alpha · clean",
                     "BLOCKED core (hidden by filter)",
@@ -7912,7 +8011,9 @@ fn overflowing_losses(root: &std::path::Path) -> std::path::PathBuf {
         run_git(&planted, &["branch", "-qf", &format!("feature-{number}")]);
     }
     fs::write(planted.join("scratch"), "untracked\n").unwrap();
-    for name in ["alpha", "beta", "gamma", "delta"] {
+    for name in [
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+    ] {
         let nested = planted.join(name);
         fs::create_dir_all(&nested).unwrap();
         run_git(&nested, &["init", "-q"]);
@@ -8360,7 +8461,6 @@ fn inventory_remove_unregister_reports_a_deleted_checkout_and_a_failed_config_wr
                 (
                     vec![
                         "Remove checkouts / unregister",
-                        "2 exact targets",
                         "ELIGIBLE alpha",
                         "ELIGIBLE alpha (copy)",
                         "Remove + unregister 2 targets",
@@ -8435,7 +8535,6 @@ fn inventory_remove_unregister_keeps_registration_while_a_selected_checkout_of_t
             (
                 vec![
                     "Remove checkouts / unregister",
-                    "2 exact targets",
                     "BLOCKED alpha",
                     "~/repos/org/alpha · github.com/org/alpha",
                     "ELIGIBLE alpha (copy)",
@@ -8502,7 +8601,6 @@ fn inventory_remove_unregister_writes_once_per_identity_and_previews_the_unselec
             (
                 vec![
                     "Remove checkouts / unregister",
-                    "3 exact targets",
                     "ELIGIBLE beta",
                     "~/repos/org/beta · github.com/org/beta · clean",
                     "~/repos/keep/beta · also unregistered · not selected, its files stay",
@@ -8583,7 +8681,6 @@ fn inventory_removal_blocks_targets_whose_origin_path_or_registration_changed_af
             (
                 vec![
                     "Remove checkouts / unregister",
-                    "4 exact targets",
                     "ELIGIBLE alpha",
                     "ELIGIBLE delta",
                     "ELIGIBLE gamma",
@@ -8883,7 +8980,6 @@ fn inventory_removal_never_follows_an_ancestor_that_became_a_symlink_to_another_
             (
                 vec![
                     "Remove checkouts / keep registration",
-                    "1 exact target",
                     "ELIGIBLE alpha (copy)",
                     "~/repos/org/alpha · github.com/org/alpha · clean",
                 ],
@@ -8991,7 +9087,6 @@ fn inventory_remove_unregister_waits_for_a_complete_scan_and_then_previews_every
             (
                 vec![
                     "Remove checkouts / unregister",
-                    "1 exact target",
                     "ELIGIBLE alpha",
                     "~/repos/zeta/alpha · also unregistered · not selected, its files stay",
                 ],
@@ -9103,7 +9198,6 @@ fn inventory_removal_names_the_declaration_whose_destination_a_found_checkout_oc
             (
                 vec![
                     "Remove checkouts / keep registration",
-                    "1 exact target",
                     "ELIGIBLE other",
                     "~/repos/org/alpha · github.com/org/other · clean",
                     "sits at the configured destination of github.com/org/alpha · that declaration stays",
@@ -11928,7 +12022,8 @@ fn inventory_opening_add_enables_remote_and_cancelling_add_leaves_it_on() {
                     "Add / URL or reference",
                     "bitbucket.org: loading…",
                     "github.com: loading…",
-                    "Remote enabled by Add · providers loading · typed input works meanwhile",
+                    "Remote enabled by Add · providers loading",
+                    "absent: typed input works",
                 ],
                 b"org/thing".to_vec(),
             ),
@@ -11953,7 +12048,7 @@ fn inventory_opening_add_enables_remote_and_cancelling_add_leaves_it_on() {
                     &[
                         "Add / URL or reference",
                         "Browse remote candidates",
-                        "closes this form",
+                        "absent: closes this form",
                         "absent: Remote enabled by Add",
                     ][..],
                 ]
@@ -12041,7 +12136,8 @@ fn inventory_opening_add_from_the_menu_enables_remote_and_without_providers_asks
             (
                 vec![
                     "Add / URL or reference",
-                    "Ordinary keys type text · nothing is saved yet",
+                    "Scan complete · 0 repositories · 0 declarations",
+                    "absent: nothing is saved yet",
                     "Local + declarations · remote off",
                     "absent: problem",
                 ],
