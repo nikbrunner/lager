@@ -6,5 +6,7 @@ pub mod fzf;
 pub mod git;
 pub mod inventory;
 pub mod providers;
+pub(crate) mod rex;
+pub(crate) mod session_record;
 pub mod shell;
 pub mod tools;

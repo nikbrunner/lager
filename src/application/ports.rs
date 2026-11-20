@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 
@@ -51,6 +52,62 @@ pub trait Desktop {
     fn copy(&self, value: &std::ffi::OsStr) -> Result<(), String>;
     /// Opens an already validated HTTPS address.
     fn open(&self, url: &str) -> Result<(), String>;
+}
+
+/// Why a session host could not answer, in one line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostError {
+    /// The host is missing or not running.
+    Unavailable(String),
+    /// A call failed on a running host.
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HostTab {
+    pub name: String,
+    /// Pane ids by pane name.
+    pub panes: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSession {
+    pub id: String,
+    pub tabs: Vec<HostTab>,
+}
+
+/// A terminal that keeps sessions of tabs and panes.
+pub trait SessionHost {
+    /// Ids of live sessions.
+    fn live(&self) -> Result<Vec<String>, HostError>;
+    /// Every pane starts in `directory`. Leaves the host's view where it is.
+    fn create(
+        &self,
+        label: &str,
+        directory: &Path,
+        layout: &crate::domain::session::Layout,
+    ) -> Result<HostSession, HostError>;
+    /// Brings the session to the front of the host's app.
+    fn show(&self, id: &str) -> Result<(), HostError>;
+    /// A session that is already gone counts as closed.
+    fn close(&self, id: &str) -> Result<(), HostError>;
+}
+
+/// The session lager created for a checkout, as it was created.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Recorded {
+    pub id: String,
+    pub label: String,
+    pub tabs: Vec<HostTab>,
+}
+
+/// Sessions by canonical checkout path, kept on this machine.
+pub trait SessionRecords {
+    /// Runs `change` on the records under an exclusive lock and saves what it changed.
+    fn update<T>(
+        &self,
+        change: impl FnOnce(&mut BTreeMap<PathBuf, Recorded>) -> T,
+    ) -> Result<T, String>;
 }
 
 pub trait ConfigurationFilesystem {

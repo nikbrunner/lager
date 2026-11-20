@@ -2,6 +2,7 @@ pub mod args;
 pub mod controller;
 pub mod interaction;
 mod inventory;
+mod session;
 mod signals;
 mod worktree;
 use std::io::IsTerminal;

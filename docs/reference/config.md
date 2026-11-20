@@ -24,6 +24,7 @@ post_clone = "make setup"
 | `repositories` | No | Empty array | Each item is an explicit repository or a trailing `/*` wildcard. |
 | `inventory` | No | Default bindings | Mode-aware inventory key maps. |
 | `worktree_root` | No | None | Base directory for new worktrees: `~`, `~/relative`, or a relative path under `HOME`. Absolute paths and `..` are rejected. |
+| `session` | No | None | The terminal host and the layout of new sessions. See [Session](#session). |
 
 `root` resolves from `HOME`, never from the working directory. A root that does not exist yet is an empty inventory: `status` and `tui` say so in a note and exit `0`. `init` converts an absolute root under `HOME` to a portable `~` path before writing it.
 
@@ -127,6 +128,66 @@ available, without source values that could expose credentials. Trusted
 `post_clone` commands remain executable configuration, not a secret-scanning surface.
 
 A canonical ID for a custom host requires a matching provider entry. Full clone URLs remain valid without a provider. GitHub and Bitbucket Cloud map `host/path` to `root/prefix/path`; custom hosts include the host in the destination. Data Center removes a leading `~` only from a personal-project path segment.
+
+## Session
+
+The `[session]` section turns on [`lager session`](cli.md#sessions). It names the terminal host and the layout every new session starts with. Without the section, lager calls no terminal host: the session commands exit `1` and name the missing section, and every other command is unaffected.
+
+```toml
+[session]
+host = "rex"
+
+[session.layouts.default]
+focus = "Agents"
+
+[session.layouts.default.tabs.Agents]
+order = 1
+root = { pane = "Agent I" }
+splits = [{ source = "Agent I", pane = "Agent II", direction = "right" }]
+
+[session.layouts.default.tabs.Shells]
+order = 2
+root = { pane = "Shell I" }
+splits = [{ source = "Shell I", pane = "Shell II", direction = "down", ratio = 0.3 }]
+```
+
+| Field | Required | Default | Rules |
+| --- | --- | --- | --- |
+| `host` | Yes | — | `rex`. |
+| `layouts.default` | Yes | — | The layout of every new session. |
+| `layouts.default.focus` | No | None | The name of the tab a new session shows first. It has to name a tab. |
+| `layouts.default.tabs.NAME` | At least one | — | A tab named `NAME`. |
+| `…tabs.NAME.order` | No | `0` | Tabs open sorted by `order`, then by name. |
+| `…tabs.NAME.root` | Yes | — | `{ pane = "PANE" }`: the pane the tab starts with. |
+| `…tabs.NAME.splits` | No | Empty array | Splits applied in order, each `{ source, pane, direction, ratio }`. |
+| `source` | Yes | — | The pane to split, the root or a pane an earlier split created. |
+| `pane` | Yes | — | The name of the new pane, unique within its tab. |
+| `direction` | Yes | — | Where the new pane goes: `right`, `left`, `down` (or `below`) or `up` (or `above`). |
+| `ratio` | No | `0.5` | The new pane's share of the split pane's room, between 0 and 1, both excluded. |
+
+Every pane starts a shell in the checkout and carries its name as its label. Lager uses the layout named `default`. The layout has the shape of Helm's layout configuration, so a Helm layout moves over once its tables sit under `session.`: Helm's `[layouts.default]` becomes `[session.layouts.default]`.
+
+The section is validated whenever the configuration is loaded, by every lager command. An invalid `[session]` section is a configuration error for all of them, `status` and `tui` included, and they exit `1` at startup before doing anything. A running inventory that reloads it keeps the previous configuration, as for any configuration that fails to load. The layout errors name the setting at fault:
+
+| Message | Cause |
+| --- | --- |
+| `session.layouts.default: is missing` | The section has no `default` layout. |
+| `session.layouts.default: has no tabs` | The layout has no tab. |
+| `session.layouts.default: focus names no tab "X"` | `focus` names a tab that does not exist. |
+| `session.layouts.default: tab T: no pane "X"` | A split's `source` names no pane of tab `T` at that point. |
+| `session.layouts.default: tab T: pane "X" is named twice` | A split's `pane` names a pane that tab `T` already has. |
+| `session.layouts.default: ratio R is not between 0 and 1` | A `ratio` is 0, 1 or outside that range. |
+
+`lager session` prints these as `error: invalid config: MESSAGE`; `status` and the other repository commands print `lager: invalid config: MESSAGE`.
+
+Unknown keys inside `[session]` are errors, unlike unknown keys at the top level, which only warn. A missing `host`, an unknown host, an unknown direction or an unknown key fails with the TOML parser's message, for example:
+
+```text
+error: could not parse config /home/dev/.config/lager/config.toml: session: unknown variant `tmux`, expected `rex`
+error: could not parse config /home/dev/.config/lager/config.toml: session: unknown variant `diagonal`, expected one of `right`, `left`, `below`, `down`, `above`, `up`
+```
+
+Lager records which session it opened for which checkout in `sessions.json`, beside the configuration lock under `LAGER_CACHE_DIR` or `$HOME/.cache/lager`. The record belongs to this machine and is never written to the configuration.
 
 ## Inventory key maps
 

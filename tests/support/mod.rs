@@ -112,6 +112,110 @@ pub fn install_fake_gh(dir: &Path) -> (PathBuf, PathBuf) {
     (bin, state)
 }
 
+/// Logs its arguments per call to `$REX_ARGS_LOG`, keeps one file per session under
+/// `$REX_STATE/sessions` and the last create script in `$REX_STATE/script.lua`. Its replies,
+/// errors and exit codes follow captures from a real Rex, except `bad-list`'s invented `{}`. A
+/// file in `$REX_STATE` switches a
+/// mode: `offline`, `create-fails`, `slow-create`, `bad-list`, `destroy-fails`, `vanished`
+/// (destroy answers that the session is gone while the list still shows it), `no-app`.
+#[allow(dead_code)]
+pub const FAKE_REX: &str = r##"#!/bin/sh
+printf '%s\n' "$*" >> "$REX_ARGS_LOG"
+[ "$1" = "--autostart=false" ] && shift
+[ "$1" = "--timeout" ] && shift 2
+if [ -e "$REX_STATE/offline" ]; then
+  printf '%s\n' "Error: no Rex server is running at $REX_STATE/server.sock, and autostart is disabled" >&2
+  exit 4
+fi
+sessions="$REX_STATE/sessions"
+mkdir -p "$sessions"
+case "$1 $2 $3" in
+  "do - --json")
+    cat > "$REX_STATE/script.lua"
+    if [ -e "$REX_STATE/create-fails" ]; then
+      printf '%s\n' 'Error: stdin:4: session.create: stream response "control-3" failed: initial_windows[1]: block flavor not found: "com.example.nonexistent.flavor" (status=404 code=not_found)' >&2
+      exit 1
+    fi
+    [ -e "$REX_STATE/slow-create" ] && /bin/sleep 1
+    n=$(( $(cat "$REX_STATE/counter" 2>/dev/null || printf 0) + 1 ))
+    printf '%s' "$n" > "$REX_STATE/counter"
+    : > "$sessions/$n"
+    # One window per layout, one block per pane in it, pretty-printed like `rex do --json`.
+    printf '{\n  "initial_windows": ['
+    rest="$5"; window=0; comma=""
+    while :; do
+      case "$rest" in *'"layout":'*) ;; *) break ;; esac
+      rest="${rest#*\"layout\":}"
+      window=$((window + 1))
+      count=$(printf '%s' "${rest%%\"layout\":*}" | grep -o '"block":' | grep -c .)
+      printf '%s\n    {\n      "block_ids": [' "$comma"
+      block=0; separator=""
+      while [ "$block" -lt "$count" ]; do
+        block=$((block + 1))
+        printf '%s\n        "block:%s-%s-%s"' "$separator" "$n" "$window" "$block"
+        separator=","
+      done
+      printf '\n      ],\n      "revision": %s,\n      "window_id": "window:%s-%s"\n    }' "$window" "$n" "$window"
+      comma=","
+    done
+    printf '\n  ],\n  "session_id": "session:%s"\n}\n' "$n"
+    ;;
+  "api call session.list")
+    if [ -e "$REX_STATE/bad-list" ]; then printf '{}\n'; exit 0; fi
+    printf '{"sessions":['
+    separator=""
+    for file in "$sessions"/*; do
+      [ -e "$file" ] || continue
+      n="${file##*/}"
+      printf '%s{"session_id":"session:%s","label":"session %s"}' "$separator" "$n" "$n"
+      separator=","
+    done
+    printf ']}\n'
+    ;;
+  "api call session.destroy")
+    id="${4#*\"session_id\":\"}"; id="${id%%\"*}"
+    if [ -e "$REX_STATE/destroy-fails" ]; then
+      printf '%s\n' 'Error: stream response "control-1" failed: internal error (status=500 code=internal)' >&2
+      exit 1
+    fi
+    if [ -e "$REX_STATE/vanished" ] || [ ! -e "$sessions/${id#session:}" ]; then
+      printf 'Error: stream response "control-1" failed: session %s not found (status=404 code=session_not_found)\n' "$id" >&2
+      exit 3
+    fi
+    /bin/rm "$sessions/${id#session:}"
+    printf '{}\n'
+    ;;
+  "api call client.list")
+    if [ -e "$REX_STATE/no-app" ]; then printf '{"clients":[]}\n'; exit 0; fi
+    printf '{"clients":['
+    printf '{"client_id":"client:old","info":{"kind":"app"},"connected_at":"2026-11-20T08:00:00.000001+01:00","connection_state":"connected","session_ids":[]},'
+    printf '{"client_id":"client:lost","info":{"kind":"app"},"connected_at":"2026-11-20T10:00:00.000001+01:00","connection_state":"lost","session_ids":[]},'
+    printf '{"client_id":"client:app","info":{"kind":"app"},"connected_at":"2026-11-20T09:00:00.000001+01:00","connection_state":"connected","session_ids":[]}'
+    printf ']}\n'
+    ;;
+  "api call client.perform") printf '{"performed_by":"client:app"}\n' ;;
+  *) printf 'Error: unexpected rex call: %s\n' "$*" >&2; exit 2 ;;
+esac
+"##;
+
+/// Puts the fake `rex` into `<dir>/bin` and its state into `<dir>/state`. Returns both
+/// directories.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub fn install_fake_rex(dir: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("bin");
+    let state = dir.join("state");
+    for directory in [&bin, &state] {
+        std::fs::create_dir_all(directory).expect("create fake rex directory");
+    }
+    let rex = bin.join("rex");
+    std::fs::write(&rex, FAKE_REX).expect("write fake rex");
+    std::fs::set_permissions(&rex, std::fs::Permissions::from_mode(0o755))
+        .expect("make rex executable");
+    (bin, state)
+}
+
 static TOOLS: OnceLock<tempfile::TempDir> = OnceLock::new();
 static OUTBOUND_TRIPWIRE: OnceLock<OutboundTripwire> = OnceLock::new();
 

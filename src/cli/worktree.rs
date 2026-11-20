@@ -20,20 +20,20 @@ use crate::presentation::escape;
 const GIT: NativeGit = NativeGit;
 const FILES: Filesystem = Filesystem;
 
-fn error(message: impl std::fmt::Display) {
+pub(super) fn error(message: impl std::fmt::Display) {
     eprintln!("error: {}", escape(message));
 }
 
-struct Settings {
+pub(super) struct Settings {
     home: PathBuf,
-    cwd: PathBuf,
+    pub(super) cwd: PathBuf,
     config: Option<Config>,
     worktree_root: Option<PathBuf>,
 }
 
 impl Settings {
     /// Reads the configuration when there is one; worktree commands run without it.
-    fn load(config_path: &Path) -> Result<Self, i32> {
+    pub(super) fn load(config_path: &Path) -> Result<Self, i32> {
         let fail = |message: String| {
             error(message);
             1
@@ -68,13 +68,9 @@ impl Settings {
     }
 
     /// A path is absolute or starts with `.` or `..`; anything else is a repository reference.
-    fn repository(&self, argument: &str) -> Result<Repository, String> {
+    pub(super) fn repository(&self, argument: &str) -> Result<Repository, String> {
         let explicit = Path::new(argument);
-        let path = if explicit.is_absolute()
-            || matches!(argument, "." | "..")
-            || argument.starts_with("./")
-            || argument.starts_with("../")
-        {
+        let path = if is_path(argument) {
             worktrees::absolute(&self.cwd, explicit)
         } else {
             validate_reference_safety(argument).map_err(|source| source.to_string())?;
@@ -89,6 +85,14 @@ impl Settings {
         };
         worktrees::resolve_repository(&GIT, &FILES, &path, true)
     }
+}
+
+/// A path is absolute or starts with `.` or `..`; anything else is a repository reference.
+pub(super) fn is_path(argument: &str) -> bool {
+    Path::new(argument).is_absolute()
+        || matches!(argument, "." | "..")
+        || argument.starts_with("./")
+        || argument.starts_with("../")
 }
 
 pub(super) fn run(

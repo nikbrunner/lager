@@ -6,12 +6,13 @@ For the inventory TUI, use the [inventory acceptance walkthrough](docs/how-to/ve
 
 - Build: the binary under test. Record `lager --version` with
   the acceptance results.
-- Surface: CLI, its terminal prompts and picker, and the inventory TUI for worktrees and remote discovery; no browser.
+- Surface: CLI, its terminal prompts and picker, the inventory TUI for worktrees and remote discovery, and the Rex app for sessions; no browser.
 - Persona: ordinary local user, not root. Use only disposable repositories.
 - Agent platform: macOS ARM64. Linux evidence is outstanding.
 - Change: atomic registration, URL retention, guarded removal, child-result cancellation,
   terminal-safe human fields, config/provider acceptance evidence, worktree
-  commands and the Worktrees popup, and remote discovery in the inventory.
+  commands and the Worktrees popup, remote discovery in the inventory, and the
+  session commands.
 - Local evidence: formatting, warning-denying Clippy, the locked all-target suite
   (516 tests), and the release build passed on macOS ARM64.
 - Boundary: native OS/shell signal and job-control behavior is unchanged.
@@ -137,6 +138,54 @@ remote_lager() { PATH="$SANDBOX/tools:$PATH" lager --config "$SANDBOX/remote.tom
 
 - [ ] Run `remote_lager tui` without `--remote` and press `a`. Expect the Add form and the source line switching to `github.com: loading…`. Press Esc; remote discovery stays on and the candidates appear once the stub answers.
   - Agent check: PASS — `inventory_opening_add_enables_remote_and_cancelling_add_leaves_it_on` and `inventory_opening_add_from_the_menu_enables_remote_and_without_providers_asks_nothing`.
+
+## Sessions
+
+These steps use your real Rex, because they check what it shows. They create one throwaway session for the sandbox `remote` checkout (`$PRIMARY` from Worktrees), labelled `remote`, and close it at the end. Rex must be running, with its app open.
+
+The wrapper keeps your real `HOME`, unlike `lager` above: lager finds the bundled `rex` under `HOME`, and Rex may find its server through it. Only the configuration and the session record are sandboxed. Name the checkout by path, never by reference.
+
+```sh
+cat > "$SANDBOX/session.toml" <<'TOML'
+root = "repos"
+
+[session]
+host = "rex"
+
+[session.layouts.default]
+focus = "Agents"
+
+[session.layouts.default.tabs.Agents]
+order = 1
+root = { pane = "Agent I" }
+splits = [{ source = "Agent I", pane = "Agent II", direction = "right" }]
+
+[session.layouts.default.tabs.Shells]
+order = 2
+root = { pane = "Shell I" }
+TOML
+session_lager() {
+  env LAGER_CONFIG="$SANDBOX/session.toml" LAGER_CACHE_DIR="$SANDBOX/cache" "$BIN" "$@"
+}
+```
+
+- [ ] From a shell outside the Rex session you want to test, run `session_lager session open "$PRIMARY"`. Expect `Opened session remote` and exit 0. Rex comes to the front, showing a new session `remote` on the `Agents` tab with `Agent I` on the left and `Agent II` on the right, and a second tab `Shells` with `Shell I`. Run `pwd -P` in `Agent II` and in `Shell I`; both print the physical path of `$PRIMARY` (under `/private/var` on macOS).
+  - Agent check: NOT RUN — `open` moves the Rex view. `session_e2e::open_creates_once_and_selects_on_the_newest_connected_app` and `create_makes_one_session_with_the_configured_layout` pass against a fake `rex`.
+
+- [ ] Switch Rex to another session, then run `session_lager session open "$PRIMARY"` again. Expect `Opened session remote` and Rex back on the same `remote` session, with no second one. `session_lager session list` prints one line: `remote`, the `$PRIMARY` path and a `session:` id.
+  - Agent check: NOT RUN — moves the Rex view. `open_creates_once_and_selects_on_the_newest_connected_app` (one create, a select per open) passes against the fake.
+
+- [ ] Turn off Rex's Remote Control setting. Close the session in Rex by hand, then run `session_lager session open "$PRIMARY"`. Expect Rex not to switch. Run `echo $?` and record what `open` printed and its exit status in the defect log. `session_lager session list` shows a new `remote` session. Turn Remote Control on again and repeat `open`; expect `Opened session remote` and still one session in the list.
+  - Agent check: NOT RUN — needs the Rex app with Remote Control off. `open_without_an_app_fails_on_a_running_host` passes against the fake for an app that cannot select.
+
+- [ ] Quit the Rex app, start it again from the Dock, and open a pane in any session. Set the two values the entry block printed, `SANDBOX=…` and `BIN=…`, then run `env -u REX_BIN_DIR PATH=/usr/bin:/bin LAGER_CONFIG="$SANDBOX/session.toml" LAGER_CACHE_DIR="$SANDBOX/cache" "$BIN" session create "$SANDBOX/home/repos/remote"`. Expect exit 0 with `Session remote already exists`, or `Created session remote` if the session did not survive the restart, and Rex staying where it is. No `rex CLI not found`: lager finds the bundled `rex` without `PATH`.
+  - Agent check: NOT RUN — needs Rex restarted from the Dock; the lookup's bundled path cannot be sandboxed in tests.
+
+- [ ] In a pane of the `remote` session, set `SANDBOX=…` and `BIN=…` as before and run `env LAGER_CONFIG="$SANDBOX/session.toml" LAGER_CACHE_DIR="$SANDBOX/cache" "$BIN" session close .`. Expect the whole session to close, the pane with it, so the `Closed session remote` line is never seen. From another shell, `session_lager session list` prints nothing, and Rex no longer lists `remote`.
+  - Agent check: NOT RUN — closes the session the command runs in. `close_ends_the_session_and_forgets_it` passes against the fake; the record is saved before Rex is asked to close.
+
+- [ ] Clean up if a step failed before the close: `session_lager session close "$PRIMARY"`. Expect `Closed session remote` or `No session for …`, and no `remote` session left in Rex.
+  - Agent check: NOT RUN — needs the real Rex.
 
 ## Important edge cases
 

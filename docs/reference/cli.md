@@ -28,6 +28,10 @@ Lager selects the configuration path in this order:
 | `worktree list` | `worktree list [REPOSITORY] [--json]` | Lists the primary checkout and every linked worktree of one repository. |
 | `worktree add` | `worktree add <REPOSITORY> <NAME> [--branch EXISTING \| --new-branch NEW] [--start REF] [--path PATH]` | Creates a linked worktree through `git worktree add`. |
 | `worktree remove` | `worktree remove <PATH> [--yes] [--force]` | Removes one linked worktree through `git worktree remove` and keeps its branch. |
+| `session open` | `session open <REPOSITORY> [NAME]` | Shows the checkout's terminal session in Rex, creating it first when there is none. |
+| `session create` | `session create <REPOSITORY> [NAME] [--json]` | Creates the checkout's session without showing it. |
+| `session close` | `session close <REPOSITORY> [NAME]` | Closes the checkout's session. |
+| `session list` | `session list [--json]` | Lists the checkouts that have a session. |
 
 `list` and `ls` are visible aliases of `status`. All three names accept the same arguments, options, and configuration selection, and produce identical output and exit statuses.
 
@@ -508,7 +512,73 @@ For an absent path Lager names the owning repository when the command runs insid
 
 Lager checks again immediately before it calls Git. If the worktree differs from what the summary showed (its losses, its HEAD, its lock, its ownership), the command exits `1` and removes nothing.
 
-The worktree commands print `error:` and `hint:` lines; the other commands prefix diagnostics with `lager:`.
+The worktree commands print `error:` and `hint:` lines, the session commands print `error:` lines, and the other commands prefix diagnostics with `lager:`.
+
+## Sessions
+
+`lager session` opens a checkout as a terminal session in Rex with the tabs and panes of the configured layout. Every pane starts in the checkout. The commands need a [`[session]` section](config.md#session) in the configuration; without one they exit `1` with `error: sessions are not configured; add [session] to CONFIG` and call no Rex. The [sessions how-to](../how-to/sessions.md) walks through the setup.
+
+Lager keeps one session per checkout and finds it again through a record on this machine, never by its label. A session made by hand, or by another tool, is unknown to lager. Every command first asks Rex which sessions are live and forgets the records of the others, so a session closed in Rex is created again on the next `open` or `create`.
+
+### Naming the checkout
+
+`REPOSITORY` is a checkout path or a repository reference:
+
+- A path (absolute, `.`, `..`, or starting with `./` or `../`) names the working tree it lies in, from any directory inside it. Inside a linked worktree that is the worktree.
+- A reference such as `org/project` names the primary checkout the configuration assigns to it.
+
+`NAME` picks a linked worktree of that repository by its directory name. No match, or more than one, exits `1` and lists the linked worktrees, or the matches, one indented path per line, followed by `error: PATH: ERROR` for each worktree entry Git could not read:
+
+```text
+error: no linked worktree of /home/dev/repos/acme/core is named spike
+  /home/dev/repos/acme/core.worktrees/review
+```
+
+```text
+error: several linked worktrees are named spike
+  /home/dev/one/spike
+  /home/dev/two/spike
+```
+
+`open` and `create` need the checkout's directory and exit `1` with `error: not a Git checkout: PATH` without it; for a reference, `PATH` is the destination under the root. `close` also reaches a worktree whose directory is gone, as long as Git still lists it.
+
+### Labels
+
+A session's label is the primary checkout's directory name, such as `core`. A linked worktree's label adds its directory name in words: `-` and `_` become spaces and the first letter is upper-cased, so `dev_spike-one` gives `core · Dev spike one`. Control characters are dropped, the label is cut to at most 128 bytes on a character boundary, and surrounding whitespace is trimmed. For an existing session lager prints the label it recorded at creation, also when the label was edited in Rex since.
+
+### Outcomes
+
+| Command and outcome | Output | Exit |
+| --- | --- | --- |
+| `create`, a new session | `Created session LABEL` | `0` |
+| `create`, the session exists | `Session LABEL already exists` | `0` |
+| `open`, new or existing | `Opened session LABEL` | `0` |
+| `close` | `Closed session LABEL` | `0` |
+| `close`, no live session | `No session for PATH` | `0` |
+| No `[session]` section, or no configuration file | `error: sessions are not configured; add [session] to CONFIG` | `1` |
+| Rex is not installed or not running | `error: session host unavailable: REASON` | `1` |
+| A Rex call fails on a running Rex | `error: session host failed: REASON` | `1` |
+| The checkout is missing | `error: not a Git checkout: PATH` | `1` |
+| The record cannot be locked, read or written | `error: could not lock sessions: …`, `error: could not read sessions PATH: …` or `error: could not write sessions PATH: …` | `1` |
+| Invalid arguments | clap's usage error | `2` |
+
+Success lines go to stdout, error lines to stderr. `PATH` is the canonical checkout path. `REASON` is Rex's own first line, such as `no Rex server is running at SOCKET, and autostart is disabled`, or one of lager's: `rex CLI not found`, `no Rex app connected`, `rex did not answer within 10 s`, `rex listed no session ids`.
+
+Every command, `list` and a `close` that finds nothing included, asks Rex first, so with Rex unavailable each one exits `1`. Lager never starts the Rex server. `open` creates the session before it asks Rex to show it, so when showing fails the session stays and `list` shows it.
+
+`close` forgets the session, then asks Rex to end it. When Rex fails, the record comes back. Closing a session ends every program in its panes. Run from inside the session it closes, the command ends with the session, so its `Closed session` line is not seen; the session is closed and forgotten all the same.
+
+`create --json` prints one document with the session and its panes by name, and `list --json` prints every recorded session; see [session JSON](session-json.md).
+
+### `session list`
+
+The human listing has one line per checkout with a live session, sorted by path, with three columns two spaces apart: the label, the path and Rex's session id. It has no header, and with no sessions it prints nothing.
+
+```text
+$ lager session list
+core              /home/dev/repos/acme/core                      session:01a1f8aa-76be-721e-8f28-6e3ba611fe57
+core · Dev spike  /home/dev/repos/acme/core.worktrees/dev-spike  session:01a1f8ab-8ffc-76ae-836e-30d02892582e
+```
 
 ## Non-interactive use
 
@@ -543,4 +613,4 @@ candidates by hidden row ID, in the order returned by the picker.
 
 A picker or repository interaction cancellation exits 130. Inventory's `q` and Esc use the session exit status described above. Invalid usage exits 2. Configuration, provider, Git, hook, filesystem, and aggregate failures exit 1. Success, no-op, empty selections, and explicitly skipped removals exit 0.
 
-See [status JSON](status-json.md), [worktree JSON](worktree-json.md), [exit codes](exit-codes.md), [automation](../how-to/automation.md), and [safe removal](../how-to/remove-safely.md) for the detailed contracts.
+See [status JSON](status-json.md), [worktree JSON](worktree-json.md), [session JSON](session-json.md), [exit codes](exit-codes.md), [automation](../how-to/automation.md), and [safe removal](../how-to/remove-safely.md) for the detailed contracts.

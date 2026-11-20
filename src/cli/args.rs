@@ -59,6 +59,54 @@ pub enum Command {
         about = "List, create and remove worktrees of one repository"
     )]
     Worktree(WorktreeCommand),
+    #[command(
+        subcommand,
+        about = "Open, create, close and list terminal sessions of checkouts"
+    )]
+    Session(SessionCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionCommand {
+    #[command(
+        about = "Show the checkout's session, creating it first when there is none",
+        after_help = "Examples:\n  lager session open org/project\n  lager session open .\n  lager session open org/project hotfix"
+    )]
+    Open(SessionArgs),
+    #[command(about = "Create the checkout's session without showing it")]
+    Create(SessionCreateArgs),
+    #[command(about = "Close the checkout's session")]
+    Close(SessionArgs),
+    #[command(about = "List the checkouts that have a session")]
+    List(SessionListArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct SessionArgs {
+    #[arg(
+        value_name = "REPOSITORY",
+        help = "Checkout path (absolute, or starting with . or ..) or repository reference"
+    )]
+    pub repository: String,
+    #[arg(
+        value_name = "NAME",
+        help = "Directory name of a linked worktree of the repository"
+    )]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct SessionCreateArgs {
+    #[command(flatten)]
+    pub checkout: SessionArgs,
+    #[arg(long, help = "Render one stable JSON document")]
+    pub json: bool,
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct SessionListArgs {
+    #[arg(long, help = "Render one stable JSON document")]
+    pub json: bool,
 }
 
 #[derive(Debug, Subcommand)]

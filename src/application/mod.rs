@@ -5,5 +5,6 @@ pub mod inventory;
 pub mod ports;
 pub mod registry;
 pub mod remote;
+pub(crate) mod sessions;
 pub mod warehouse;
 pub mod worktrees;

@@ -12,6 +12,7 @@ use crate::application::ports::{
 };
 use crate::domain::config::{Config, ConfigError};
 use crate::domain::repository::{RepositoryRef, renamed_url};
+use crate::domain::session::SessionConfig;
 use crate::presentation::escape;
 
 #[derive(Debug, thiserror::Error)]
@@ -455,7 +456,40 @@ fn decode_config(path: &Path, document: &Document<String>) -> Result<Config, Con
     config.validate()?;
     config.resolve_root(&home_dir())?;
     worktree_root(document)?;
+    session(path, document)?;
     Ok(config)
+}
+
+/// The optional `[session]` section, once its default layout resolves.
+fn session(
+    path: &Path,
+    document: &Document<String>,
+) -> Result<Option<SessionConfig>, ConfigStoreError> {
+    #[derive(serde::Deserialize)]
+    struct Sections {
+        session: Option<SessionConfig>,
+    }
+    let sections: Sections = toml_edit::de::from_document(document.clone()).map_err(|error| {
+        ConfigStoreError::Parse {
+            path: path.to_path_buf(),
+            message: format!("session: {}", error.message()),
+        }
+    })?;
+    if let Some(session) = &sections.session {
+        session.layout().map_err(ConfigError::Semantic)?;
+    }
+    Ok(sections.session)
+}
+
+/// The `[session]` section; `None` when the configuration has none.
+pub(crate) fn load_session(path: &Path) -> Result<Option<SessionConfig>, ConfigStoreError> {
+    let content = fs::read_to_string(path).map_err(|source| ConfigStoreError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let document = parse_document(path, &content)?;
+    decode_config(path, &document)?;
+    session(path, &document)
 }
 
 /// The optional top-level `worktree_root` as written, once it is known to be portable.
@@ -508,7 +542,7 @@ fn config_error_location(
     format!("{kind} at line {line}, column {column} (values omitted)")
 }
 
-struct LockGuard(File);
+pub(crate) struct LockGuard(File);
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
@@ -516,22 +550,30 @@ impl Drop for LockGuard {
     }
 }
 
-fn lock_for(path: &Path) -> Result<LockGuard, ConfigStoreError> {
-    let lock_root = env::var_os("LAGER_CACHE_DIR")
+/// Lager's cache directory: `LAGER_CACHE_DIR`, else `~/.cache/lager`.
+pub(crate) fn cache_dir() -> PathBuf {
+    env::var_os("LAGER_CACHE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".cache/lager"));
-    fs::create_dir_all(&lock_root).map_err(ConfigStoreError::Lock)?;
+        .unwrap_or_else(|| home_dir().join(".cache/lager"))
+}
+
+fn lock_for(path: &Path) -> Result<LockGuard, ConfigStoreError> {
     let identity = lock_identity(path);
     let key = format!("{:x}", seahash(identity.to_string_lossy().as_bytes()));
-    let lock_path = lock_root.join(format!("config-{key}.lock"));
+    lock(&format!("config-{key}.lock")).map_err(ConfigStoreError::Lock)
+}
+
+/// Holds an exclusive lock on the file `name` in the cache directory until dropped.
+pub(crate) fn lock(name: &str) -> std::io::Result<LockGuard> {
+    let lock_root = cache_dir();
+    fs::create_dir_all(&lock_root)?;
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(lock_path)
-        .map_err(ConfigStoreError::Lock)?;
-    file.lock_exclusive().map_err(ConfigStoreError::Lock)?;
+        .open(lock_root.join(name))?;
+    file.lock_exclusive()?;
     Ok(LockGuard(file))
 }
 
@@ -549,11 +591,15 @@ fn lock_identity(path: &Path) -> PathBuf {
 }
 
 fn write_document(path: &Path, document: &DocumentMut) -> Result<(), ConfigStoreError> {
+    replace_file(path, document.to_string().as_bytes())
+        .map_err(|(path, source)| ConfigStoreError::Write { path, source })
+}
+
+/// Writes `contents` to a temporary file beside `path`, then renames it over `path`, keeping
+/// its permissions. The error names the path that failed.
+pub(crate) fn replace_file(path: &Path, contents: &[u8]) -> Result<(), (PathBuf, std::io::Error)> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| ConfigStoreError::Write {
-            path: parent.to_path_buf(),
-            source,
-        })?;
+        fs::create_dir_all(parent).map_err(|source| (parent.to_path_buf(), source))?;
     }
     let metadata = fs::metadata(path).ok();
     let stamp = SystemTime::now()
@@ -564,28 +610,15 @@ fn write_document(path: &Path, document: &DocumentMut) -> Result<(), ConfigStore
         ".{}.lager-{stamp}",
         path.file_name().unwrap_or_default().to_string_lossy()
     ));
-    let mut file = File::create(&temporary).map_err(|source| ConfigStoreError::Write {
-        path: temporary.clone(),
-        source,
-    })?;
-    file.write_all(document.to_string().as_bytes())
+    let mut file = File::create(&temporary).map_err(|source| (temporary.clone(), source))?;
+    file.write_all(contents)
         .and_then(|_| file.sync_all())
-        .map_err(|source| ConfigStoreError::Write {
-            path: temporary.clone(),
-            source,
-        })?;
+        .map_err(|source| (temporary.clone(), source))?;
     if let Some(metadata) = metadata {
-        fs::set_permissions(&temporary, metadata.permissions()).map_err(|source| {
-            ConfigStoreError::Write {
-                path: temporary.clone(),
-                source,
-            }
-        })?;
+        fs::set_permissions(&temporary, metadata.permissions())
+            .map_err(|source| (temporary.clone(), source))?;
     }
-    fs::rename(&temporary, path).map_err(|source| ConfigStoreError::Write {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    fs::rename(&temporary, path).map_err(|source| (path.to_path_buf(), source))?;
     if let Some(parent) = path.parent()
         && let Ok(directory) = File::open(parent)
     {
@@ -637,7 +670,7 @@ fn unknown_key_warnings(document: &DocumentMut) -> Vec<String> {
     for (key, _) in document.iter() {
         if !matches!(
             key,
-            "root" | "providers" | "repositories" | "inventory" | "worktree_root"
+            "root" | "providers" | "repositories" | "inventory" | "worktree_root" | "session"
         ) {
             warnings.push(format!("unknown config key `{}`", escape(key)));
         }
