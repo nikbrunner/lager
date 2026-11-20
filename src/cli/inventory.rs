@@ -3009,10 +3009,6 @@ fn status_lines(
         && !matches!(
             view,
             View::Search
-                | View::WorktreeConfirm
-                | View::WorktreeInput
-                | View::WorktreePlan
-                | View::Worktrees
                 | View::RemoteCreateInput
                 | View::RemoteRenameInput
                 | View::RemoteDeleteConfirm
@@ -3037,15 +3033,12 @@ fn status_lines(
         ),
         _ if message.is_some() && complete => message.unwrap_or_default().to_owned(),
         _ if message.is_some() => format!("{state} · {}", message.unwrap_or_default()),
-        View::WorktreeConfirm | View::RemoteDeleteConfirm | View::RemoteVisibilityConfirm => {
+        View::RemoteDeleteConfirm | View::RemoteVisibilityConfirm => {
             "Nothing changes until you confirm".to_owned()
         }
         View::RemoteCreateInput | View::RemoteRenameInput => {
             "Ordinary keys type text · nothing changes on GitHub yet".to_owned()
         }
-        View::WorktreeInput => "Ordinary keys type text · nothing is created yet".to_owned(),
-        View::WorktreePlan => "Nothing changes until you choose".to_owned(),
-        View::Worktrees => "Worktrees target the current row · marks are not used".to_owned(),
         View::Inspect
         | View::Preview
         | View::AddInput
@@ -3055,6 +3048,10 @@ fn status_lines(
         | View::Problems
         | View::Batch
         | View::QuitBatch
+        | View::Worktrees
+        | View::WorktreeInput
+        | View::WorktreePlan
+        | View::WorktreeConfirm
         | View::WorktreeBlocked => state.to_owned(),
         View::Normal if complete && host_notice.is_some() => {
             host_notice.unwrap_or_default().to_owned()

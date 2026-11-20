@@ -671,10 +671,10 @@ fn list_lines(popup: &Popup, width: usize) -> Vec<Line<'static>> {
 fn list_footer(bindings: &Bindings) -> String {
     let hint = |action, label| first_key_hint(bindings, Mode::Worktrees, action, label);
     [
-        format!("{} select", rows_hint(bindings, Mode::Worktrees, true)),
-        hint(Action::Add, "add worktree…"),
+        format!("{} select", rows_hint(bindings, Mode::Worktrees, false)),
+        hint(Action::Add, "add"),
         hint(Action::Remove, "remove"),
-        hint(Action::Copy, "copy path"),
+        hint(Action::Copy, "copy"),
         hint(Action::Cancel, "close"),
     ]
     .into_iter()
@@ -684,73 +684,25 @@ fn list_footer(bindings: &Bindings) -> String {
 }
 
 fn draw_list(frame: &mut ratatui::Frame<'_>, popup: &Popup, bindings: &Bindings, area: Rect) {
-    let linked = popup.rows.len().saturating_sub(1);
-    let mut intro = vec![Line::styled(
-        format!(
-            "{} · {linked} linked worktree{} · listed by Git, including ones placed elsewhere",
-            popup
-                .identity
-                .as_deref()
-                .map_or("No origin".to_owned(), escape),
-            if linked == 1 { "" } else { "s" }
-        ),
-        dim(),
-    )];
-    intro.extend(
-        popup
-            .faults
-            .iter()
-            .map(|fault| Line::styled(format!("! the list is incomplete · {fault}"), warn())),
-    );
-    intro.push(Line::default());
-    let list = list_lines(popup, usize::from(popup_body_width(area, WIDE_POPUP)));
-    let mut tail = vec![Line::default()];
-    if let Some((record, state)) = popup.rows.get(popup.cursor) {
-        let name = dir_name(&record.path);
-        let remove = bindings.keys(Mode::Worktrees, Action::Remove);
-        let remove = remove.first();
-        tail.push(Line::raw(if record.is_primary {
-            format!("{name} · primary checkout")
-        } else if record.locked || record.prunable {
-            match remove {
-                Some(key) => format!("{name} · {state} · {key} reports the blocker"),
-                None => format!("{name} · {state}"),
-            }
-        } else {
-            let kept = match (&record.branch, &record.head) {
-                (Some(branch), _) => {
-                    format!(
-                        "branch {} is kept",
-                        escape(branch_label(Some(branch), None))
-                    )
-                }
-                (None, Some(head)) => format!("detached HEAD {}", short_id(head)),
-                (None, None) => "HEAD is unknown".to_owned(),
-            };
-            match remove {
-                Some(key) => {
-                    format!("{name} · {key} removes it after listing its losses · {kept}")
-                }
-                None => format!("{name} · {kept}"),
-            }
-        }));
+    let mut intro = popup
+        .faults
+        .iter()
+        .map(|fault| Line::styled(format!("! the list is incomplete · {fault}"), warn()))
+        .collect::<Vec<_>>();
+    if !intro.is_empty() {
+        intro.push(Line::default());
     }
-    tail.push(Line::styled(
-        "The primary checkout is removed from the table, not here, and stays blocked while linked worktrees exist.",
-        dim(),
-    ));
-    let sizing = [intro.clone(), list.clone(), tail.clone()].concat();
+    let list = list_lines(popup, usize::from(popup_body_width(area, WIDE_POPUP)));
+    let sizing = [intro.clone(), list.clone()].concat();
     let [frame_area, title, content, footer] = popup_regions(
         area,
         WIDE_POPUP,
         &Paragraph::new(sizing).wrap(Wrap { trim: false }),
     );
     let intro = Paragraph::new(intro).wrap(Wrap { trim: false });
-    let tail = Paragraph::new(tail).wrap(Wrap { trim: false });
-    let [intro_area, list_area, tail_area] = Layout::vertical([
+    let [intro_area, list_area] = Layout::vertical([
         Constraint::Length(intro.line_count(content.width) as u16),
         Constraint::Min(2),
-        Constraint::Length(tail.line_count(content.width) as u16),
     ])
     .areas(content);
     // The heading stays; the rows scroll so the cursor row is the last one in view at most.
@@ -766,7 +718,6 @@ fn draw_list(frame: &mut ratatui::Frame<'_>, popup: &Popup, bindings: &Bindings,
     );
     frame.render_widget(intro, intro_area);
     frame.render_widget(Paragraph::new(rows), list_area);
-    frame.render_widget(tail, tail_area);
     frame.render_widget(Paragraph::new(list_footer(bindings)).style(dim()), footer);
 }
 
@@ -775,9 +726,8 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, popup: &Popup, bindings: &Bin
     let (cap, title, lines, footer) = match &popup.stage {
         Stage::List => return draw_list(frame, popup, bindings, area),
         Stage::Input { text, rejected } => {
-            let width = usize::from(popup_body_width(area, POPUP));
             let mut lines = vec![
-                Line::raw("Worktree name"),
+                Line::styled("name", dim()),
                 Line::styled(format!("{}█", escape(text)), focus()),
             ];
             if let Some(reason) = rejected {
@@ -786,28 +736,6 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, popup: &Popup, bindings: &Bin
                     tint(Color::Red),
                 ));
             }
-            lines.extend([
-                Line::styled(
-                    "Letters, digits, `.`, `_` or `-`. A local branch of that name is checked out; otherwise a new branch of that name starts at the primary checkout's HEAD.",
-                    dim(),
-                ),
-                Line::styled("Nothing is created yet.", dim()),
-                Line::default(),
-                choice_line(
-                    "Preview plan",
-                    &bindings.keys(Mode::Input, Action::Accept).join("/"),
-                    true,
-                    true,
-                    width,
-                ),
-                choice_line(
-                    "Cancel",
-                    &bindings.keys(Mode::Input, Action::Cancel).join("/"),
-                    true,
-                    false,
-                    width,
-                ),
-            ]);
             (
                 POPUP,
                 format!("Add worktree / {}", popup.name),
@@ -834,7 +762,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, popup: &Popup, bindings: &Bin
                 body.scroll((scroll, 0)),
                 format!(
                     "{} scroll · {}",
-                    rows_hint(bindings, Mode::Inspection, true),
+                    rows_hint(bindings, Mode::Inspection, false),
                     first_key_hint(bindings, Mode::Inspection, Action::Cancel, "back")
                 ),
             );
@@ -885,23 +813,17 @@ fn blocked_body(
     width: u16,
 ) -> Paragraph<'static> {
     let mut lines = exact_field_lines("path", &popup.shown(path), Style::default(), width);
-    lines.push(Line::default());
     for blocker in blockers {
-        lines.push(Line::styled(
-            format!("blocked: {}", escape(&blocker.message)),
+        lines.extend(field_lines(
+            "blocked",
+            &escape(&blocker.message),
             tint(Color::Red),
+            width,
         ));
         if let Some(hint) = &blocker.hint {
-            lines.push(Line::styled(format!("hint: {}", escape(hint)), dim()));
+            lines.extend(exact_field_lines("hint", &escape(hint), dim(), width));
         }
     }
-    lines.extend([
-        Line::default(),
-        Line::styled(
-            "Nothing was removed. Accepting losses does not waive a blocker.",
-            dim(),
-        ),
-    ]);
     Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 
@@ -943,7 +865,7 @@ impl Sheet {
 fn sheet(popup: &Popup, bindings: &Bindings, area: Rect) -> Option<Sheet> {
     let width = popup_body_width(area, WIDE_POPUP);
     let hint = |action, label| first_key_hint(bindings, Mode::Confirmation, action, label);
-    let rows = rows_hint(bindings, Mode::Confirmation, true);
+    let rows = rows_hint(bindings, Mode::Confirmation, false);
     match &popup.stage {
         Stage::Plan { plan, back, .. } => {
             let branch = match &plan.start {
@@ -965,28 +887,10 @@ fn sheet(popup: &Popup, bindings: &Bindings, area: Rect) -> Option<Sheet> {
             Some(Sheet {
                 title: "Add worktree / plan".to_owned(),
                 required,
-                optional: vec![
-                    Line::styled(
-                        "Git creates the worktree and prints its own output. Lager copies no files into it.",
-                        dim(),
-                    ),
-                    Line::default(),
-                ],
+                optional: vec![Line::default()],
                 choices: vec![
-                    choice_line(
-                        "Create worktree",
-                        "default",
-                        true,
-                        !back,
-                        usize::from(width),
-                    ),
-                    choice_line(
-                        "Back to name",
-                        &bindings.keys(Mode::Confirmation, Action::Cancel).join("/"),
-                        true,
-                        *back,
-                        usize::from(width),
-                    ),
+                    choice_line("Create worktree", "", true, !back, usize::from(width)),
+                    choice_line("Back to name", "", true, *back, usize::from(width)),
                 ],
                 footer: format!(
                     "{rows} select · {} · {}",
@@ -1024,7 +928,7 @@ fn sheet(popup: &Popup, bindings: &Bindings, area: Rect) -> Option<Sheet> {
                 required,
                 optional: vec![Line::default()],
                 choices: vec![
-                    choice_line("Cancel", "default", true, !remove, usize::from(width)),
+                    choice_line("Cancel", "", true, !remove, usize::from(width)),
                     choice_line(
                         if lossy {
                             "Accept these losses and remove this worktree"

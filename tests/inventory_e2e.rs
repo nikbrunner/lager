@@ -8191,7 +8191,7 @@ fn inventory_worktree_confirmation_at_80_by_24_fits_file_losses_and_a_hint() {
                     "2 untracked files",
                     "stopped git am (in the worktree: git am --continue or",
                     "git am --abort)",
-                    "pair: Cancel default",
+                    "absent: default",
                     "Accept these losses and remove this worktree",
                 ],
                 b"j\r".to_vec(),
@@ -10296,7 +10296,7 @@ fn git_stdout(directory: &std::path::Path, args: &[&str]) -> String {
 #[cfg(unix)]
 const POPUP_READY: [&str; 3] = ["NORMAL · 1 row", "absent: Scanning", "selected: core"];
 #[cfg(unix)]
-const POPUP_FOOTER: &str = "j/k ↑/↓ select · a add worktree… · r remove · c copy path · Esc close";
+const POPUP_FOOTER: &str = "j/k select · a add · r remove · c copy · Esc close";
 
 #[cfg(unix)]
 #[test]
@@ -10355,7 +10355,7 @@ fn inventory_worktree_popup_lists_every_working_tree_and_copies_the_selected_pat
                 vec![
                     "WORKTREES · 1 row",
                     "Worktrees / core",
-                    "github.com/org/core · 5 linked worktrees · listed by Git, including ones placed elsewhere",
+                    "absent: linked worktrees",
                     "pair: ~/repos/org/core main",
                     "primary · clean",
                     "pair: ~/repos/org/core.worktrees/hotfix hotfix",
@@ -10368,10 +10368,9 @@ fn inventory_worktree_popup_lists_every_working_tree_and_copies_the_selected_pat
                     "1 modified, 1 untracked",
                     "pair: ~/scratch/core-spike dev/spike",
                     "prunable: gitdir file points",
-                    "core · primary checkout",
-                    "The primary checkout is removed from the table, not here, and stays blocked while linked",
+                    "absent: primary checkout",
                     POPUP_FOOTER,
-                    "Worktrees target the current row · marks are not used",
+                    "No active operation",
                 ],
                 b"r".to_vec(),
             ),
@@ -10384,29 +10383,10 @@ fn inventory_worktree_popup_lists_every_working_tree_and_copies_the_selected_pat
                 b"jc".to_vec(),
             ),
             (
-                vec![
-                    "Copied path of hotfix",
-                    "hotfix · r removes it after listing its losses · branch hotfix is kept",
-                ],
+                vec!["Copied path of hotfix", "absent: removes it after"],
                 b"jc".to_vec(),
             ),
-            (
-                vec![
-                    "Copied path of odd\\tname",
-                    "odd\\tname · r removes it after listing its losses · branch odd is kept",
-                ],
-                b"j".to_vec(),
-            ),
-            (
-                vec!["pinned · locked: reviewing on\\tlaptop · r reports the blocker"],
-                b"jj".to_vec(),
-            ),
-            (
-                vec![
-                    "core-spike · prunable: gitdir file points to non-existent location · r reports the blocker",
-                ],
-                b"\x1b".to_vec(),
-            ),
+            (vec!["Copied path of odd\\tname"], b"\x1b".to_vec()),
             (
                 vec!["NORMAL · 1 row", "absent: Worktrees /", "selected: core"],
                 b"q".to_vec(),
@@ -10431,14 +10411,14 @@ fn inventory_worktree_popup_lists_every_working_tree_and_copies_the_selected_pat
     );
 
     // 80×24: every working tree, the hints and the status line stay on screen.
-    run_inventory_pty_actions(
+    let mut list = String::new();
+    run_inventory_pty_with_exit_observing(
         support::lager(&home, &config).arg("tui"),
         &[
             (POPUP_READY.to_vec(), b"w".to_vec()),
             (
                 vec![
                     "Worktrees / core",
-                    "5 linked worktrees",
                     "primary · clean",
                     "odd\\tname",
                     "pair: hotfix clean",
@@ -10447,9 +10427,14 @@ fn inventory_worktree_popup_lists_every_working_tree_and_copies_the_selected_pat
                     "1 modified, 1 untracked",
                     "core-spike",
                     "prunable",
-                    "The primary checkout is removed from the table, not here",
                     POPUP_FOOTER,
-                    "Worktrees target the current row · marks are not used",
+                    "No active operation",
+                ],
+                b"r".to_vec(),
+            ),
+            (
+                vec![
+                    "Remove unavailable: the primary checkout is removed from the table, not here",
                 ],
                 b"\x1b".to_vec(),
             ),
@@ -10460,6 +10445,32 @@ fn inventory_worktree_popup_lists_every_working_tree_and_copies_the_selected_pat
         ],
         24,
         80,
+        0,
+        |action, _, frame| {
+            if action == 1 {
+                list = frame.to_owned();
+            }
+        },
+    );
+    let screen = screen_text(&list, 24, 80);
+    let lines = screen.split('\n').collect::<Vec<_>>();
+    let body = lines
+        .iter()
+        .map(|line| line.split('│').nth(1).unwrap_or_default().trim())
+        .collect::<Vec<_>>();
+    assert!(body.contains(&POPUP_FOOTER), "{screen}");
+    // The column heading follows the title directly: no sentence above the list.
+    let title = body
+        .iter()
+        .position(|line| line.starts_with("Worktrees / core"))
+        .unwrap();
+    assert!(body[title + 2].starts_with("path "), "{screen}");
+    assert_eq!(lines[23], "", "{screen}");
+    assert!(
+        styled_screen(&list, 24, 80)[23]
+            .iter()
+            .all(|(_, reversed)| *reversed),
+        "the empty hint bar stays a bar:\n{screen}"
     );
 }
 
@@ -10474,18 +10485,18 @@ fn inventory_worktree_popup_adds_a_worktree_through_input_and_plan() {
         support::lager(&home, &config).arg("tui"),
         &[
             (POPUP_READY.to_vec(), b"w".to_vec()),
-            (
-                vec!["Worktrees / core", "0 linked worktrees"],
-                b"a".to_vec(),
-            ),
+            (vec!["Worktrees / core", "primary · clean"], b"a".to_vec()),
             (
                 vec![
                     "INPUT · 1 row",
                     "Add worktree / core",
-                    "Worktree name",
-                    "Nothing is created yet",
-                    "pair: plan Enter",
-                    "pair: Cancel Esc",
+                    "Enter preview · Esc back",
+                    "No active operation",
+                    "absent: Worktree name",
+                    "absent: Letters, digits",
+                    "absent: Nothing is created yet",
+                    "absent: Preview plan",
+                    "absent: Cancel",
                 ],
                 b"a/b\r".to_vec(),
             ),
@@ -10505,9 +10516,12 @@ fn inventory_worktree_popup_adds_a_worktree_through_input_and_plan() {
                     "pair: path ~/repos/org/core.worktrees/fix",
                     "pair: branch fix",
                     "fix · new, at ",
-                    "pair: worktree default",
+                    "Create worktree",
+                    "absent: default",
                     "Back to name",
-                    "Nothing changes until you choose",
+                    "absent: copies no files",
+                    "j/k select · Enter choose · Esc back",
+                    "No active operation",
                 ],
                 b"\r".to_vec(),
             ),
@@ -10515,7 +10529,6 @@ fn inventory_worktree_popup_adds_a_worktree_through_input_and_plan() {
                 vec![
                     "Created worktree ~/repos/org/core.worktrees/fix on new branch fix",
                     "WORKTREES · 1 row",
-                    "1 linked worktree ·",
                     "pair: ~/repos/org/core.worktrees/fix fix",
                     "absent: Add worktree",
                 ],
@@ -10598,9 +10611,9 @@ const LOSS_CONFIRMATION: [&str; 9] = [
     "pair: path ~/repos/org/core.worktrees/draft",
     "draft · kept",
     "1 modified file, 1 untracked file",
-    "pair: Cancel default",
+    "absent: default",
     "Accept these losses and remove this worktree",
-    "Nothing changes until you confirm",
+    "j/k focus · Enter choose · Esc cancel",
     "absent: Worktrees / core",
 ];
 
@@ -10614,10 +10627,10 @@ fn inventory_worktree_popup_removes_a_worktree_with_losses_only_after_yes() {
     run_inventory_pty_actions_with_hook(
         support::lager(&home, &config).arg("tui"),
         &[
-            (POPUP_READY.to_vec(), b"wj".to_vec()),
+            (POPUP_READY.to_vec(), b"w".to_vec()),
             (
-                vec!["draft · r removes it after listing its losses · branch draft is kept"],
-                b"r".to_vec(),
+                vec!["pair: ~/repos/org/core.worktrees/draft draft"],
+                b"jr".to_vec(),
             ),
             // Enter on the default keeps the worktree.
             (LOSS_CONFIRMATION.to_vec(), b"\r".to_vec()),
@@ -10634,7 +10647,7 @@ fn inventory_worktree_popup_removes_a_worktree_with_losses_only_after_yes() {
                 vec![
                     "Removed worktree ~/repos/org/core.worktrees/draft · branch draft kept",
                     "WORKTREES · 1 row",
-                    "0 linked worktrees",
+                    "primary · clean",
                     "absent: Remove worktree /",
                 ],
                 b"\x1b".to_vec(),
@@ -10687,24 +10700,26 @@ fn inventory_worktree_popup_shows_blockers_without_offering_a_confirmation() {
         "absent: Cancel",
         "absent: remove this worktree",
         "absent: CONFIRM",
-        "Nothing was removed",
+        "absent: Nothing was removed",
     ];
 
     run_inventory_pty_actions(
         support::lager(&home, &config).arg("tui"),
         &[
-            (POPUP_READY.to_vec(), b"wj".to_vec()),
+            (POPUP_READY.to_vec(), b"w".to_vec()),
             (
-                vec!["locked · locked: on loan · r reports the blocker"],
-                b"r".to_vec(),
+                vec!["locked: on loan", "absent: reports the blocker"],
+                b"jr".to_vec(),
             ),
             (
                 [
                     &[
                         "Remove worktree / blocked",
-                        "blocked: worktree is locked: on loan",
-                        "hint: git -C",
+                        "pair: blocked worktree",
+                        "worktree is locked: on loan",
+                        "pair: hint git",
                         "worktree unlock",
+                        "j/k scroll · Esc back",
                     ][..],
                     &no_confirmation,
                 ]
@@ -10713,15 +10728,15 @@ fn inventory_worktree_popup_shows_blockers_without_offering_a_confirmation() {
             ),
             (
                 vec!["Worktrees / core", "absent: Remove worktree /"],
-                b"j".to_vec(),
+                b"jr".to_vec(),
             ),
-            (vec!["nested · r removes it"], b"r".to_vec()),
             // Neither an answer nor a move to one does anything here.
             (
                 [
                     &[
                         "Remove worktree / blocked",
-                        "blocked: nested repository vendor/lib",
+                        "pair: blocked nested",
+                        "nested repository vendor/lib",
                     ][..],
                     &no_confirmation,
                 ]
@@ -10810,7 +10825,10 @@ fn inventory_worktree_popup_keys_typed_before_the_confirmation_is_drawn_never_an
         &[
             (POPUP_READY.to_vec(), b"wj".to_vec()),
             // Open, move to the removing choice, choose: all in one burst.
-            (vec!["draft · r removes it"], b"rj\r".to_vec()),
+            (
+                vec!["pair: ~/repos/org/core.worktrees/draft draft"],
+                b"rj\r".to_vec(),
+            ),
             // The cursor still sits on Cancel, and Enter there keeps the worktree.
             (LOSS_CONFIRMATION.to_vec(), b"\r".to_vec()),
             (
@@ -10820,7 +10838,7 @@ fn inventory_worktree_popup_keys_typed_before_the_confirmation_is_drawn_never_an
             // The same holds for the plan of a new worktree.
             (vec!["Add worktree / core"], b"fix\r\r".to_vec()),
             (
-                vec!["Add worktree / plan", "pair: worktree default"],
+                vec!["Add worktree / plan", "Create worktree", "absent: default"],
                 b"\x1b".to_vec(),
             ),
             (
@@ -10870,7 +10888,7 @@ fn inventory_worktree_popup_aborts_when_the_worktree_changed_after_the_confirmat
                 vec![
                     "Remove worktree / hotfix",
                     "pair: losses none",
-                    "pair: Cancel default",
+                    "absent: default",
                     "pair: worktree cannot",
                 ],
                 b"j\r".to_vec(),
@@ -10924,7 +10942,7 @@ fn inventory_worktree_popup_reports_a_failed_creation_and_returns_after_enter() 
                 vec![
                     "Worktree was not created",
                     "Worktrees / core",
-                    "0 linked worktrees",
+                    "primary · clean",
                 ],
                 b"\x1b".to_vec(),
             ),
@@ -11019,7 +11037,7 @@ fn inventory_worktree_popup_keys_follow_the_configured_maps() {
             (
                 vec![
                     "Worktrees / core",
-                    "j/k ↑/↓ select · n add worktree… · x remove · c copy path · Esc close",
+                    "j/k select · n add · x remove · c copy · Esc close",
                 ],
                 b"ar".to_vec(),
             ),
@@ -11088,7 +11106,7 @@ fn inventory_worktree_popup_keys_follow_the_configured_maps() {
             (
                 vec![
                     "Worktrees / core",
-                    "a/k select · r remove · c copy path · Esc close",
+                    "a/k select · r remove · c copy · Esc close",
                 ],
                 b"\x1b".to_vec(),
             ),
@@ -11158,7 +11176,7 @@ fn inventory_worktree_popup_never_removes_while_losses_and_choices_are_off_scree
                     "pair: losses 1",
                     "1 modified file, 1 untracked file",
                     "pair: path ~/repos/org/core.worktrees/draft",
-                    "pair: Cancel default",
+                    "absent: default",
                     "pair: worktree cannot",
                     "cannot be undone",
                     "absent: Too small",
@@ -11203,7 +11221,7 @@ fn inventory_worktree_popup_acts_at_80x12_only_once_the_choices_and_fields_fit()
             (
                 vec![
                     "Remove worktree / hotfix",
-                    "pair: Cancel default",
+                    "absent: default",
                     "Remove this worktree",
                     TOO_SMALL,
                     "absent: losses",
@@ -11235,7 +11253,7 @@ fn inventory_worktree_popup_acts_at_80x12_only_once_the_choices_and_fields_fit()
                     "pair: losses none",
                     "pair: path ~/repos/org/core.worktrees/hotfix",
                     "hotfix · kept",
-                    "pair: Cancel default",
+                    "absent: default",
                     "absent: Too small",
                 ],
                 b"\r".to_vec(),
@@ -11243,7 +11261,7 @@ fn inventory_worktree_popup_acts_at_80x12_only_once_the_choices_and_fields_fit()
             (
                 vec![
                     "Removed worktree ~/repos/org/core.worktrees/hotfix · branch hotfix kept",
-                    "0 linked worktrees",
+                    "primary · clean",
                 ],
                 b"a".to_vec(),
             ),
@@ -11251,14 +11269,15 @@ fn inventory_worktree_popup_acts_at_80x12_only_once_the_choices_and_fields_fit()
             (
                 vec![
                     "Add worktree / plan",
-                    "pair: worktree default",
+                    "Create worktree",
+                    "absent: default",
                     "absent: Too small",
                 ],
                 b"k".to_vec(),
             ),
             // Shrunk again, the plan is cut and its default does not create.
             (
-                vec!["Add worktree / plan", "pair: worktree default", TOO_SMALL],
+                vec!["Add worktree / plan", "Create worktree", TOO_SMALL],
                 b"\r".to_vec(),
             ),
             (
@@ -11316,7 +11335,7 @@ fn inventory_worktree_popup_reports_what_a_failed_removal_left() {
                 vec![
                     "Worktree removal failed: git worktree remove failed:",
                     "Worktrees / core",
-                    "0 linked worktrees",
+                    "primary · clean",
                 ],
                 b"\x1b".to_vec(),
             ),
@@ -11348,7 +11367,7 @@ fn inventory_worktree_popup_starts_on_the_primary_and_scrolls_every_blocker_into
     let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
     // Sorts before the primary and carries three blockers, with hints long enough to scroll.
-    let first = home.join("aaa").join("0".repeat(100)).join("first");
+    let first = home.join("aaa").join("0".repeat(200)).join("first");
     run_git(
         &core,
         &["worktree", "add", "-q", "--detach", first.to_str().unwrap()],
@@ -11373,24 +11392,20 @@ fn inventory_worktree_popup_starts_on_the_primary_and_scrolls_every_blocker_into
         support::lager(&home, &config).arg("tui"),
         &[
             (POPUP_READY.to_vec(), b"w".to_vec()),
-            (
-                vec!["Worktrees / core", "core · primary checkout"],
-                b"kr".to_vec(),
-            ),
+            (vec!["Worktrees / core", "primary · clean"], b"kr".to_vec()),
             (
                 vec![
                     "Remove worktree / blocked",
-                    "blocked: worktree is locked: on loan",
+                    "worktree is locked: on loan",
                     "scroll",
-                    "absent: Nothing was removed",
                 ],
                 vec![b'j'; 30],
             ),
             (
                 vec![
                     "Remove worktree / blocked",
-                    "blocked: nested repository vendor/lib",
-                    "Nothing was removed",
+                    "nested repository vendor/lib",
+                    "absent: Nothing was removed",
                     "absent: path ",
                 ],
                 b"\x1b".to_vec(),
