@@ -155,6 +155,12 @@ Open origin, Worktrees…, and Open session with a `[session]` section), the
 selection (mark this row, mark visible concrete rows, clear all marks) and the
 inventory (Add, Remote discovery…, Refresh, Problems…, batch cancellation, Help
 and Quit).
+On a row whose host has a `github` provider, Repository actions… adds an
+`On <host>` group with Rename…, Archive, Delete everywhere… and the visibility
+entries. Their forms and confirmations, and the form of New repository on
+GitHub…, change nothing on GitHub until their choice is made; Esc closes them
+with `<Action> cancelled · nothing changed`. After a rename, GitHub redirects
+the old URL to the new name.
 `w` or Worktrees… opens the worktrees of the current row's checkout; marks are
 not used. The popup lists the primary checkout and every linked worktree Git
 knows, wherever it sits, with its path, branch and state: `primary`, `locked`
@@ -192,7 +198,8 @@ Unregister removes the explicit declaration and excludes the member from every
 matching wildcard. On marked rows a preview lists every target with its exact
 path and identity, eligible, no-op or blocked with the reason; the list scrolls
 while Cancel and the action stay in view, Cancel is the default and changes
-nothing. The current row alone acts directly. Targets are fixed when
+nothing. A target the filter hides carries `(hidden by filter)` in the list and
+in the outcomes, and the action choice adds `K hidden by filter`. The current row alone acts directly. Targets are fixed when
 the action starts, and a refresh never changes them. They run one after another,
 each with its own configuration write; targets of one identity share one change
 and one reported failure. The batch popup lists every target with its outcome
