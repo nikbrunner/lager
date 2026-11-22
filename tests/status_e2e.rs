@@ -345,17 +345,17 @@ fn expected_rows(fixture: &Fixture) -> Vec<Value> {
 }
 
 const EXPECTED_TABLE: &str = "\
-repository    local                    branch  status      registration
-clean         ~/repos/org/clean        main    clean       explicit
-dirty         ~/repos/org/dirty        main    1 modified  explicit
-missing       missing                  —       —           explicit
-moved         missing                  —       —           explicit
-clean (copy)  ~/repos/copies/clean     main    clean       explicit
-moved         ~/repos/elsewhere/moved  main    clean       explicit
-stray         ~/repos/other/stray      main    clean       unregistered
-member        ~/repos/team/member      main    clean       wildcard
-skip          ~/repos/team/skip        main    clean       excluded
-scratch       ~/repos/local/scratch    main    clean       unregistered
+repository    owner      local                    branch  status      registration
+clean (copy)  copies     ~/repos/copies/clean     main    clean       explicit
+moved         elsewhere  ~/repos/elsewhere/moved  main    clean       explicit
+scratch       local      ~/repos/local/scratch    main    clean       unregistered
+clean         org        ~/repos/org/clean        main    clean       explicit
+dirty         org        ~/repos/org/dirty        main    1 modified  explicit
+missing       org        missing                  —       —           explicit
+moved         org        missing                  —       —           explicit
+stray         other      ~/repos/other/stray      main    clean       unregistered
+member        team       ~/repos/team/member      main    clean       wildcard
+skip          team       ~/repos/team/skip        main    clean       excluded
 ";
 
 #[test]
@@ -365,6 +365,24 @@ fn status_table_shows_every_row_kind_with_the_inventory_cells() {
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert_eq!(stdout(&output), EXPECTED_TABLE);
     assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
+fn status_table_shows_only_the_first_folder_below_the_root_as_the_owner() {
+    let fixture = empty_fixture("root = \"repos\"\n");
+    init_repo(
+        &fixture.root().join("imfusion/cp/repo"),
+        Some("git@gitlab.com:group/sub/repo.git"),
+    );
+    let output = fixture.run(&["status"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        stdout(&output),
+        "\
+repository  owner     local                     branch  status  registration
+repo        imfusion  ~/repos/imfusion/cp/repo  main    clean   unregistered
+"
+    );
 }
 
 #[test]
@@ -480,7 +498,7 @@ fn empty_config_and_empty_root_print_the_header_and_an_empty_document() {
     assert_eq!(table.status.code(), Some(0), "{table:?}");
     assert_eq!(
         stdout(&table),
-        "repository  local  branch  status  registration\n"
+        "repository  owner  local  branch  status  registration\n"
     );
     assert!(table.stderr.is_empty(), "{table:?}");
     let document = fixture.run(&["status", "--json"]);
@@ -563,7 +581,7 @@ fn control_characters_are_escaped_in_the_table_and_original_in_json() {
     assert!(!text.contains('\u{1b}') && !text.contains('\t'), "{text:?}");
     assert_eq!(
         text.lines().nth(1).unwrap(),
-        "tab\\there\\x1b[31mred  ~/repos/tab\\there\\x1b[31mred  main    clean   unregistered"
+        "tab\\there\\x1b[31mred  —      ~/repos/tab\\there\\x1b[31mred  main    clean   unregistered"
     );
     let document = fixture.run(&["status", "--json"]);
     assert!(!document.stdout.contains(&0x1b), "{document:?}");
@@ -656,8 +674,8 @@ fn a_missing_root_lists_as_empty_with_a_note_and_exits_zero() {
         assert_eq!(String::from_utf8_lossy(&output.stderr), note);
         assert_eq!(
             stdout(&output),
-            "repository  local    branch  status  registration\n\
-             repo        missing  —       —       explicit\n"
+            "repository  owner  local    branch  status  registration\n\
+             repo        org    missing  —       —       explicit\n"
         );
     }
     let output = support::lager(&home, &config)
@@ -1013,10 +1031,10 @@ fn remote_status_merges_members_applies_exclusions_and_keeps_rows_when_a_provide
     assert_eq!(
         stdout(&table),
         "\
-repository  local              branch  status  registration
-active      remote only        —       —       wildcard
-explicit    missing            —       —       explicit
-local       ~/repos/org/local  main    clean   wildcard
+repository  owner  local              branch  status  registration
+active      org    remote only        —       —       wildcard
+explicit    org    missing            —       —       explicit
+local       org    ~/repos/org/local  main    clean   wildcard
 "
     );
     let archived_table = run_remote(
@@ -1028,11 +1046,11 @@ local       ~/repos/org/local  main    clean   wildcard
     assert_eq!(
         stdout(&archived_table),
         "\
-repository  local              branch  status  registration
-active      remote only        —       —       wildcard
-explicit    missing            —       —       explicit
-old         remote only        —       —       wildcard
-local       ~/repos/org/local  main    clean   wildcard
+repository  owner  local              branch  status  registration
+active      org    remote only        —       —       wildcard
+explicit    org    missing            —       —       explicit
+local       org    ~/repos/org/local  main    clean   wildcard
+old         org    remote only        —       —       wildcard
 "
     );
     for alias in ["list", "ls"] {
@@ -1086,9 +1104,9 @@ fn remote_status_looks_up_declared_repositories_the_catalog_does_not_list() {
     assert_eq!(
         stdout(&plain),
         "\
-repository  local    branch  status  registration
-gone        missing  —       —       explicit
-kept        missing  —       —       explicit
+repository  owner  local    branch  status  registration
+gone        org    missing  —       —       explicit
+kept        org    missing  —       —       explicit
 "
     );
 
@@ -1116,9 +1134,9 @@ kept        missing  —       —       explicit
     assert_eq!(
         stdout(&table),
         "\
-repository  local    branch  status  registration
-gone        missing  —       —       explicit
-kept        missing  —       —       explicit
+repository  owner  local    branch  status  registration
+gone        org    missing  —       —       explicit
+kept        org    missing  —       —       explicit
 "
     );
 }
@@ -1154,9 +1172,9 @@ fn plain_status_keeps_the_origin_alone_and_exits_zero_when_a_lookup_fails() {
     assert_eq!(
         stdout(&table),
         "\
-repository  local              branch  status  registration
-kept        missing            —       —       explicit
-local       ~/repos/org/local  main    clean   explicit
+repository  owner  local              branch  status  registration
+kept        org    missing            —       —       explicit
+local       org    ~/repos/org/local  main    clean   explicit
 "
     );
     let document = run(&["status", "--json"]);

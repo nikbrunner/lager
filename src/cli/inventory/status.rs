@@ -7,7 +7,7 @@ use std::time::Instant;
 use ratatui::text::Line;
 use serde::Serialize;
 
-use super::{HEADINGS, bounded_lookup, home_relative, short_names, table_cells};
+use super::{HEADINGS, bounded_lookup, home_relative, row_order, short_names, table_cells};
 use crate::application::inventory::{
     self as model, InventoryRow, ObservationField, OriginFact, RegistrationState, RowKey,
 };
@@ -149,14 +149,15 @@ pub(crate) fn run(config_path: &Path, args: StatusArgs) -> i32 {
             Err(error) => return fail(format!("could not render status: {error}")),
         }
     } else {
-        // A wildcard is a scan pattern; only `--json` lists it.
-        table(
-            rows.iter()
-                .filter(|row| !matches!(row.key, RowKey::Pattern(_)))
-                .map(|row| {
-                    table_cells(row, names[&row.key].clone(), &home, false).map(|(cell, _)| cell)
-                }),
-        )
+        // A wildcard is a scan pattern; only `--json` lists it. The table sorts as the grid does.
+        let mut listed = rows
+            .iter()
+            .filter(|row| !matches!(row.key, RowKey::Pattern(_)))
+            .collect::<Vec<_>>();
+        listed.sort_by_cached_key(|row| row_order(row, &names, &root));
+        table(listed.into_iter().map(|row| {
+            table_cells(row, names[&row.key].clone(), &home, &root).map(|(cell, _)| cell)
+        }))
     };
     let written = std::io::stdout().lock().write_all(stdout.as_bytes());
     for problem in notes.iter().chain(&problems) {
@@ -172,8 +173,8 @@ pub(crate) fn run(config_path: &Path, args: StatusArgs) -> i32 {
     i32::from(!problems.is_empty())
 }
 
-/// Aligns the cells under the wide grid's headings, two spaces apart, never truncated.
-fn table(rows: impl Iterator<Item = [String; 5]>) -> String {
+/// Aligns the cells under the full grid's headings, two spaces apart, never truncated.
+fn table(rows: impl Iterator<Item = [String; 6]>) -> String {
     let lines = std::iter::once(HEADINGS.map(str::to_owned))
         .chain(rows)
         .collect::<Vec<_>>();

@@ -5,6 +5,7 @@
 | Term | Definition | Aliases to avoid |
 | --- | --- | --- |
 | **Repository identity** | The normalized host and repository path, such as `github.com/org/project`, by which references are compared. | repo name, URL |
+| **Owner** | The first folder of a checkout's path below the root, such as `imfusion` in `~/repos/imfusion/cp/repo`. | organization, namespace, project |
 | **Declaration** | Portable configuration that names a repository or a wildcard set to keep available. | config entry, managed repo |
 | **Wildcard** | A declaration that covers every repository a provider lists under a pattern, minus its exclusions. | glob, pattern rule |
 | **Registration** | Whether a declaration covers an identity: explicit, through a wildcard, excluded from one, or unregistered. | managed, tracked |
@@ -33,6 +34,8 @@
 
 - **Registration** and **Checkout** state are independent: a **Declaration** can have no **Checkout**, and a **Checkout** can have no **Declaration**.
 - One **Repository identity** can have several **Checkouts**, each with its own **Worktrees**.
+- An **Owner** comes from the local path, not from the **Repository identity**: a GitHub organization, a Bitbucket workspace or a Bitbucket project can differ from it.
+- Every **Checkout** below the root has at most one **Owner**; one directly in the root, or outside it, has none.
 - Removing a **Worktree** keeps its branch.
 - One **Terminal host** is configured at a time, and a **Session** belongs to exactly one **Checkout**.
 - Lager finds its own **Sessions** through its record on the local machine, never through a **Label**. A **Session** it did not create is unknown to it.
@@ -50,3 +53,4 @@
 ## Flagged ambiguities
 
 - `docs/reference/cli.md` calls a repository identity a "canonical ID" ("Repository arguments accept canonical IDs"). Use **Repository identity** there too.
+- The provider's own grouping (a GitHub organization, a Bitbucket project such as `cp` or `websdk`) is not the **Owner**. The owner column, its filter and its sort use the local folder.

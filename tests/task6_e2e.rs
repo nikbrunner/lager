@@ -40,7 +40,7 @@ fn ls_matches_empty_list_in_human_and_json_formats() -> TestResult {
         if flags.is_empty() {
             assert_eq!(
                 String::from_utf8(listed.stdout)?,
-                "repository  local  branch  status  registration\n"
+                "repository  owner  local  branch  status  registration\n"
             );
         } else {
             let document: Value = serde_json::from_slice(&listed.stdout)?;
@@ -148,8 +148,8 @@ fn offline_json_list_is_single_versioned_document_with_wildcard_metadata() -> Te
     assert_eq!(
         String::from_utf8(human.stdout)?,
         "\
-repository  local    branch  status  registration
-repo        missing  —       —       explicit
+repository  owner  local    branch  status  registration
+repo        org    missing  —       —       explicit
 "
     );
     Ok(())
@@ -249,7 +249,7 @@ fn ls_matches_offline_list_for_every_local_state() -> TestResult {
             line.split("  ")
                 .map(str::trim)
                 .filter(|cell| !cell.is_empty())
-                .nth(1)
+                .nth(2)
                 .unwrap()
         })
         .collect();
@@ -260,8 +260,8 @@ fn ls_matches_offline_list_for_every_local_state() -> TestResult {
             "~/repos/org/cloned",
             "~/repos/org/conflict · conflict",
             "missing",
-            "~/repos/org/plain · unknown",
-            "~/repos/org/conflict"
+            "~/repos/org/conflict",
+            "~/repos/org/plain · unknown"
         ],
         "{human}"
     );

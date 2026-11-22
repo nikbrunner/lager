@@ -306,6 +306,10 @@ impl InventorySession {
             report
                 .rows
                 .retain(|row| !matches!(row.key, model::RowKey::Pattern(_)));
+            let names = short_names(&report.rows);
+            report
+                .rows
+                .sort_by_cached_key(|row| row_order(row, &names, &self.root));
             // Records name canonical paths; resolving them here keeps the filesystem out of
             // every frame.
             if let Some(Ok(hosted)) = &self.hosted {
@@ -1919,7 +1923,7 @@ impl TerminalSession {
         }
         let bindings = &session.bindings;
         let view = selection.view();
-        let compact = self.area().width < WIDE_TABLE;
+        let local_hidden = hides_local(self.area().width);
         // A running batch is the current state unless an action just reported its outcome.
         let progress = session
             .batch
@@ -1957,7 +1961,7 @@ impl TerminalSession {
             session.message.as_deref().or(progress.as_deref()),
             remote_state.as_ref(),
             view,
-            compact,
+            local_hidden,
             bindings,
         );
         let acknowledges = selection
@@ -2065,6 +2069,7 @@ impl TerminalSession {
                             &session.marks,
                             hosted,
                             home,
+                            &session.root,
                             table.width,
                             None,
                         ),
@@ -2099,6 +2104,7 @@ impl TerminalSession {
                             &session.marks,
                             hosted,
                             home,
+                            &session.root,
                             table.width,
                             table_state.selected(),
                         ),
@@ -2561,8 +2567,6 @@ impl View {
 
 const POPUP: u16 = 66;
 const WIDE_POPUP: u16 = 100;
-/// Terminal width at which the table shows every column of the wide grid.
-const WIDE_TABLE: u16 = 132;
 /// Reserved for the mark column; the repository text starts after it on every row.
 const MARK_SLOT: usize = 4;
 /// Reserved after the mark column for the open-session dot while sessions are shown.
@@ -2941,7 +2945,7 @@ fn status_lines(
     message: Option<&str>,
     remote: Option<&RemoteState>,
     view: View,
-    compact: bool,
+    local_hidden: bool,
     bindings: &Bindings,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
@@ -3047,7 +3051,7 @@ fn status_lines(
         {
             state.to_owned()
         }
-        View::Normal if compact && complete && remote.is_none() && !inspect.is_empty() => {
+        View::Normal if local_hidden && complete && remote.is_none() && !inspect.is_empty() => {
             format!(
                 "Path and origin: {} inspects, menu copies the full value",
                 inspect[0]
@@ -5500,6 +5504,8 @@ struct RepositoryPath {
 
 #[derive(Default)]
 struct Selection {
+    /// The user has moved the cursor; until then it stays on the top row.
+    moved: bool,
     key: Option<model::RowKey>,
     repository_path: Option<RepositoryPath>,
     pending_path: Option<PathBuf>,
@@ -5545,6 +5551,12 @@ struct Selection {
 
 impl Selection {
     fn reconcile(&mut self, rows: &[&model::InventoryRow], complete: bool) {
+        // Until the user moves it, the cursor stays on the top row as the list re-sorts.
+        if !self.moved {
+            self.table.select((!rows.is_empty()).then_some(0));
+            self.remember(rows.first().copied());
+            return;
+        }
         let matched = self
             .key
             .as_ref()
@@ -5576,7 +5588,7 @@ impl Selection {
         self.table.select(index);
         // During a scan, a provisional row must not replace the remembered target.
         if let Some(index) = index
-            && (matched.is_some() || complete || self.key.is_none())
+            && (matched.is_some() || complete)
         {
             self.remember(Some(rows[index]));
         }
@@ -5716,6 +5728,7 @@ impl Selection {
             .saturating_add_signed(delta)
             .min(rows.len() - 1);
         self.table.select(Some(index));
+        self.moved = true;
         self.remember(Some(rows[index]));
     }
 }
@@ -5792,27 +5805,130 @@ fn fuzzy_subsequence(value: &str, query: &str) -> bool {
     wanted.is_none()
 }
 
-const HEADINGS: [&str; 5] = ["repository", "local", "branch", "status", "registration"];
-const BRANCH_COLUMN: usize = 2;
+const HEADINGS: [&str; 6] = [
+    "repository",
+    "owner",
+    "local",
+    "branch",
+    "status",
+    "registration",
+];
 
-/// One row's cells in the grid's column order, with their tints. The compact grid hides
-/// `branch`, whose error then shows in `status`.
+/// The grid's columns, in the order of the full grid and of `HEADINGS` and `table_cells`.
+#[derive(Clone, Copy, PartialEq)]
+enum Column {
+    Repository,
+    Owner,
+    Local,
+    Branch,
+    Status,
+    Registration,
+}
+
+const FULL_COLUMNS: &[Column] = &[
+    Column::Repository,
+    Column::Owner,
+    Column::Local,
+    Column::Branch,
+    Column::Status,
+    Column::Registration,
+];
+const MIDDLE_COLUMNS: &[Column] = &[
+    Column::Repository,
+    Column::Owner,
+    Column::Local,
+    Column::Branch,
+    Column::Status,
+];
+const NARROW_COLUMNS: &[Column] = &[Column::Repository, Column::Branch, Column::Status];
+
+impl Column {
+    /// The width the column starts from, padding included.
+    fn base_width(self) -> u16 {
+        match self {
+            Self::Repository => 22,
+            Self::Owner => 18,
+            Self::Local => 27,
+            Self::Branch => 18,
+            Self::Status => 12,
+            Self::Registration => 14,
+        }
+    }
+}
+
+/// The widest column set whose base widths, and the 2 cells the table reserves, fit `width`.
+fn columns_for(width: u16) -> &'static [Column] {
+    [FULL_COLUMNS, MIDDLE_COLUMNS]
+        .into_iter()
+        .find(|columns| {
+            columns
+                .iter()
+                .map(|column| column.base_width())
+                .sum::<u16>()
+                + 2
+                <= width
+        })
+        .unwrap_or(NARROW_COLUMNS)
+}
+
+/// Whether the grid at `width` leaves out the `local` column.
+fn hides_local(width: u16) -> bool {
+    !columns_for(width).contains(&Column::Local)
+}
+
+/// One row's cells in the order of the full grid, with their tints.
 fn table_cells(
     row: &model::InventoryRow,
     name: String,
     home: &Path,
-    compact: bool,
-) -> [(String, Style); 5] {
+    root: &Path,
+) -> [(String, Style); 6] {
     [
         (name, Style::default()),
+        owner_cell(row, root),
         local_cell(row, home),
         branch_cell(row),
-        status_cell(row, compact),
+        (
+            observation_text(&row.changes),
+            observation_style(&row.changes),
+        ),
         (
             registration_text(&row.registration).to_owned(),
             registration_style(&row.registration),
         ),
     ]
+}
+
+/// The first folder of the row's path below `root`, when a folder lies between it and the
+/// repository folder.
+fn owner(row: &model::InventoryRow, root: &Path) -> Option<String> {
+    let rest = Path::new(&row.path).strip_prefix(root).ok()?;
+    let mut folders = rest.components();
+    let owner = folders.next()?;
+    folders.next()?;
+    Some(owner.as_os_str().to_string_lossy().into_owned())
+}
+
+fn owner_cell(row: &model::InventoryRow, root: &Path) -> (String, Style) {
+    owner(row, root).map_or(("—".to_owned(), dim()), |owner| {
+        (escape(owner), Style::default())
+    })
+}
+
+/// The grid's row order: by owner, then by the repository name shown, ignoring case, with
+/// rows that have no owner last. The row key settles what remains.
+fn row_order(
+    row: &model::InventoryRow,
+    names: &HashMap<model::RowKey, String>,
+    root: &Path,
+) -> (bool, String, String, model::RowKey) {
+    let owner = owner(row, root);
+    (
+        owner.is_none(),
+        owner.unwrap_or_default().to_lowercase(),
+        names[&row.key].to_lowercase(),
+        row.key.clone(),
+    )
 }
 
 fn local_cell(row: &model::InventoryRow, home: &Path) -> (String, Style) {
@@ -5836,37 +5952,31 @@ fn branch_cell(row: &model::InventoryRow) -> (String, Style) {
     (observation_text(&row.branch), style)
 }
 
-fn status_cell(row: &model::InventoryRow, compact: bool) -> (String, Style) {
-    if compact && let model::ObservationField::Error(_) = row.branch {
-        return branch_cell(row);
-    }
-    (
-        observation_text(&row.changes),
-        observation_style(&row.changes),
-    )
-}
-
+#[allow(clippy::too_many_arguments)]
 fn repository_table(
     rows: &[&model::InventoryRow],
     names: &HashMap<model::RowKey, String>,
     marks: &Marks,
     hosted: Option<&HashSet<PathBuf>>,
     home: &Path,
+    root: &Path,
     width: u16,
     selected: Option<usize>,
 ) -> Table<'static> {
-    let compact = width < WIDE_TABLE;
-    let mut headings = HEADINGS.to_vec();
-    // Column widths, padding included.
-    let (mut widths, flexible): (Vec<u16>, &[usize]) = if compact {
-        headings.remove(BRANCH_COLUMN);
-        (vec![23, 18, 12, 14], &[1])
-    } else {
-        (vec![22, 27, 18, 12, 14], &[1])
-    };
+    let columns = columns_for(width);
+    let headings = columns.iter().map(|column| HEADINGS[*column as usize]);
+    let mut widths = columns
+        .iter()
+        .map(|column| column.base_width())
+        .collect::<Vec<_>>();
+    // The flexible column takes the width left over.
+    let flexible = columns
+        .iter()
+        .position(|column| *column == Column::Local)
+        .unwrap_or(0);
     let session_slot = if hosted.is_some() { SESSION_SLOT } else { 0 };
     let slot = |column: usize| {
-        if column == 0 {
+        if columns[column] == Column::Repository {
             MARK_SLOT + session_slot
         } else {
             0
@@ -5875,11 +5985,11 @@ fn repository_table(
     let cells = rows
         .iter()
         .map(|row| {
-            let mut cells = table_cells(row, names[&row.key].clone(), home, compact).to_vec();
-            if compact {
-                cells.remove(BRANCH_COLUMN);
-            }
-            cells
+            let cells = table_cells(row, names[&row.key].clone(), home, root);
+            columns
+                .iter()
+                .map(|column| cells[*column as usize].clone())
+                .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
     // Width beyond the grid first lets truncated cells grow, then goes to the flexible columns.
@@ -5896,20 +6006,13 @@ fn repository_table(
         widths[column] += grow;
         spare -= grow;
     }
-    for (position, column) in flexible.iter().enumerate() {
-        let share = spare / flexible.len() as u16;
-        widths[*column] += if position == 0 {
-            spare - share * (flexible.len() as u16 - 1)
-        } else {
-            share
-        };
-    }
+    widths[flexible] += spare;
     let available = width.saturating_sub(2);
     while widths.iter().map(|width| u32::from(*width)).sum::<u32>() > u32::from(available) {
         let Some((index, _)) = widths
             .iter()
             .enumerate()
-            .filter(|(index, value)| **value > headings[*index].len() as u16 + 2)
+            .filter(|(index, value)| **value > HEADINGS[columns[*index] as usize].len() as u16 + 2)
             .max_by_key(|(_, width)| **width)
         else {
             break;
@@ -5927,10 +6030,10 @@ fn repository_table(
                     .map(|(column, (value, style))| {
                         // The local cell keeps its tail: it tells duplicate checkouts apart.
                         let room = usize::from(widths[column]).saturating_sub(2 + slot(column));
-                        let text = if column == 0 {
-                            abbreviate_name(&value, room)
-                        } else {
-                            abbreviate(&value, room, column == 1)
+                        let text = match columns[column] {
+                            Column::Repository => abbreviate_name(&value, room),
+                            Column::Local => abbreviate(&value, room, true),
+                            _ => abbreviate(&value, room, false),
                         };
                         // Reverse video carries the selection, so the selected row drops its tints.
                         let style = if selected == Some(index) {
@@ -5938,12 +6041,13 @@ fn repository_table(
                         } else {
                             style
                         };
-                        let mark = match column {
-                            0 if marks.contains(&rows[index].key) => "[x] ",
-                            0 => "[ ] ",
-                            _ => "",
+                        let repository = columns[column] == Column::Repository;
+                        let mark = match repository {
+                            true if marks.contains(&rows[index].key) => "[x] ",
+                            true => "[ ] ",
+                            false => "",
                         };
-                        if let (0, Some(hosted)) = (column, hosted) {
+                        if let (true, Some(hosted)) = (repository, hosted) {
                             let open = rows[index]
                                 .observed_path
                                 .as_ref()
@@ -5969,7 +6073,6 @@ fn repository_table(
         .header(
             Row::new(
                 headings
-                    .iter()
                     .map(|heading| Cell::from(format!(" {heading}")))
                     .collect::<Vec<_>>(),
             )
@@ -6193,7 +6296,7 @@ mod tests {
     }
 
     #[test]
-    fn provisional_selection_yields_to_scan_completion_and_explicit_navigation() {
+    fn selection_stays_on_the_top_row_until_the_user_moves_it() {
         let row = |name: &str| InventoryRow {
             key: RowKey::Pattern(name.to_owned()),
             repository: name.to_owned(),
@@ -6215,21 +6318,24 @@ mod tests {
         let alpha = row("alpha");
         let beta = row("beta");
         let mut selection = Selection::default();
+        // Until the user moves, the cursor stays on the top row whatever re-sorts the scan causes.
         selection.reconcile(&[&beta], false);
-        selection.reconcile(&[&alpha], false);
-        assert_eq!(selection.selected_row(&[&alpha]), Some(&alpha));
-        assert_eq!(selection.key, Some(beta.key.clone()));
-        selection.reconcile(&[&alpha, &beta], true);
-        assert_eq!(selection.selected_row(&[&alpha, &beta]), Some(&beta));
+        selection.reconcile(&[&alpha, &beta], false);
+        assert_eq!(selection.selected_row(&[&alpha, &beta]), Some(&alpha));
+        selection.reconcile(&[&beta, &alpha], true);
+        assert_eq!(selection.selected_row(&[&beta, &alpha]), Some(&beta));
 
-        selection.reconcile(&[&alpha], true);
+        // Once moved, the selection follows its row key across re-sorts.
+        selection.move_by(&[&beta, &alpha], 1);
+        selection.reconcile(&[&alpha, &beta], true);
+        assert_eq!(selection.selected_row(&[&alpha, &beta]), Some(&alpha));
         selection.reconcile(&[&beta, &alpha], true);
         assert_eq!(selection.selected_row(&[&beta, &alpha]), Some(&alpha));
 
-        selection.move_by(&[&beta, &alpha], -1);
-        selection.reconcile(&[&alpha], false);
-        selection.move_by(&[&alpha], 1);
-        selection.reconcile(&[&beta, &alpha], true);
+        // During a scan, a missing target is kept and found again when its row returns.
+        selection.reconcile(&[&beta], false);
+        assert_eq!(selection.selected_row(&[&beta]), Some(&beta));
+        selection.reconcile(&[&beta, &alpha], false);
         assert_eq!(selection.selected_row(&[&beta, &alpha]), Some(&alpha));
     }
 

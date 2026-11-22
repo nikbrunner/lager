@@ -62,7 +62,8 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
                     b"/org/alpha".to_vec(),
                 ),
                 (vec!["SEARCH · 2 rows", "/ org/alpha"], b"\r".to_vec()),
-                (vec!["NORMAL · 2 rows"], b"\r".to_vec()),
+                // The filtered rows order by owner, so `alpha` in `org` is the second.
+                (vec!["NORMAL · 2 rows"], b"j\r".to_vec()),
                 (
                     vec![
                         "INSPECT · 2 rows",
@@ -102,19 +103,26 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         let (rows, cols) = (rows as usize, cols as usize);
         let compact = cols < 132;
         // Column starts of the grid at 132 and at 80 columns.
-        let headings = ["repository", "local", "branch", "status", "registration"];
-        let narrow_headings = ["repository", "local", "status", "registration"];
+        let headings = [
+            "repository",
+            "owner",
+            "local",
+            "branch",
+            "status",
+            "registration",
+        ];
+        let narrow_headings = ["repository", "branch", "status"];
         let starts: &[usize] = if compact {
-            &[2, 25, 54, 66]
+            &[2, 50, 68]
         } else {
-            &[2, 24, 88, 106, 118]
+            &[2, 24, 42, 88, 106, 118]
         };
-        let shown = |wide: [&str; 5], narrow: [&str; 4]| -> Vec<String> {
+        let shown = |wide: [&str; 6], narrow: [&str; 3]| -> Vec<String> {
             // The cases list registration before the observation cells.
             if compact {
-                [0, 1, 3, 2].map(|i| narrow[i].to_owned()).to_vec()
+                narrow.map(str::to_owned).to_vec()
             } else {
-                [0, 1, 3, 4, 2].map(|i| wide[i].to_owned()).to_vec()
+                [0, 1, 2, 4, 5, 3].map(|i| wide[i].to_owned()).to_vec()
             }
         };
 
@@ -152,7 +160,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
             !screen.contains(" | ") && !screen.contains('│') && !screen.contains("generation"),
             "{screen}"
         );
-        let table = inventory_rows(&screen);
+        let (_, table) = inventory_grid(&screen);
         assert_eq!(table.len(), 5, "{table:?}\n{screen}");
         assert!(
             !screen.contains("team/*"),
@@ -162,45 +170,50 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
             (
                 [
                     "alpha",
+                    "org",
                     "~/repos/org/alpha",
                     "explicit",
                     "main",
                     "1 modified",
                 ],
-                ["alpha", "~/repos/org/alpha", "explicit", "1 modified"],
+                ["alpha", "main", "1 modified"],
             ),
             (
                 [
                     "alpha (copy)",
+                    "archive",
                     "~/repos/archive/alpha",
                     "explicit",
                     "main",
                     "clean",
                 ],
-                ["alpha (copy)", "~/repos/archive/alpha", "explicit", "clean"],
+                ["alpha (copy)", "main", "clean"],
             ),
             (
-                ["beta", "missing", "explicit", "—", "—"],
-                ["beta", "missing", "explicit", "—"],
+                ["beta", "org", "missing", "explicit", "—", "—"],
+                ["beta", "—", "—"],
             ),
             (
-                ["dots", "~/repos/team/dots", "wildcard", "main", "clean"],
-                ["dots", "~/repos/team/dots", "wildcard", "clean"],
+                [
+                    "dots",
+                    "team",
+                    "~/repos/team/dots",
+                    "wildcard",
+                    "main",
+                    "clean",
+                ],
+                ["dots", "main", "clean"],
             ),
             (
                 [
                     "scratch",
+                    "experiments",
                     "~/repos/experiments/scratch",
                     "unregistered",
                     "main",
                     "clean",
                 ],
-                [
-                    "scratch",
-                    "~/repos/experiments/scratch",
-                    "unregistered",
-                    "clean",
-                ],
+                ["scratch", "main", "clean"],
             ),
         ] {
             let expected = shown(wide, narrow);
@@ -260,9 +273,11 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
             !no_color,
             "the hint footer is a bar only with color:\n{screen}"
         );
-        let selected = table[0][0].clone();
+        // The selection follows the row it started on, which a re-sort may move down.
         assert!(
-            highlighted_inventory_row(main, rows, cols, &selected).is_some(),
+            table
+                .iter()
+                .any(|row| highlighted_inventory_row(main, rows, cols, &row[0]).is_some()),
             "{screen}"
         );
 
@@ -415,6 +430,176 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
 
 #[cfg(unix)]
 #[test]
+fn inventory_shows_the_first_folder_below_the_root_as_the_owner() {
+    let temp = temp_dir();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    init_repo(
+        &root.join("org/alpha"),
+        "git@github.com:other/alpha.git",
+        true,
+    );
+    // The provider's grouping (here `group/sub`) is not the owner.
+    init_repo(
+        &root.join("imfusion/cp/repo"),
+        "git@gitlab.com:group/sub/repo.git",
+        true,
+    );
+    init_repo(
+        &root.join("black-atom-industries/lager"),
+        "git@github.com:black-atom-industries/lager.git",
+        true,
+    );
+    init_repo_without_origin(&root.join("scratch"));
+
+    // 113 columns is the narrowest terminal that shows the owner beside every other column.
+    let transcript = run_inventory_pty_with_size(
+        support::lager(&home, &config)
+            .arg("tui")
+            .env("NO_COLOR", "1"),
+        &["NORMAL · 4 rows", "absent: Scanning"],
+        b"q",
+        24,
+        113,
+    );
+    let screen = screen_text(&transcript, 24, 113);
+    let (headings, rows) = inventory_grid(&screen);
+    assert_eq!(headings[..2], ["repository", "owner"], "{screen}");
+    let owner = |name: &str| {
+        rows.iter()
+            .find(|row| row[0] == name)
+            .map(|row| row[1].clone())
+            .unwrap_or_else(|| panic!("no row {name}:\n{screen}"))
+    };
+    assert_eq!(owner("alpha"), "org", "{screen}");
+    assert_eq!(owner("repo"), "imfusion", "{screen}");
+    assert_eq!(owner("scratch"), "—", "{screen}");
+    let long = owner("lager");
+    assert!(
+        long.starts_with("black-atom-") && long.ends_with('…') && long.chars().count() <= 16,
+        "an owner keeps its head: {long:?}\n{screen}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_and_status_order_rows_by_owner_then_name_while_json_keeps_key_order() {
+    let temp = temp_dir();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    // Owners and identities disagree on purpose: `Beta` sorts before `alpha` byte-wise.
+    for (path, origin) in [
+        ("gamma/kiwi", "git@github.com:aaa/kiwi.git"),
+        ("Beta/pear", "git@github.com:x/pear.git"),
+        ("alpha/mango", "git@github.com:zzz/mango.git"),
+        ("Beta/apple", "git@github.com:x/apple.git"),
+    ] {
+        init_repo(&root.join(path), origin, true);
+    }
+    init_repo_without_origin(&root.join("scratch"));
+    let expected = ["mango", "apple", "pear", "kiwi", "scratch"];
+
+    let transcript = run_inventory_pty_with_size(
+        support::lager(&home, &config)
+            .arg("tui")
+            .env("NO_COLOR", "1"),
+        &["NORMAL · 5 rows", "absent: Scanning"],
+        b"q",
+        24,
+        132,
+    );
+    let screen = screen_text(&transcript, 24, 132);
+    let (_, rows) = inventory_grid(&screen);
+    let names = rows.iter().map(|row| row[0].as_str()).collect::<Vec<_>>();
+    assert_eq!(names, expected, "{screen}");
+    let owners = rows.iter().map(|row| row[1].as_str()).collect::<Vec<_>>();
+    assert_eq!(owners, ["alpha", "Beta", "Beta", "gamma", "—"], "{screen}");
+
+    let status = output(support::lager(&home, &config).arg("status"));
+    assert!(status.status.success(), "{status:?}");
+    let printed = status_rows(&String::from_utf8(status.stdout).unwrap());
+    let names = printed
+        .iter()
+        .map(|row| row[0].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, expected, "{printed:?}");
+
+    let json = output(support::lager(&home, &config).args(["status", "--json"]));
+    assert!(json.status.success(), "{json:?}");
+    let document: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let identities = document["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["identity"].as_str().unwrap_or("-").to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        identities,
+        [
+            "github.com/aaa/kiwi",
+            "github.com/x/apple",
+            "github.com/x/pear",
+            "github.com/zzz/mango",
+            "-"
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_shows_the_widest_column_set_that_fits_the_terminal() {
+    let temp = temp_dir();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(
+        &config,
+        "root = \"repos\"\n\n[[repositories]]\nurl = \"github.com/org/alpha\"\n",
+    )
+    .unwrap();
+    let full = [
+        "repository",
+        "owner",
+        "local",
+        "branch",
+        "status",
+        "registration",
+    ];
+    for (cols, columns) in [
+        (113, &full[..]),
+        (112, &full[..5]),
+        (99, &full[..5]),
+        (98, &["repository", "branch", "status"][..]),
+    ] {
+        let transcript = run_inventory_pty_with_size(
+            support::lager(&home, &config)
+                .arg("tui")
+                .env("NO_COLOR", "1"),
+            &["NORMAL · 1 row", "absent: Scanning"],
+            b"q",
+            24,
+            cols,
+        );
+        let screen = screen_text(&transcript, 24, cols as usize);
+        let (headings, _) = inventory_grid(&screen);
+        assert_eq!(headings, columns, "{cols} columns:\n{screen}");
+        // A hidden local column is the only reason for the path and origin hint.
+        assert_eq!(
+            screen.contains("Path and origin: Enter inspects"),
+            !columns.contains(&"local"),
+            "{cols} columns:\n{screen}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn inventory_keeps_duplicate_and_same_named_rows_distinct_at_both_sizes() {
     let temp = temp_dir();
     let home = temp.path().join("home");
@@ -488,10 +673,15 @@ fn inventory_keeps_duplicate_and_same_named_rows_distinct_at_both_sizes() {
             .map(|row| row[1].as_str())
             .collect::<Vec<_>>();
         assert_eq!(lone.len(), 2, "{screen}");
-        assert!(
-            lone.contains(&"missing") && lone.iter().any(|local| local.ends_with("/lone")),
-            "{screen}"
-        );
+        if cols >= 132 {
+            assert!(
+                lone.contains(&"missing") && lone.iter().any(|local| local.ends_with("/lone")),
+                "{screen}"
+            );
+        } else {
+            // Without the local column the copies differ by their branch.
+            assert!(lone.contains(&"—") && lone.contains(&"main"), "{screen}");
+        }
         if cols >= 132 {
             let path = |name: &str| {
                 rows.iter()
@@ -515,7 +705,7 @@ fn inventory_keeps_duplicate_and_same_named_rows_distinct_at_both_sizes() {
 
 #[cfg(unix)]
 #[test]
-fn inventory_keeps_long_named_copies_and_cross_host_rows_distinct_at_80_columns() {
+fn inventory_keeps_long_named_copies_and_cross_host_rows_distinct_in_the_narrow_grid() {
     let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
@@ -550,14 +740,15 @@ fn inventory_keeps_long_named_copies_and_cross_host_rows_distinct_at_80_columns(
 
     let mut command = support::lager(&home, &config);
     command.arg("tui").env("NO_COLOR", "1");
+    // 66 columns leave the repository column 28 cells of text in the narrow grid.
     let transcript = run_inventory_pty_with_size(
         &mut command,
         &["NORMAL · 5 rows", "(copy 2)", "absent: Scanning"],
         b"q",
         24,
-        80,
+        66,
     );
-    let screen = screen_text(&transcript, 24, 80);
+    let screen = screen_text(&transcript, 24, 66);
     let rows = inventory_rows(&screen);
     assert_eq!(rows.len(), 5, "{screen}");
     for (index, row) in rows.iter().enumerate() {
@@ -1320,7 +1511,7 @@ fn inventory_missing_root_is_empty_with_a_note_until_it_exists_and_exits_zero() 
             b"q".to_vec(),
         )],
         24,
-        80,
+        100,
         0,
         |_| {},
     );
@@ -2486,7 +2677,7 @@ exclude = ["skip"]
         40,
         220,
     );
-    let screen = inventory_rows(&screen_text(&transcript, 40, 220));
+    let (_, screen) = inventory_grid(&screen_text(&transcript, 40, 220));
     let status = output(support::lager(&home, &config).arg("status"));
     assert!(status.status.success(), "{status:?}");
     let printed = status_rows(&String::from_utf8(status.stdout).unwrap());
@@ -2622,7 +2813,14 @@ exclude = ["skip"]
     );
     let plain = screen_text(&frames[0], 80, 220);
 
-    for header in ["repository", "local", "branch", "status", "registration"] {
+    for header in [
+        "repository",
+        "owner",
+        "local",
+        "branch",
+        "status",
+        "registration",
+    ] {
         assert!(plain.contains(header), "missing header {header}:\n{plain}");
     }
     let expected = "ignored repositories: bare.git: bare repository ignored";
@@ -2732,7 +2930,7 @@ fn inventory_navigates_every_row_without_shifting_columns() {
             80,
         );
         let screen = screen_text(&transcript, 24, 80);
-        for text in ["registration", "status", "explicit", "missing"] {
+        for text in ["branch", "status", "—"] {
             assert!(screen.contains(text), "missing {text}:\n{screen}");
         }
         assert!(
@@ -2744,7 +2942,7 @@ fn inventory_navigates_every_row_without_shifting_columns() {
             .lines()
             .find(|line| line.contains("repo-27"))
             .unwrap();
-        assert_eq!(selected.find("explicit"), adjacent.find("explicit"));
+        assert_eq!(selected.find("—"), adjacent.find("—"));
         assert!(transcript.contains("\x1b[?1049l"));
         assert!(transcript.contains("\x1b[?25h"));
     }
@@ -2781,10 +2979,7 @@ fn inventory_resizes_from_wide_to_compact_without_losing_whole_row_selection() {
                 ],
                 b"j".to_vec(),
             ),
-            (
-                vec!["selected: beta", "registration", "status"],
-                b"q".to_vec(),
-            ),
+            (vec!["selected: beta", "branch", "status"], b"q".to_vec()),
         ],
         24,
         132,
@@ -2810,7 +3005,14 @@ fn inventory_resizes_from_wide_to_compact_without_losing_whole_row_selection() {
         .unwrap();
     assert_eq!(
         wide_header.split_whitespace().collect::<Vec<_>>(),
-        ["repository", "local", "branch", "status", "registration"],
+        [
+            "repository",
+            "owner",
+            "local",
+            "branch",
+            "status",
+            "registration"
+        ],
         "{wide}"
     );
     assert!(
@@ -2821,23 +3023,20 @@ fn inventory_resizes_from_wide_to_compact_without_losing_whole_row_selection() {
         highlighted_inventory_row(compact_frame, 24, 80, "beta").is_some(),
         "{compact}"
     );
-    for column in ["repository", "local", "status", "registration"] {
-        assert!(compact.contains(column), "missing {column}:\n{compact}");
-    }
     let compact_header = compact
         .lines()
         .find(|line| line.trim_start().starts_with("repository"))
         .unwrap();
     assert_eq!(
         compact_header.split_whitespace().collect::<Vec<_>>(),
-        ["repository", "local", "status", "registration"],
+        ["repository", "branch", "status"],
         "{compact}"
     );
     let selected = highlighted_inventory_row(compact_frame, 24, 80, "beta").unwrap();
     let adjacent = compact.lines().find(|line| line.contains("alpha")).unwrap();
     assert_eq!(
-        selected.find("explicit"),
-        adjacent.find("explicit"),
+        selected.find("—"),
+        adjacent.find("—"),
         "selection shifted a compact table column:\n{compact}"
     );
     assert!(transcript.contains("\x1b[?1049l") && transcript.contains("\x1b[?25h"));
@@ -2879,7 +3078,8 @@ fn inventory_navigation_remains_responsive_while_status_is_pending() {
     run_inventory_pty_actions_with_hook(
         support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
-            (vec!["alpha", "beta", "pending"], b"j".to_vec()),
+            // Rows run org/alpha twice, then org/beta twice: the top, then two down.
+            (vec!["alpha", "beta", "pending"], b"kkjj".to_vec()),
             (vec!["selected: org/beta", "pending"], b"q".to_vec()),
         ],
         24,
@@ -3156,21 +3356,25 @@ fn inventory_selection_follows_a_pending_path_when_its_identity_arrives() {
     fs::create_dir_all(&root).unwrap();
     fs::write(&config, "root = \"repos\"\n").unwrap();
     init_repo(&root.join("a-ready"), "git@github.com:org/zzz.git", true);
-    let pending = root.join("z-pending");
+    // The pending row sorts after `zzz` by its path until its identity `aaa` arrives.
+    let pending = root.join("zzzz-pending");
     init_repo(&pending, "git@github.com:org/aaa.git", true);
     let tools = temp.path().join("tools");
     let release = temp.path().join("release");
     fs::create_dir_all(&tools).unwrap();
     fs::write(tools.join("git"), format!(
-        "#!/bin/sh\ncase \"$*\" in *z-pending*) while [ ! -f {} ]; do /bin/sleep 0.02; done;; esac\nexec {} \"$@\"\n",
+        "#!/bin/sh\ncase \"$*\" in *zzzz-pending*) while [ ! -f {} ]; do /bin/sleep 0.02; done;; esac\nexec {} \"$@\"\n",
         shell_word(&release), shell_word(&support::real_tool("git"))
     )).unwrap();
     fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
-    let selected_pending = "selected: z-pending".to_owned();
+    let selected_pending = "selected: zzzz-pending".to_owned();
     run_inventory_pty_actions_with_hook(
         support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
-            (vec!["selected: zzz", "pending", "z-pending"], b"j".to_vec()),
+            (
+                vec!["selected: zzz", "pending", "zzzz-pending"],
+                b"j".to_vec(),
+            ),
             (vec![&selected_pending], b" ".to_vec()),
             (vec!["selected: aaa", "No active operation"], b"q".to_vec()),
         ],
@@ -3182,6 +3386,50 @@ fn inventory_selection_follows_a_pending_path_when_its_identity_arrives() {
             }
         },
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_cursor_stays_on_the_top_row_while_the_scan_re_sorts_until_the_user_moves() {
+    let temp = temp_dir();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    init_repo(&root.join("a-ready"), "git@github.com:org/zzz.git", true);
+    init_repo(
+        &root.join("zzzz-pending"),
+        "git@github.com:org/aaa.git",
+        true,
+    );
+    let tools = temp.path().join("tools");
+    let release = temp.path().join("release");
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(tools.join("git"), format!(
+        "#!/bin/sh\ncase \"$*\" in *zzzz-pending*) while [ ! -f {} ]; do /bin/sleep 0.02; done;; esac\nexec {} \"$@\"\n",
+        shell_word(&release), shell_word(&support::real_tool("git"))
+    )).unwrap();
+    fs::set_permissions(tools.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    // The pending row is named by its path until its identity `aaa` arrives and sorts above
+    // `zzz`; nothing is pressed, so the cursor moves with the top row.
+    let transcript = run_inventory_pty_actions_with_hook(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
+        &[
+            (vec!["selected: zzz", "pending", "zzzz-pending"], Vec::new()),
+            (vec!["selected: aaa", "No active operation"], b"q".to_vec()),
+        ],
+        24,
+        500,
+        |index| {
+            if index == 0 {
+                fs::write(&release, "go").unwrap();
+            }
+        },
+    );
+    let (_, rows) = inventory_grid(&screen_text(&transcript, 24, 500));
+    let names = rows.iter().map(|row| row[0].as_str()).collect::<Vec<_>>();
+    assert_eq!(names, ["aaa", "zzz"]);
 }
 
 #[cfg(unix)]
@@ -3345,7 +3593,7 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
         &[
             (
                 vec!["No active operation", "3 rows"],
-                b"kkj/cloned\r".to_vec(),
+                b"kk/cloned\r".to_vec(),
             ),
             (
                 vec!["NORMAL · 3 rows", "/ cloned", "selected: same"],
@@ -3424,16 +3672,13 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
             .position(|row| row[1] == format!("~/{}", path.strip_prefix(&home).unwrap().display()))
             .unwrap_or_else(|| panic!("missing {} in {rows:?}", path.display()))
     };
-    assert!(
-        row_position(&declared_rows, &configured)
-            < row_position(&declared_rows, &root.join("alpha")),
-        "declaration form did not move ahead in sort order: {declared_rows:?}"
-    );
-    assert!(
-        row_position(&checkout_rows, &configured)
-            > row_position(&checkout_rows, &root.join("alpha")),
-        "checkout form did not return to checkout sort order: {checkout_rows:?}"
-    );
+    // `same` has the owner `org` and `alpha` has none, in the declaration and checkout form alike.
+    for rows in [&declared_rows, &checkout_rows] {
+        assert!(
+            row_position(rows, &configured) < row_position(rows, &root.join("alpha")),
+            "owner order changed with the row form: {rows:?}"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -4109,7 +4354,7 @@ fn inventory_dialog_overrides_refresh_atomically_and_keep_all_exit_routes_reacha
     run_inventory_pty_with_exit(
         support::lager(&home, &config).arg("tui"),
         &[
-            (vec!["Path and origin:"], b"m".to_vec()),
+            (vec!["No active operation"], b"m".to_vec()),
             (
                 vec!["All actions", "pair: Ctrl+a choose", "pair: Ctrl+e back"],
                 vec![b'j', 1],
@@ -4228,7 +4473,7 @@ fn inventory_no_color_applies_to_rows_and_popups() {
             .env("NO_COLOR", "1"),
         &[
             (
-                vec!["Path and origin:", "explicit", "missing"],
+                vec!["No active operation", "explicit", "missing"],
                 b"m".to_vec(),
             ),
             (vec!["All actions"], b"j\r".to_vec()),
@@ -4236,7 +4481,7 @@ fn inventory_no_color_applies_to_rows_and_popups() {
             (vec!["Keyboard / effective bindings"], vec![17]),
         ],
         24,
-        80,
+        132,
     );
     for sequence in transcript.split("\x1b[").skip(1) {
         if let Some((parameters, _)) = sequence.split_once('m')
@@ -4469,8 +4714,9 @@ fn inventory_marks_survive_filtering_and_refresh_and_report_vanished_entries() {
         support::lager(&home, &config).arg("tui"),
         &[
             (
-                vec!["NORMAL · 3 rows", "absent: Scanning", "selected: alpha"],
-                b" ".to_vec(),
+                vec!["NORMAL · 3 rows", "absent: Scanning"],
+                // The cursor may start on any row while the scan runs; clamp it to the top.
+                b"kk ".to_vec(),
             ),
             (
                 vec!["[x] alpha", "[ ] beta", "1 marked · 0 hidden"],
@@ -8738,7 +8984,8 @@ fn inventory_remove_unregister_writes_once_per_identity_and_previews_the_unselec
         &[
             (
                 vec!["NORMAL · 4 rows", "absent: Scanning"],
-                b"kk j j ".to_vec(),
+                // Rows run archive/beta, keep/beta, org/beta, org/gone: mark all but keep/beta.
+                b"kk jj j ".to_vec(),
             ),
             (vec!["3 marked · 0 hidden"], b"m\rjjjjj\r".to_vec()),
             (
@@ -10106,17 +10353,38 @@ impl Drop for FixtureProcesses {
 /// The mark slot before every repository name: unmarked, marked, or blank for patterns.
 const MARK_SLOTS: [&str; 3] = ["[ ] ", "[x] ", "    "];
 
-/// Splits table rows at the column header offsets; rows end at the first line whose
-/// registration cell holds no registration label. The repository cell starts after the
-/// mark slot.
+/// The table's rows without the owner column, so a row reads repository, local, branch,
+/// status, registration at the full grid; hidden columns are missing from the row.
 #[cfg(unix)]
 fn inventory_rows(screen: &str) -> Vec<Vec<String>> {
+    let (headings, rows) = inventory_grid(screen);
+    let owner = headings.iter().position(|heading| heading == "owner");
+    rows.into_iter()
+        .map(|mut row| {
+            if let Some(owner) = owner {
+                row.remove(owner);
+            }
+            row
+        })
+        .collect()
+}
+
+/// Splits table rows at the column header offsets and returns the headings with the rows;
+/// rows end at the first line without a mark slot or with a popup border. The repository
+/// cell starts after the mark slot.
+#[cfg(unix)]
+fn inventory_grid(screen: &str) -> (Vec<String>, Vec<Vec<String>>) {
     let lines = screen.lines().collect::<Vec<_>>();
-    let Some(header) = lines.iter().position(|line| {
-        line.trim_start().starts_with("repository") && line.contains("registration")
-    }) else {
-        return Vec::new();
+    let Some(header) = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("repository") && line.contains("status"))
+    else {
+        return (Vec::new(), Vec::new());
     };
+    let headings = lines[header]
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     let mut offsets = Vec::new();
     let mut from = 0;
     for heading in lines[header].split_whitespace() {
@@ -10124,10 +10392,6 @@ fn inventory_rows(screen: &str) -> Vec<Vec<String>> {
         offsets.push(start);
         from = start + heading.len();
     }
-    let registration = lines[header]
-        .split_whitespace()
-        .position(|heading| heading == "registration")
-        .unwrap();
     let cell = |line: &str, column: usize| {
         let characters = line.chars().collect::<Vec<_>>();
         if column == 0 && characters.len() > 6 {
@@ -10145,24 +10409,22 @@ fn inventory_rows(screen: &str) -> Vec<Vec<String>> {
             .trim()
             .to_owned()
     };
-    lines[header + 1..]
+    let rows = lines[header + 1..]
         .iter()
         .take_while(|line| {
-            [
-                "explicit",
-                "wildcard",
-                "excluded",
-                "unregistered",
-                "pattern",
-            ]
-            .contains(&cell(line, registration).as_str())
+            let characters = line.chars().collect::<Vec<_>>();
+            characters.len() > 6
+                && MARK_SLOTS.contains(&characters[2..6].iter().collect::<String>().as_str())
+                && characters[6..].iter().any(|character| *character != ' ')
+                && !line.contains(['│', '┌', '└', '├'])
         })
         .map(|line| {
             (0..offsets.len())
                 .map(|column| cell(line, column))
                 .collect()
         })
-        .collect()
+        .collect();
+    (headings, rows)
 }
 
 #[cfg(unix)]
@@ -10891,8 +11153,9 @@ fn inventory_worktree_popup_is_unavailable_on_rows_without_a_checkout() {
         support::lager(&home, &config).arg("tui"),
         &[
             (
-                vec!["NORMAL · 3 rows", "absent: Scanning", "selected: ghost"],
-                b"w".to_vec(),
+                vec!["NORMAL · 3 rows", "absent: Scanning"],
+                // Rows run core, ghost, sealed: the top, then one down.
+                b"kkjw".to_vec(),
             ),
             (
                 vec![
@@ -12656,12 +12919,12 @@ fn inventory_remote_rows_agree_with_status_remote() {
             40,
             220,
         );
-        let screen = inventory_rows(&screen_text(&transcript, 40, 220));
+        let (_, screen) = inventory_grid(&screen_text(&transcript, 40, 220));
         let status = output(fixture.command(&["status"]).args(flags));
         assert!(status.status.success(), "{status:?}");
         let printed = status_rows(&String::from_utf8(status.stdout).unwrap());
         assert!(
-            printed.iter().any(|row| row[1] == "remote only"),
+            printed.iter().any(|row| row[2] == "remote only"),
             "{printed:?}"
         );
         // Every status row is on the screen with the same cells, in the same order.
@@ -12681,7 +12944,7 @@ fn inventory_remote_rows_agree_with_status_remote() {
         assert_eq!(candidates.len(), extras, "{candidates:?}");
         for row in candidates {
             assert!(
-                row[1] == "remote only" && ["unregistered", "excluded"].contains(&row[4].as_str()),
+                row[2] == "remote only" && ["unregistered", "excluded"].contains(&row[5].as_str()),
                 "{row:?}"
             );
         }
@@ -12717,7 +12980,8 @@ fn inventory_registers_a_remote_candidate_without_asking_a_provider_again() {
     run_inventory_pty_actions(
         &mut fixture.command(&["tui", "--remote"]),
         &[
-            (REMOTE_READY.to_vec(), b"kkkkkkkm\r".to_vec()),
+            // The candidate `tool` has the owner `team`, the last of the rows.
+            (REMOTE_READY.to_vec(), b"jjjjjjjm\r".to_vec()),
             (
                 vec!["Repository actions / tool", "Register"],
                 b"\r".to_vec(),
@@ -13426,7 +13690,8 @@ fn inventory_remote_states_come_from_the_catalog_and_lookups_and_missing_blocks_
             (
                 vec![
                     "NORMAL · 1 row",
-                    "pair: gone missing",
+                    "gone",
+                    "pair: org missing",
                     "absent: github.com/org/gone",
                 ],
                 b"\r".to_vec(),
@@ -13533,7 +13798,13 @@ fn inventory_looks_up_declared_repositories_without_a_checkout_while_discovery_i
         &mut fixture.command(),
         &[
             (
-                vec!["NORMAL · 3 rows", "pair: gone missing", "broken", "kept"],
+                vec![
+                    "NORMAL · 3 rows",
+                    "gone",
+                    "pair: org missing",
+                    "broken",
+                    "kept",
+                ],
                 b"/gone\r".to_vec(),
             ),
             (vec!["NORMAL · 1 row", "/ gone"], b"\r".to_vec()),
