@@ -74,7 +74,7 @@ Keys appear in the order listed here. Enumerations are lowercase snake_case stri
 | `path`        | `found_path`                    |
 | `pattern`     | `identity`                      |
 
-The table's origin column shows the normalized identity where the row has one; `origin.value` is the URL text itself. `declaration` is the configuration text as written, which can differ from the normalized `identity`.
+`origin.value` is the URL text itself. `declaration` is the configuration text as written, which can differ from the normalized `identity`.
 
 ## Problems
 

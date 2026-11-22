@@ -814,7 +814,12 @@ fn provider_failures_preserve_successful_rows_and_skip_fzf_when_all_fail()
     let human = run(&home, &config, &["list", "--remote"])?;
     let alias = run(&home, &config, &["ls", "--remote"])?;
     assert_eq!(human.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&human.stdout).contains("bitbucket.org/workspace/active"));
+    assert!(
+        String::from_utf8_lossy(&human.stdout)
+            .lines()
+            .any(|line| line.starts_with("active") && line.contains("remote only")),
+        "{human:?}"
+    );
     assert!(String::from_utf8_lossy(&human.stderr).contains("dc.example"));
     assert_eq!(alias.status.code(), human.status.code());
     assert_eq!(alias.stdout, human.stdout);

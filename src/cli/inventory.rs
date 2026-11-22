@@ -2067,7 +2067,6 @@ impl TerminalSession {
                             home,
                             table.width,
                             None,
-                            session.remote.enabled(),
                         ),
                         table,
                     );
@@ -2102,7 +2101,6 @@ impl TerminalSession {
                             home,
                             table.width,
                             table_state.selected(),
-                            session.remote.enabled(),
                         ),
                         table,
                         &mut table_state,
@@ -2563,7 +2561,7 @@ impl View {
 
 const POPUP: u16 = 66;
 const WIDE_POPUP: u16 = 100;
-/// Terminal width at which the table shows all seven columns of the wide grid.
+/// Terminal width at which the table shows every column of the wide grid.
 const WIDE_TABLE: u16 = 132;
 /// Reserved for the mark column; the repository text starts after it on every row.
 const MARK_SLOT: usize = 4;
@@ -3680,10 +3678,6 @@ fn home_relative(path: &Path, home: &Path) -> String {
         Ok(rest) => escape(format!("~/{}", rest.to_string_lossy())),
         Err(_) => escape(path.to_string_lossy()),
     }
-}
-
-fn origin_text(row: &model::InventoryRow) -> String {
-    escape(identity(row).unwrap_or(&row.origin))
 }
 
 fn registration_text(state: &model::RegistrationState) -> &'static str {
@@ -5798,30 +5792,20 @@ fn fuzzy_subsequence(value: &str, query: &str) -> bool {
     wanted.is_none()
 }
 
-const HEADINGS: [&str; 6] = [
-    "repository",
-    "local",
-    "remote",
-    "branch",
-    "status",
-    "registration",
-];
-const BRANCH_COLUMN: usize = 3;
+const HEADINGS: [&str; 5] = ["repository", "local", "branch", "status", "registration"];
+const BRANCH_COLUMN: usize = 2;
 
-/// One row's cells in the grid's column order, with their tints. The compact grid drops the
-/// origin from `remote` and the grid hides `branch`, whose error then shows in `status`. `remote` says whether remote discovery is
-/// on.
+/// One row's cells in the grid's column order, with their tints. The compact grid hides
+/// `branch`, whose error then shows in `status`.
 fn table_cells(
     row: &model::InventoryRow,
     name: String,
     home: &Path,
     compact: bool,
-    remote: bool,
-) -> [(String, Style); 6] {
+) -> [(String, Style); 5] {
     [
         (name, Style::default()),
         local_cell(row, home),
-        remote_cell(row, compact, remote),
         branch_cell(row),
         status_cell(row, compact),
         (
@@ -5844,35 +5828,6 @@ fn local_cell(row: &model::InventoryRow, home: &Path) -> (String, Style) {
     }
 }
 
-/// The origin, plus the provider's known state while remote discovery is on. A row without a
-/// checkout shows its looked-up state with discovery off too, once answered. `missing` stands
-/// alone, since the origin points nowhere.
-fn remote_cell(row: &model::InventoryRow, compact: bool, remote: bool) -> (String, Style) {
-    if matches!(row.origin_fact, Some(model::OriginFact::Absent)) {
-        return ("no origin".to_owned(), dim());
-    }
-    let origin = origin_text(row);
-    let status = row.remote_status.filter(|status| {
-        remote
-            || row.checkout == model::CheckoutState::Missing
-                && *status != model::RemoteStatus::Pending
-    });
-    let Some(status) = status else {
-        let text = if compact { "—".to_owned() } else { origin };
-        return (text, Style::default());
-    };
-    let style = match status {
-        model::RemoteStatus::Archived | model::RemoteStatus::Missing => warn(),
-        model::RemoteStatus::Pending => dim(),
-        model::RemoteStatus::Public | model::RemoteStatus::Private => Style::default(),
-    };
-    if compact || status == model::RemoteStatus::Missing {
-        (status.label().to_owned(), style)
-    } else {
-        (format!("{origin} · {}", status.label()), style)
-    }
-}
-
 fn branch_cell(row: &model::InventoryRow) -> (String, Style) {
     let style = match row.branch {
         model::ObservationField::Error(_) => tint(Color::Red),
@@ -5891,7 +5846,6 @@ fn status_cell(row: &model::InventoryRow, compact: bool) -> (String, Style) {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repository_table(
     rows: &[&model::InventoryRow],
     names: &HashMap<model::RowKey, String>,
@@ -5900,16 +5854,15 @@ fn repository_table(
     home: &Path,
     width: u16,
     selected: Option<usize>,
-    remote: bool,
 ) -> Table<'static> {
     let compact = width < WIDE_TABLE;
     let mut headings = HEADINGS.to_vec();
     // Column widths, padding included.
     let (mut widths, flexible): (Vec<u16>, &[usize]) = if compact {
         headings.remove(BRANCH_COLUMN);
-        (vec![23, 18, 11, 12, 14], &[1])
+        (vec![23, 18, 12, 14], &[1])
     } else {
-        (vec![22, 27, 37, 18, 12, 14], &[1, 2])
+        (vec![22, 27, 18, 12, 14], &[1])
     };
     let session_slot = if hosted.is_some() { SESSION_SLOT } else { 0 };
     let slot = |column: usize| {
@@ -5922,8 +5875,7 @@ fn repository_table(
     let cells = rows
         .iter()
         .map(|row| {
-            let mut cells =
-                table_cells(row, names[&row.key].clone(), home, compact, remote).to_vec();
+            let mut cells = table_cells(row, names[&row.key].clone(), home, compact).to_vec();
             if compact {
                 cells.remove(BRANCH_COLUMN);
             }
@@ -5973,13 +5925,12 @@ fn repository_table(
                     .into_iter()
                     .enumerate()
                     .map(|(column, (value, style))| {
-                        // Local and remote cells keep their tail: it tells duplicate checkouts
-                        // apart and carries the remote state.
+                        // The local cell keeps its tail: it tells duplicate checkouts apart.
                         let room = usize::from(widths[column]).saturating_sub(2 + slot(column));
                         let text = if column == 0 {
                             abbreviate_name(&value, room)
                         } else {
-                            abbreviate(&value, room, matches!(column, 1 | 2))
+                            abbreviate(&value, room, column == 1)
                         };
                         // Reverse video carries the selection, so the selected row drops its tints.
                         let style = if selected == Some(index) {

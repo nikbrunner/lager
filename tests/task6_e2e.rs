@@ -40,7 +40,7 @@ fn ls_matches_empty_list_in_human_and_json_formats() -> TestResult {
         if flags.is_empty() {
             assert_eq!(
                 String::from_utf8(listed.stdout)?,
-                "repository  local  remote  branch  status  registration\n"
+                "repository  local  branch  status  registration\n"
             );
         } else {
             let document: Value = serde_json::from_slice(&listed.stdout)?;
@@ -148,8 +148,8 @@ fn offline_json_list_is_single_versioned_document_with_wildcard_metadata() -> Te
     assert_eq!(
         String::from_utf8(human.stdout)?,
         "\
-repository  local    remote               branch  status  registration
-repo        missing  github.com/org/repo  —       —       explicit
+repository  local    branch  status  registration
+repo        missing  —       —       explicit
 "
     );
     Ok(())

@@ -102,26 +102,19 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         let (rows, cols) = (rows as usize, cols as usize);
         let compact = cols < 132;
         // Column starts of the grid at 132 and at 80 columns.
-        let headings = [
-            "repository",
-            "local",
-            "remote",
-            "branch",
-            "status",
-            "registration",
-        ];
-        let narrow_headings = ["repository", "local", "remote", "status", "registration"];
+        let headings = ["repository", "local", "branch", "status", "registration"];
+        let narrow_headings = ["repository", "local", "status", "registration"];
         let starts: &[usize] = if compact {
-            &[2, 25, 43, 54, 66]
+            &[2, 25, 54, 66]
         } else {
-            &[2, 24, 51, 88, 106, 118]
+            &[2, 24, 88, 106, 118]
         };
-        let shown = |wide: [&str; 6], narrow: [&str; 5]| -> Vec<String> {
+        let shown = |wide: [&str; 5], narrow: [&str; 4]| -> Vec<String> {
             // The cases list registration before the observation cells.
             if compact {
-                [0, 1, 2, 4, 3].map(|i| narrow[i].to_owned()).to_vec()
+                [0, 1, 3, 2].map(|i| narrow[i].to_owned()).to_vec()
             } else {
-                [0, 1, 2, 4, 5, 3].map(|i| wide[i].to_owned()).to_vec()
+                [0, 1, 3, 4, 2].map(|i| wide[i].to_owned()).to_vec()
             }
         };
 
@@ -170,59 +163,41 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
                 [
                     "alpha",
                     "~/repos/org/alpha",
-                    "github.com/org/alpha",
                     "explicit",
                     "main",
                     "1 modified",
                 ],
-                ["alpha", "…repos/org/alpha", "—", "explicit", "1 modified"],
+                ["alpha", "~/repos/org/alpha", "explicit", "1 modified"],
             ),
             (
                 [
                     "alpha (copy)",
                     "~/repos/archive/alpha",
-                    "github.com/org/alpha",
                     "explicit",
                     "main",
                     "clean",
                 ],
-                ["alpha (copy)", "…s/archive/alpha", "—", "explicit", "clean"],
+                ["alpha (copy)", "~/repos/archive/alpha", "explicit", "clean"],
             ),
             (
-                [
-                    "beta",
-                    "missing",
-                    "github.com/org/beta",
-                    "explicit",
-                    "—",
-                    "—",
-                ],
-                ["beta", "missing", "—", "explicit", "—"],
+                ["beta", "missing", "explicit", "—", "—"],
+                ["beta", "missing", "explicit", "—"],
             ),
             (
-                [
-                    "dots",
-                    "~/repos/team/dots",
-                    "github.com/team/dots",
-                    "wildcard",
-                    "main",
-                    "clean",
-                ],
-                ["dots", "…repos/team/dots", "—", "wildcard", "clean"],
+                ["dots", "~/repos/team/dots", "wildcard", "main", "clean"],
+                ["dots", "~/repos/team/dots", "wildcard", "clean"],
             ),
             (
                 [
                     "scratch",
-                    "…epos/experiments/scratch",
-                    "no origin",
+                    "~/repos/experiments/scratch",
                     "unregistered",
                     "main",
                     "clean",
                 ],
                 [
                     "scratch",
-                    "…riments/scratch",
-                    "no origin",
+                    "~/repos/experiments/scratch",
                     "unregistered",
                     "clean",
                 ],
@@ -454,8 +429,8 @@ fn inventory_keeps_duplicate_and_same_named_rows_distinct_at_both_sizes() {
     for path in [
         "org/alpha",
         "archive/alpha",
-        "a-very-long-backup-directory-name/alpha",
-        "a-very-long-backup-directory-name/older/alpha",
+        "a-very-long-backup-directory-name-that-keeps-going/alpha",
+        "a-very-long-backup-directory-name-that-keeps-going/older/alpha",
     ] {
         init_repo(&root.join(path), "git@github.com:org/alpha.git", true);
     }
@@ -526,7 +501,7 @@ fn inventory_keeps_duplicate_and_same_named_rows_distinct_at_both_sizes() {
             };
             let (first, second) = (path("alpha (copy)"), path("alpha (copy 2)"));
             assert!(
-                first.starts_with('…') && first.ends_with("directory-name/alpha"),
+                first.starts_with('…') && first.ends_with("keeps-going/alpha"),
                 "{screen}"
             );
             assert!(
@@ -603,8 +578,8 @@ fn inventory_keeps_long_named_copies_and_cross_host_rows_distinct_at_80_columns(
         (1, 1, 1),
         "{screen}"
     );
-    assert!(names.contains(&"github.c…-tooling"), "{screen}");
-    assert!(names.contains(&"gitlab.c…-tooling"), "{screen}");
+    assert!(names.contains(&"github.com/org…hared-tooling"), "{screen}");
+    assert!(names.contains(&"gitlab.com/org…hared-tooling"), "{screen}");
 }
 
 #[cfg(unix)]
@@ -726,12 +701,7 @@ fn inventory_search_matches_checkout_state_without_matching_contrasting_rows() {
         &[
             (vec!["No active operation"], b"/missing\r".to_vec()),
             (
-                vec![
-                    "NORMAL · 1 row",
-                    "/ missing",
-                    "github.com/aid/alpha",
-                    "missing",
-                ],
+                vec!["NORMAL · 1 row", "/ missing", "alpha", "missing"],
                 b"q".to_vec(),
             ),
         ],
@@ -739,9 +709,11 @@ fn inventory_search_matches_checkout_state_without_matching_contrasting_rows() {
         220,
     );
     let screen = screen_text(&transcript, 24, 220);
-    assert!(screen.contains("github.com/aid/alpha"), "{screen}");
+    let rows = inventory_rows(&screen);
+    assert_eq!(rows.len(), 1, "{screen}");
+    assert_eq!(rows[0][0], "alpha", "{screen}");
     assert!(
-        !screen.contains("github.com/aid/beta"),
+        !screen.contains("beta"),
         "checkout-state query retained contrasting row:\n{screen}"
     );
 }
@@ -964,11 +936,15 @@ fn inventory_pending_checkout_does_not_assert_a_conflicting_origin() {
         300,
     );
     let rows = inventory_rows(&screen_text(&transcript, 24, 300));
-    let declared = rows
-        .iter()
-        .find(|row| row[2] == "github.com/org/checkout")
-        .unwrap();
-    assert!(declared[1].ends_with(" · unknown"), "{rows:?}");
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        rows.iter().any(|row| row[1].ends_with(" · unknown")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row[1].contains("conflict")),
+        "{rows:?}"
+    );
 }
 
 #[cfg(unix)]
@@ -1195,22 +1171,35 @@ fn inventory_observation_failures_set_exit_status_even_after_successful_refresh(
                 shell_word(&failing), shell_word(&support::real_tool("git")),
             )).unwrap();
             fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-            let actions = if refresh {
-                vec![
-                    (vec!["injected probe failure"], b"R".to_vec()),
-                    (
-                        vec![
-                            "absent: injected probe failure",
-                            "No active operation",
-                            "clean",
-                            "main",
-                        ],
-                        b"q".to_vec(),
-                    ),
-                ]
+            // A failed origin probe shows only in the inspect panel; the other failures
+            // show in the grid.
+            let in_grid = operation != "remote";
+            let mut actions = if in_grid {
+                vec![(vec!["injected probe failure"], b"R".to_vec())]
             } else {
-                vec![(vec!["injected probe failure"], b"q".to_vec())]
+                vec![
+                    (vec!["checkout", "1 problem"], b"\r".to_vec()),
+                    (
+                        vec!["Inspect / checkout", "injected probe failure"],
+                        b"\x1b".to_vec(),
+                    ),
+                    (vec!["NORMAL ·", "absent: Inspect /"], b"R".to_vec()),
+                ]
             };
+            let refreshing = actions.len() - 1;
+            if refresh {
+                actions.push((
+                    vec![
+                        "absent: injected probe failure",
+                        "No active operation",
+                        "clean",
+                        "main",
+                    ],
+                    b"q".to_vec(),
+                ));
+            } else {
+                actions[refreshing].1 = b"q".to_vec();
+            }
             let transcript = run_inventory_pty_with_exit(
                 support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
                 &actions,
@@ -1218,7 +1207,7 @@ fn inventory_observation_failures_set_exit_status_even_after_successful_refresh(
                 300,
                 1,
                 |action| {
-                    if refresh && action == 0 {
+                    if refresh && action == refreshing {
                         fs::remove_file(&failing).unwrap();
                     }
                 },
@@ -1628,6 +1617,25 @@ exclude = ["repo"]
                 ],
                 b"\x1b".to_vec(),
             ),
+            (vec!["NORMAL ·", "absent: Inspect /"], b"\x7f".to_vec()),
+            (vec!["NORMAL · 5 rows"], b"/relative\r\r".to_vec()),
+            (
+                vec![
+                    "Inspect / relative-origin",
+                    "pair: Origin ../relative-origin",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL ·", "absent: Inspect /"], b"\x7f".to_vec()),
+            (vec!["NORMAL · 5 rows"], b"/sub\r\r".to_vec()),
+            (
+                vec![
+                    "Inspect / repo",
+                    "pair: Identity github.com/group/sub/repo",
+                    "pair: Origin git@github.com:group/sub/repo.git",
+                ],
+                b"\x1b".to_vec(),
+            ),
             (vec!["NORMAL ·", "absent: Inspect /"], b"q".to_vec()),
         ],
         80,
@@ -1641,22 +1649,13 @@ exclude = ["repo"]
     );
     let plain = screen_text(&frames[0], 80, 220);
 
-    for expected in [
-        "github.com/group/managed",
-        "explicit",
-        "elsewhere/managed",
-        "github.com/group/missing",
-        "unknown",
-        "github.com/group/sub/repo",
-        "wildcard",
-        "../relative-origin",
-    ] {
+    for expected in ["explicit", "elsewhere/managed", "unknown", "wildcard"] {
         assert!(plain.contains(expected), "missing {expected}:\n{plain}");
     }
     let rows = inventory_rows(&plain);
     let missing = rows
         .iter()
-        .find(|row| row[2] == "github.com/group/missing")
+        .find(|row| row[0] == "missing")
         .unwrap_or_else(|| panic!("{rows:?}"));
     assert_ne!(
         missing[1], "missing",
@@ -1700,7 +1699,7 @@ fn inventory_unions_nested_wildcards_with_exclusions_in_each_declaration_order()
             support::lager(&home, &config).arg("tui"),
             &[
                 (
-                    vec!["No active operation", "github.com/group/sub/repo"],
+                    vec!["No active operation", "~/repos/group/sub/repo"],
                     b"kk\r".to_vec(),
                 ),
                 (
@@ -1721,9 +1720,9 @@ fn inventory_unions_nested_wildcards_with_exclusions_in_each_declaration_order()
             .iter()
             .find(|row| row[0] == "repo" && row[1] == "~/repos/group/sub/repo")
             .expect("nested wildcard checkout row");
-        assert_eq!(row[3], "main");
-        assert_eq!(row[4], "clean");
-        assert_eq!(row[5], "wildcard");
+        assert_eq!(row[2], "main");
+        assert_eq!(row[3], "clean");
+        assert_eq!(row[4], "wildcard");
     }
 }
 
@@ -1803,7 +1802,7 @@ fn inventory_refresh_cancels_delayed_probes_and_quit_remains_responsive() {
         support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (vec!["pending"], b"R".to_vec()),
-            (vec!["github.com/org/fresh"], b"q".to_vec()),
+            (vec!["fresh", "missing"], b"q".to_vec()),
         ],
         32,
         132,
@@ -1823,12 +1822,13 @@ fn inventory_refresh_cancels_delayed_probes_and_quit_remains_responsive() {
         },
     );
     let plain = screen_text(&transcript, 32, 132);
+    let rows = inventory_rows(&plain);
     assert!(
-        plain.contains("github.com/org/fresh"),
+        rows.iter().any(|row| row[0] == "fresh"),
         "refresh did not install the new config:\n{plain}"
     );
     assert!(
-        plain.contains("github.com/org/fresh") && !plain.contains("github.com/org/delayed"),
+        rows.iter().all(|row| row[0] == "fresh") && !plain.contains("delayed"),
         "stale result from the prior config generation was accepted:\n{plain}"
     );
 }
@@ -1867,7 +1867,7 @@ fn inventory_refresh_keeps_completed_observations_stale_until_reprobed() {
     let transcript = run_inventory_pty_actions_with_hook(
         support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
-            (vec!["github.com/org/stale", "main", "clean"], b"R".to_vec()),
+            (vec!["~/repos/org/stale", "main", "clean"], b"R".to_vec()),
             (vec!["stale: main", "stale: known clean"], b"q".to_vec()),
         ],
         24,
@@ -2001,7 +2001,10 @@ fn inventory_rejects_a_probe_result_after_same_path_checkout_replacement() {
         support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (vec!["changed-target", "pending"], b" ".to_vec()),
-            (vec!["changed-target", "stale observation"], b"\r".to_vec()),
+            (
+                vec!["changed-target", "· unknown", "stale: target"],
+                b"\r".to_vec(),
+            ),
             (
                 vec!["Inspect /", "stale: target changed during observation"],
                 b"\x1b".to_vec(),
@@ -2026,12 +2029,12 @@ fn inventory_rejects_a_probe_result_after_same_path_checkout_replacement() {
     let inspect = screen_text(&inspected[0], 24, 132);
     assert!(
         inspect.contains("stale: target changed during observation")
-            && !inspect.contains("github.com/org/old-origin"),
+            && !inspect.contains("old-origin"),
         "changed target remained forever pending instead of becoming stale:\n{inspect}"
     );
     let plain = screen_text(&transcript, 24, 132);
     assert!(
-        !plain.contains("github.com/org/old-origin"),
+        !plain.contains("old-origin"),
         "stale probe result was accepted after target replacement:\n{plain}"
     );
 }
@@ -2068,7 +2071,7 @@ fn inventory_rejects_a_probe_result_after_in_place_origin_config_change() {
         support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
         &[
             (vec!["origin-changed", "pending"], b" ".to_vec()),
-            (vec!["origin-changed", "stale observation"], b"\r".to_vec()),
+            (vec!["origin-changed", "stale: target"], b"\r".to_vec()),
             (
                 vec!["Inspect /", "stale: target changed during observation"],
                 b"\x1b".to_vec(),
@@ -2098,12 +2101,12 @@ fn inventory_rejects_a_probe_result_after_in_place_origin_config_change() {
     );
     let inspect = screen_text(&inspected[0], 24, 132);
     assert!(
-        !inspect.contains("github.com/org/old-origin"),
+        !inspect.contains("old-origin"),
         "stale probe result was accepted after origin config changed:\n{inspect}"
     );
     let plain = screen_text(&transcript, 24, 132);
     assert!(
-        !plain.contains("github.com/org/old-origin"),
+        !plain.contains("old-origin"),
         "stale probe result was accepted after origin config changed:\n{plain}"
     );
 }
@@ -2130,42 +2133,61 @@ fn inventory_declared_rows_keep_wrong_corrupt_and_unreadable_facts_distinct() {
     fs::create_dir_all(&destination).unwrap();
     fs::set_permissions(&destination, fs::Permissions::from_mode(0o000)).unwrap();
 
-    let transcript = run_inventory_pty_with_exit(
+    let mut frames = Vec::new();
+    run_inventory_pty_with_exit_observing(
         support::lager(&home, &config).arg("tui"),
-        &[(
-            vec!["github.com/other/wrong", "origin error:", "unreadable"],
-            b"q".to_vec(),
-        )],
+        &[
+            (
+                vec!["other/wrong", "org/corrupt", "unreadable", "error: git"],
+                b"/corrupt\rj\r".to_vec(),
+            ),
+            (
+                vec!["Inspect / org/corrupt", "origin error:"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL ·", "absent: Inspect /"], b"\x7f".to_vec()),
+            (vec!["NORMAL · 5 rows"], b"/other\r\r".to_vec()),
+            (
+                vec![
+                    "Inspect / other/wrong",
+                    "pair: Identity github.com/other/wrong",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL ·", "absent: Inspect /"], b"q".to_vec()),
+        ],
         24,
         500,
         1,
-        |_| {},
+        |action, _, frame| {
+            if action == 0 {
+                frames.push(frame.to_owned());
+            }
+        },
     );
     fs::set_permissions(&destination, fs::Permissions::from_mode(0o755)).unwrap();
-    let rows = inventory_rows(&screen_text(&transcript, 24, 500));
+    let rows = inventory_rows(&screen_text(&frames[0], 24, 500));
     let wrong_row = rows
         .iter()
-        .find(|row| row[2] == "github.com/other/wrong")
-        .expect("wrong-origin checkout row");
-    assert_eq!(wrong_row[0], "other/wrong");
+        .find(|row| row[0] == "other/wrong")
+        .unwrap_or_else(|| panic!("wrong-origin checkout row; parsed rows: {rows:?}"));
     assert_eq!(wrong_row[1], "~/repos/org/wrong");
-    assert_eq!(wrong_row[5], "unregistered");
+    assert_eq!(wrong_row[4], "unregistered");
     let declared_wrong = rows
         .iter()
-        .find(|row| row[2] == "github.com/org/wrong")
-        .expect("declared wrong-origin row");
+        .find(|row| row[0] == "org/wrong")
+        .unwrap_or_else(|| panic!("declared wrong-origin row; parsed rows: {rows:?}"));
     assert!(declared_wrong[1].ends_with(" · conflict"), "{rows:?}");
-    assert_eq!(declared_wrong[0], "org/wrong");
-    let corrupt_row = rows
-        .iter()
-        .find(|row| row[0] == "org/corrupt" && row[2].starts_with("origin error:"))
-        .unwrap_or_else(|| panic!("corrupt-origin checkout row; parsed rows: {rows:?}"));
-    assert!(corrupt_row[2].starts_with("origin error:"));
     let unreadable_row = rows
         .iter()
-        .find(|row| row[2] == "github.com/org/unreadable")
-        .expect("declared unreadable row");
+        .find(|row| row[0].ends_with("unreadable"))
+        .unwrap_or_else(|| panic!("declared unreadable row; parsed rows: {rows:?}"));
     assert!(unreadable_row[1].ends_with(" · unreadable"), "{rows:?}");
+    let corrupt_row = rows
+        .iter()
+        .find(|row| row[0] == "org/corrupt" && row[2].starts_with("error:"))
+        .unwrap_or_else(|| panic!("corrupt-origin checkout row; parsed rows: {rows:?}"));
+    assert_eq!(corrupt_row[1], "~/repos/org/corrupt");
 }
 
 #[cfg(unix)]
@@ -2564,57 +2586,65 @@ exclude = ["skip"]
     std::os::unix::fs::symlink(root.join("org"), root.join("linked-org")).unwrap();
 
     support::clear_outbound_requests();
-    let transcript = run_inventory_pty_with_size(
+    let mut frames = Vec::new();
+    run_inventory_pty_with_exit_observing(
         support::lager(&home, &config).arg("tui"),
         &[
-            "7 rows",
-            "ignored repositories: bare.git: bare repository ignored",
-            "No active operation",
+            (
+                vec![
+                    "7 rows",
+                    "ignored repositories: bare.git: bare repository ignored",
+                    "No active operation",
+                ],
+                b"/no-origin\r\r".to_vec(),
+            ),
+            (vec!["Inspect / no-origin", "No origin"], b"\x1b".to_vec()),
+            (vec!["NORMAL ·", "absent: Inspect /"], b"\x7f".to_vec()),
+            (vec!["NORMAL · 7 rows"], b"/extra\r\r".to_vec()),
+            (
+                vec![
+                    "Inspect / extra",
+                    "pair: Identity github.com/org/extra",
+                    "pair: Origin git@github.com:org/extra.git",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL ·", "absent: Inspect /"], b"q".to_vec()),
         ],
-        b"q",
         80,
         220,
+        0,
+        |action, _, frame| {
+            if action == 0 {
+                frames.push(frame.to_owned());
+            }
+        },
     );
-    let plain = screen_text(&transcript, 80, 220);
+    let plain = screen_text(&frames[0], 80, 220);
 
-    for header in [
-        "repository",
-        "local",
-        "remote",
-        "branch",
-        "status",
-        "registration",
-    ] {
+    for header in ["repository", "local", "branch", "status", "registration"] {
         assert!(plain.contains(header), "missing header {header}:\n{plain}");
     }
     let expected = "ignored repositories: bare.git: bare repository ignored";
     assert!(plain.contains(expected), "missing {expected}:\n{plain}");
     let rows = inventory_rows(&plain);
-    let assert_row = |label: &str, expected: [&str; 6]| {
+    let assert_row = |label: &str, expected: [&str; 5]| {
         assert!(
             rows.iter()
-                .any(|row| { [0, 1, 2, 5, 3, 4].map(|i| row[i].as_str()) == expected }),
+                .any(|row| { [0, 1, 4, 2, 3].map(|i| row[i].as_str()) == expected }),
             "missing exact {label} row {expected:?}; parsed rows: {rows:?}"
         );
     };
     assert!(rows.iter().all(|row| row[0] != "org/*"), "{rows:?}");
     assert_row(
         "missing declaration",
-        [
-            "missing",
-            "missing",
-            "github.com/org/missing",
-            "explicit",
-            "—",
-            "—",
-        ],
+        ["missing", "missing", "explicit", "—", "—"],
     );
     assert_row(
         "exact managed checkout",
         [
             "managed",
             "~/repos/org/managed",
-            "github.com/org/managed",
             "explicit",
             "main",
             "clean",
@@ -2625,7 +2655,6 @@ exclude = ["skip"]
         [
             "managed (copy)",
             "~/repos/elsewhere/managed",
-            "github.com/org/managed",
             "explicit",
             "main",
             "clean",
@@ -2636,7 +2665,6 @@ exclude = ["skip"]
         [
             "extra",
             "~/repos/org/extra",
-            "github.com/org/extra",
             "wildcard",
             "main",
             "1 modified",
@@ -2644,21 +2672,13 @@ exclude = ["skip"]
     );
     assert_row(
         "excluded checkout",
-        [
-            "skip",
-            "~/repos/org/skip",
-            "github.com/org/skip",
-            "excluded",
-            "main",
-            "clean",
-        ],
+        ["skip", "~/repos/org/skip", "excluded", "main", "clean"],
     );
     assert_row(
         "originless checkout",
         [
             "no-origin",
             "~/repos/local/no-origin",
-            "no origin",
             "unregistered",
             "main",
             "clean",
@@ -2753,7 +2773,7 @@ fn inventory_resizes_from_wide_to_compact_without_losing_whole_row_selection() {
                 vec![
                     "repository",
                     "local",
-                    "remote",
+                    "branch",
                     "registration",
                     "status",
                     "selected: alpha",
@@ -2790,14 +2810,7 @@ fn inventory_resizes_from_wide_to_compact_without_losing_whole_row_selection() {
         .unwrap();
     assert_eq!(
         wide_header.split_whitespace().collect::<Vec<_>>(),
-        [
-            "repository",
-            "local",
-            "remote",
-            "branch",
-            "status",
-            "registration"
-        ],
+        ["repository", "local", "branch", "status", "registration"],
         "{wide}"
     );
     assert!(
@@ -2808,7 +2821,7 @@ fn inventory_resizes_from_wide_to_compact_without_losing_whole_row_selection() {
         highlighted_inventory_row(compact_frame, 24, 80, "beta").is_some(),
         "{compact}"
     );
-    for column in ["repository", "local", "remote", "status", "registration"] {
+    for column in ["repository", "local", "status", "registration"] {
         assert!(compact.contains(column), "missing {column}:\n{compact}");
     }
     let compact_header = compact
@@ -2817,7 +2830,7 @@ fn inventory_resizes_from_wide_to_compact_without_losing_whole_row_selection() {
         .unwrap();
     assert_eq!(
         compact_header.split_whitespace().collect::<Vec<_>>(),
-        ["repository", "local", "remote", "status", "registration"],
+        ["repository", "local", "status", "registration"],
         "{compact}"
     );
     let selected = highlighted_inventory_row(compact_frame, 24, 80, "beta").unwrap();
@@ -3339,7 +3352,7 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
                 b"R".to_vec(),
             ),
             (
-                vec!["NORMAL · 1 row", "/ cloned", "github.com/org/alpha"],
+                vec!["NORMAL · 1 row", "/ cloned", "~/repos/alpha"],
                 Vec::new(),
             ),
             (
@@ -3347,7 +3360,7 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
                 b"R".to_vec(),
             ),
             (
-                vec!["NORMAL · 1 row", "/ cloned", "github.com/org/alpha"],
+                vec!["NORMAL · 1 row", "/ cloned", "~/repos/alpha"],
                 Vec::new(),
             ),
             (
@@ -11969,7 +11982,7 @@ fn inventory_remote_keeps_local_rows_usable_while_providers_load_and_keeps_rows_
         partial
             .iter()
             .filter(|row| row[1] == "remote only")
-            .map(|row| (row[0].as_str(), row[5].as_str()))
+            .map(|row| (row[0].as_str(), row[4].as_str()))
             .collect::<Vec<_>>(),
         [
             ("zebra", "unregistered"),
@@ -12403,8 +12416,7 @@ fn inventory_remote_archive_toggle_refetches_and_survives_disabling() {
     let fixture = RemoteFixture::new();
     let with_archives = [
         "NORMAL · 8 rows",
-        "github.com/org/old · archived",
-        "bitbucket.org/team/attic · archived",
+        "attic",
         "bitbucket.org: ready, 2 candidates",
         "github.com: ready, 4 candidates",
     ];
@@ -12412,7 +12424,7 @@ fn inventory_remote_archive_toggle_refetches_and_survives_disabling() {
         &mut fixture.command(&["tui", "--remote"]),
         &[
             (
-                [&REMOTE_READY[..], &["absent: · archived"][..]].concat(),
+                [&REMOTE_READY[..], &["absent: attic"][..]].concat(),
                 [&b"kk"[..], REMOTE_MENU].concat(),
             ),
             (
@@ -12448,10 +12460,16 @@ fn inventory_remote_archive_toggle_refetches_and_survives_disabling() {
         (6, 6)
     );
 
-    run_inventory_pty_with_size(
+    run_inventory_pty_actions(
         &mut fixture.command(&["tui", "--remote", "--include-archived"]),
-        &with_archives,
-        b"q",
+        &[
+            (with_archives.to_vec(), b"/attic\r\r".to_vec()),
+            (
+                vec!["Inspect / attic", "pair: Remote archived"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL ·", "absent: Inspect /"], b"q".to_vec()),
+        ],
         32,
         132,
     );
@@ -12494,7 +12512,7 @@ fn inventory_local_refresh_merges_the_cache_into_the_new_config_without_a_provid
     let registration = |rows: &[Vec<String>], name: &str| {
         rows.iter()
             .find(|row| row[0] == name)
-            .map(|row| (row[5].clone(), row[1].clone()))
+            .map(|row| (row[4].clone(), row[1].clone()))
     };
     assert_eq!(
         registration(&rows[1], "skip"),
@@ -12582,7 +12600,7 @@ fn inventory_remote_ignores_answers_to_requests_that_were_invalidated() {
             (
                 vec![
                     "NORMAL · 8 rows",
-                    "bitbucket.org/team/attic · archived",
+                    "attic",
                     "bitbucket.org: ready, 2 candidates",
                 ],
                 b"j".to_vec(),
@@ -12590,7 +12608,7 @@ fn inventory_remote_ignores_answers_to_requests_that_were_invalidated() {
             (
                 vec![
                     "NORMAL · 8 rows",
-                    "bitbucket.org/team/attic · archived",
+                    "attic",
                     "bitbucket.org: ready, 2 candidates",
                 ],
                 b"q".to_vec(),
@@ -12663,7 +12681,7 @@ fn inventory_remote_rows_agree_with_status_remote() {
         assert_eq!(candidates.len(), extras, "{candidates:?}");
         for row in candidates {
             assert!(
-                row[1] == "remote only" && ["unregistered", "excluded"].contains(&row[5].as_str()),
+                row[1] == "remote only" && ["unregistered", "excluded"].contains(&row[4].as_str()),
                 "{row:?}"
             );
         }
@@ -13127,6 +13145,7 @@ fn inventory_config_reload_waits_until_an_open_confirmation_closes() {
                     "NORMAL ·",
                     "Config changed on disk · reloaded",
                     "clean",
+                    "absent: stale",
                     "selected: ok",
                 ],
                 b"r".to_vec(),
@@ -13407,7 +13426,7 @@ fn inventory_remote_states_come_from_the_catalog_and_lookups_and_missing_blocks_
             (
                 vec![
                     "NORMAL · 1 row",
-                    "pair: missing missing",
+                    "pair: gone missing",
                     "absent: github.com/org/gone",
                 ],
                 b"\r".to_vec(),
@@ -13514,14 +13533,7 @@ fn inventory_looks_up_declared_repositories_without_a_checkout_while_discovery_i
         &mut fixture.command(),
         &[
             (
-                vec![
-                    "NORMAL · 3 rows",
-                    "pair: missing missing",
-                    "absent: github.com/org/gone",
-                    "github.com/other/broken ",
-                    "github.com/org/kept · private",
-                    "absent: problem",
-                ],
+                vec!["NORMAL · 3 rows", "pair: gone missing", "broken", "kept"],
                 b"/gone\r".to_vec(),
             ),
             (vec!["NORMAL · 1 row", "/ gone"], b"\r".to_vec()),
@@ -13533,7 +13545,31 @@ fn inventory_looks_up_declared_repositories_without_a_checkout_while_discovery_i
                 ],
                 b"\x1b".to_vec(),
             ),
-            (vec!["NORMAL · 1 row", "absent: Inspect /"], b"q".to_vec()),
+            (
+                vec!["NORMAL · 1 row", "absent: Inspect /"],
+                b"\x7f".to_vec(),
+            ),
+            (vec!["NORMAL · 3 rows"], b"/kept\r".to_vec()),
+            (vec!["NORMAL · 1 row", "/ kept"], b"\r".to_vec()),
+            (
+                vec!["Inspect / kept", "pair: Remote private", "absent: not on"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Inspect /"],
+                b"\x7f".to_vec(),
+            ),
+            (vec!["NORMAL · 3 rows"], b"/broken\r".to_vec()),
+            (vec!["NORMAL · 1 row", "/ broken"], b"\r".to_vec()),
+            // A failed lookup leaves the state unknown, never missing.
+            (
+                vec!["Inspect / broken", "absent: Remote  ", "absent: not on"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Inspect /", "absent: problem"],
+                b"q".to_vec(),
+            ),
         ],
         32,
         132,

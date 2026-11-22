@@ -154,8 +154,7 @@ pub(crate) fn run(config_path: &Path, args: StatusArgs) -> i32 {
             rows.iter()
                 .filter(|row| !matches!(row.key, RowKey::Pattern(_)))
                 .map(|row| {
-                    table_cells(row, names[&row.key].clone(), &home, false, args.remote)
-                        .map(|(cell, _)| cell)
+                    table_cells(row, names[&row.key].clone(), &home, false).map(|(cell, _)| cell)
                 }),
         )
     };
@@ -174,7 +173,7 @@ pub(crate) fn run(config_path: &Path, args: StatusArgs) -> i32 {
 }
 
 /// Aligns the cells under the wide grid's headings, two spaces apart, never truncated.
-fn table(rows: impl Iterator<Item = [String; 6]>) -> String {
+fn table(rows: impl Iterator<Item = [String; 5]>) -> String {
     let lines = std::iter::once(HEADINGS.map(str::to_owned))
         .chain(rows)
         .collect::<Vec<_>>();
