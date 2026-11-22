@@ -148,7 +148,7 @@ refresh; otherwise it returns `0`. Informational exclusions and deliberate
 cancellation do not count as failures.
 
 Use `j`/`k` or arrow keys to select a row, `/` for live fuzzy search, Space to
-mark the row, `a` to add a repository by reference, `r` to remove the checkout and keep its registration, `w` for the worktrees of the selected repository, `s` for its session, Enter to inspect the selected repository, `m` for the action menu,
+mark the row, `a` to add a repository by reference, `r` to remove the checkout and keep its registration, `w` for the worktrees of the selected repository, `g` for lazygit in its checkout, `s` for its session, Enter to inspect the selected repository, `m` for the action menu,
 and `?` for effective bindings. Search matches full attributes, paths and origins; Enter/Esc
 retain the filter and normal-mode Backspace clears it. Ordinary search letters
 remain text; F1 opens search help. Help describes the mode it was opened from.
@@ -156,7 +156,7 @@ Marks survive filtering and refresh while their exact target remains; the search
 row shows the marked and hidden-marked counts, and the status line reports marks
 removed with a vanished entry. Wildcard pattern rows cannot be marked.
 The menu groups actions for this row (Repository actions…, Inspect, Copy value…,
-Open origin, Worktrees…, and Open session with a `[session]` section), the
+Open origin, Worktrees…, Open lazygit, and Open session with a `[session]` section), the
 selection (mark this row, mark visible concrete rows, clear all marks) and the
 inventory (Add, Remote discovery…, Refresh, Problems…, batch cancellation, Help
 and Quit).
@@ -194,6 +194,14 @@ after a failure Enter returns to the popup. When Git fails a removal partway,
 nothing. A row without a checkout (missing,
 remote only, wildcard pattern, unreadable) reports `Worktrees unavailable: …`
 and opens nothing.
+`g` or Open lazygit in the menu hands the terminal to `lazygit` in the current
+row's checkout. The program is `lazygit` from `PATH`; marks are not used. When
+lazygit exits, whatever its status, the inventory takes the terminal back and
+observes that row's branch and changes again, without scanning the other rows;
+the cursor stays on the row. A row without a checkout (missing, remote only,
+wildcard pattern, unreadable) reports `Open lazygit unavailable: …`, a running
+batch reports `a batch is running`, and without `lazygit` on `PATH` the status
+line reads `lazygit not found on PATH`. None of these starts a process.
 Repository actions… → Register and Unregister act on the marked rows, hidden
 ones included, or on the current row when nothing is marked. They change the
 configuration only, through the same registry services as `register` and

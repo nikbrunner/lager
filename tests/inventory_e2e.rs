@@ -244,7 +244,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
             &["  j/k rows  / search  a add  Enter inspect  R refresh  m menu  ? help  q quit"]
         } else {
             &[
-                "  j/k rows  / search  Space mark  a add  r remove  w worktrees  Enter inspect  R refresh  m menu  ? help  q quit",
+                "  j/k rows  / search  Space mark  a add  r remove  w worktrees  g lazygit  Enter inspect  R refresh  m menu  ? help  q quit",
             ]
         };
         let status = rows - 1 - footer.len();
@@ -813,7 +813,7 @@ fn inventory_root_menu_uses_effective_hints_and_preserves_search_and_selection()
             (vec!["All actions"], b"\x1b".to_vec()),
             (vec!["NORMAL ·", "/ beta", "selected: beta"], b"q".to_vec()),
         ],
-        24,
+        25,
         80,
     );
 }
@@ -3821,7 +3821,7 @@ fn inventory_menu_refresh_uses_effective_binding_and_preserves_filter() {
             (vec!["No active operation"], b"/alpha\rm".to_vec()),
             (
                 vec!["All actions", "pair: config x", "Refresh local / config"],
-                b"jjjjjjjj\r".to_vec(),
+                b"jjjjjjjjj\r".to_vec(),
             ),
             (
                 vec!["NORMAL ·", "/ alpha", "pair: y refresh", "selected: alpha"],
@@ -3977,7 +3977,7 @@ fn inventory_help_follows_its_board_with_one_hint_row_over_an_empty_hint_bar() {
             ),
             (vec!["NORMAL", "absent: Keyboard /"], b"q".to_vec()),
         ],
-        32,
+        33,
         132,
         0,
         |action, _, frame| {
@@ -3986,7 +3986,7 @@ fn inventory_help_follows_its_board_with_one_hint_row_over_an_empty_hint_bar() {
             }
         },
     );
-    let screen = screen_text(&help, 32, 132);
+    let screen = screen_text(&help, 33, 132);
     let lines = screen.split('\n').collect::<Vec<_>>();
     let body = lines
         .iter()
@@ -4020,9 +4020,9 @@ fn inventory_help_follows_its_board_with_one_hint_row_over_an_empty_hint_bar() {
         "{screen}"
     );
     assert!(!screen.contains("No default key"), "{screen}");
-    assert_eq!(lines[31], "", "{screen}");
+    assert_eq!(lines[32], "", "{screen}");
     assert!(
-        styled_screen(&help, 32, 132)[31]
+        styled_screen(&help, 33, 132)[32]
             .iter()
             .all(|(_, reversed)| *reversed),
         "the empty hint bar stays a bar:\n{screen}"
@@ -4742,7 +4742,7 @@ fn inventory_marks_survive_filtering_and_refresh_and_report_vanished_entries() {
             ),
             (
                 vec!["NORMAL · 2 rows", "absent: gone", "[x] alpha", "[ ] beta"],
-                b"mjjjjj\r".to_vec(),
+                b"mjjjjjj\r".to_vec(),
             ),
             (
                 vec![
@@ -4758,7 +4758,7 @@ fn inventory_marks_survive_filtering_and_refresh_and_report_vanished_entries() {
                     "[x] beta",
                     "2 marked · 0 hidden",
                 ],
-                b"mjjjjj\rjj\r".to_vec(),
+                b"mjjjjjj\rjj\r".to_vec(),
             ),
             (
                 vec!["Cleared 2 marks", "absent: marked ·", "absent: [x]"],
@@ -4992,6 +4992,7 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
                     "Copy value…",
                     "Open origin in browser",
                     "Worktrees…",
+                    "pair: lazygit g",
                     "Selection · 0 marked",
                     "absent: marks the row",
                     "Inventory",
@@ -5094,6 +5095,7 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
             ),
             (vec!["Worktrees / alpha", "WORKTREES"], b"\x1b".to_vec()),
             (vec!["NORMAL", "absent: Worktrees /"], root_entry(5)),
+            (vec!["lazygit not found on PATH"], root_entry(6)),
             (
                 vec![
                     "Selection / 0 marked",
@@ -5105,20 +5107,20 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
             ),
             (
                 vec!["Marked alpha", "1 marked · 0 hidden"],
-                b"mjjjjj\rjj\r".to_vec(),
+                b"mjjjjjj\rjj\r".to_vec(),
             ),
             (
                 vec!["Cleared 1 mark", "absent: marked ·"],
-                b"mjjjjj\rj\r".to_vec(),
+                b"mjjjjjj\rj\r".to_vec(),
             ),
             (
                 vec!["Marked visible concrete rows", "1 marked · 0 hidden"],
-                root_entry(6),
+                root_entry(7),
             ),
             (vec!["Add / URL or reference"], b"\x1b".to_vec()),
             (
                 vec!["Add cancelled · nothing changed", "absent: Add /"],
-                root_entry(7),
+                root_entry(8),
             ),
             // Without a configured provider the submenu opens and explains itself.
             (
@@ -5130,8 +5132,8 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
                 ],
                 b"qq".to_vec(),
             ),
-            (vec!["NORMAL", "absent: All actions"], root_entry(8)),
             (vec!["NORMAL", "absent: All actions"], root_entry(9)),
+            (vec!["NORMAL", "absent: All actions"], root_entry(10)),
             (vec!["All actions", "pair: Problems… none"], b"j\r".to_vec()),
             (vec!["All actions", "pair: batch no"], b"j\r".to_vec()),
             (
@@ -5140,7 +5142,7 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
             ),
             (vec!["All actions", "absent: Keyboard"], b"j\r".to_vec()),
         ],
-        24,
+        25,
         80,
     );
 }
@@ -5160,7 +5162,7 @@ fn inventory_session_problems_list_every_failure_behind_exit_one() {
         "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n",
     )
     .unwrap();
-    let problems = format!("m{}\r", "j".repeat(9)).into_bytes();
+    let problems = format!("m{}\r", "j".repeat(10)).into_bytes();
     let mut popup = String::new();
 
     run_inventory_pty_with_exit_observing(
@@ -5990,7 +5992,7 @@ fn inventory_invalid_binding_refresh_keeps_the_previous_map_and_is_a_session_pro
             (vec!["Remove only cancelled"], b"m".to_vec()),
             (
                 vec!["All actions", "pair: 1 problem"],
-                b"jjjjjjjjj\r".to_vec(),
+                b"jjjjjjjjjj\r".to_vec(),
             ),
             (
                 vec![
@@ -6125,7 +6127,7 @@ fn inventory_registers_every_marked_row_including_hidden_ones_and_reports_each_o
             ),
             (
                 vec!["NORMAL", "absent: Batch /", "absent: Scanning"],
-                format!("m{}\r", "j".repeat(9)).into_bytes(),
+                format!("m{}\r", "j".repeat(10)).into_bytes(),
             ),
             (
                 vec![
@@ -6688,7 +6690,7 @@ fn inventory_cancelled_add_changes_nothing_and_keeps_query_cursor_and_marks() {
                 vec!["Add / URL or reference", "qam/new", "absent: Add / preview"],
                 b"\x1b".to_vec(),
             ),
-            (kept.clone(), b"mjjjjjj\r".to_vec()),
+            (kept.clone(), b"mjjjjjjj\r".to_vec()),
             (
                 vec!["Add / URL or reference", "absent: qam/new"],
                 b"x/y\r".to_vec(),
@@ -7371,7 +7373,7 @@ fn inventory_clone_batch_reports_each_target_and_continues_past_a_failed_and_a_s
             ),
             (
                 vec!["NORMAL · 4 rows", "absent: Batch /", "absent: Scanning"],
-                format!("m{}\r", "j".repeat(9)).into_bytes(),
+                format!("m{}\r", "j".repeat(10)).into_bytes(),
             ),
             (
                 vec![
@@ -8015,7 +8017,7 @@ fn inventory_long_preview_scrolls_its_targets_while_the_choices_stay_in_view() {
         &[
             (
                 vec!["NORMAL · 12 rows", "absent: Scanning"],
-                b"mjjjjj\rj\r".to_vec(),
+                b"mjjjjjj\rj\r".to_vec(),
             ),
             (vec!["12 marked · 0 hidden"], b"m\r\r".to_vec()),
             (
@@ -9729,7 +9731,7 @@ fn inventory_menu_cancellation_stops_the_remaining_targets_and_keeps_completed_o
     // extra `j` and the `k` end on Cancel active batch in the menu only: in the batch popup
     // they would end on Return to browsing.
     let (_temp, root, _) =
-        removal_held_at_its_second_target(b"\x1bmjjjjjjjjjjjk\r", cancelled_batch_outcomes());
+        removal_held_at_its_second_target(b"\x1bmjjjjjjjjjjjjk\r", cancelled_batch_outcomes());
     assert!(root.join("org/gamma/.git").is_dir());
 }
 
@@ -12129,7 +12131,7 @@ impl RemoteFixture {
 
 /// Opens "Remote discovery…" from the action menu.
 #[cfg(unix)]
-const REMOTE_MENU: &[u8] = b"mjjjjjjj\r";
+const REMOTE_MENU: &[u8] = b"mjjjjjjjj\r";
 
 #[cfg(unix)]
 const REMOTE_READY: [&str; 3] = [
@@ -12452,7 +12454,7 @@ fn inventory_remote_disable_hides_candidates_removes_their_marks_and_keeps_the_c
     run_inventory_pty_with_exit_observing(
         &mut fixture.command(&["tui", "--remote"]),
         &[
-            (REMOTE_READY.to_vec(), b"kkmjjjjj\r".to_vec()),
+            (REMOTE_READY.to_vec(), b"kkmjjjjjj\r".to_vec()),
             (vec!["Mark visible concrete rows"], b"j\r".to_vec()),
             (vec!["6 marked · 0 hidden"], REMOTE_MENU.to_vec()),
             (
@@ -12622,7 +12624,7 @@ fn inventory_opening_add_from_the_menu_enables_remote_and_without_providers_asks
         &[
             (
                 vec!["NORMAL · 2 rows", "Local + declarations · remote off"],
-                b"kkmjjjjjj\r".to_vec(),
+                b"kkmjjjjjjj\r".to_vec(),
             ),
             (
                 [&REMOTE_READY[1..], &["Add / URL or reference"][..]].concat(),
@@ -14117,7 +14119,7 @@ fn inventory_github_failure_names_the_fix_in_session_problems_and_exits_one() {
         &[
             (vec!["NORMAL · 1 row", "absent: Scanning"], b"A".to_vec()),
             (vec!["org/demo: failed, see Problems"], b"m".to_vec()),
-            (vec!["All actions", "1 problem"], b"jjjjjjjjj\r".to_vec()),
+            (vec!["All actions", "1 problem"], b"jjjjjjjjjj\r".to_vec()),
             (
                 vec!["Problems / 1", "gh auth login --hostname github.com"],
                 b"\x1b".to_vec(),
@@ -14353,6 +14355,201 @@ fn inventory_rename_form_holds_one_hint_row_over_an_empty_hint_bar_and_refuses_a
         "the empty hint bar stays a bar:\n{screen}"
     );
     assert!(fixture.calls().iter().all(|call| !call.contains("rename")));
+}
+
+/// A `lazygit` that logs its working directory, modifies a file of the checkout and fails.
+#[cfg(unix)]
+fn lazygit_stub(tools: &std::path::Path, log: &std::path::Path) {
+    desktop_stubs(
+        tools,
+        &["lazygit"],
+        &format!(
+            "pwd -P >> {}\nprintf 'changed\\n' > README\nexit 3",
+            shell_word(log)
+        ),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_g_runs_lazygit_in_the_checkout_and_probes_the_row_again() {
+    let temp = temp_dir();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    let tools = temp.path().join("tools");
+    let log = temp.path().join("lazygit.log");
+    lazygit_stub(&tools, &log);
+
+    let transcript = run_inventory_pty_with_exit(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
+        &[
+            (
+                vec![
+                    "NORMAL · 1 row",
+                    "absent: Scanning",
+                    "selected: core",
+                    "clean",
+                    "pair: g lazygit",
+                ],
+                b"?".to_vec(),
+            ),
+            (vec!["lazygit in the current repository"], b"\x1b".to_vec()),
+            (vec!["NORMAL · 1 row", "absent: Keyboard /"], b"g".to_vec()),
+            (
+                vec![
+                    "NORMAL · 1 row",
+                    "selected: core",
+                    "1 modified",
+                    "absent: clean",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        0,
+        |_| {},
+    );
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        format!("{}\n", fs::canonicalize(&core).unwrap().display())
+    );
+    assert_eq!(
+        fs::read_to_string(core.join("README")).unwrap(),
+        "changed\n"
+    );
+    // The terminal left the alternate screen for lazygit and came back to it.
+    assert!(
+        transcript.matches("\x1b[?1049l").count() >= 2,
+        "{transcript:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_g_on_a_row_without_a_checkout_names_the_reason_and_spawns_nothing() {
+    let temp = temp_dir();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(home.join("repos")).unwrap();
+    fs::write(
+        &config,
+        "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n",
+    )
+    .unwrap();
+    let tools = temp.path().join("tools");
+    let log = temp.path().join("lazygit.log");
+    lazygit_stub(&tools, &log);
+
+    run_inventory_pty_with_exit(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "selected: alpha"],
+                b"g".to_vec(),
+            ),
+            (
+                vec!["Open lazygit unavailable: no checkout at the destination"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        0,
+        |_| {},
+    );
+    assert!(
+        !log.exists(),
+        "lazygit was started for a row without a checkout"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_g_without_lazygit_on_the_path_says_so_and_keeps_running() {
+    let temp = temp_dir();
+    let (home, config, _) = worktree_fixture(temp.path(), "");
+
+    run_inventory_pty_with_exit(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "selected: core"],
+                b"g".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "lazygit not found on PATH"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+        0,
+        |_| {},
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_lazygit_default_yields_to_a_configured_g() {
+    let temp = temp_dir();
+    let (home, config, _) =
+        worktree_fixture(temp.path(), "\n[inventory.keys.normal]\nsearch = [\"g\"]\n");
+    let tools = temp.path().join("tools");
+    let log = temp.path().join("lazygit.log");
+    lazygit_stub(&tools, &log);
+
+    run_inventory_pty_with_exit(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "selected: core"],
+                b"g".to_vec(),
+            ),
+            (vec!["SEARCH ·"], b"\x1b".to_vec()),
+            (vec!["NORMAL · 1 row"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        0,
+        |_| {},
+    );
+    assert!(
+        !log.exists(),
+        "lazygit took a key the configuration gave to search"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_lazygit_follows_a_rebound_key() {
+    let temp = temp_dir();
+    let (home, config, _) = worktree_fixture(
+        temp.path(),
+        "\n[inventory.keys.normal]\nlazygit = [\"L\"]\n",
+    );
+    let tools = temp.path().join("tools");
+    let log = temp.path().join("lazygit.log");
+    lazygit_stub(&tools, &log);
+
+    run_inventory_pty_with_exit(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
+        &[
+            (
+                vec!["NORMAL · 1 row", "absent: Scanning", "selected: core"],
+                b"g".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "selected: core", "absent: 1 modified"],
+                b"L".to_vec(),
+            ),
+            (vec!["NORMAL · 1 row", "1 modified"], b"q".to_vec()),
+        ],
+        32,
+        132,
+        0,
+        |_| {},
+    );
+    assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 1);
 }
 
 #[cfg(unix)]
@@ -15193,7 +15390,7 @@ fn inventory_worktree_popup_keeps_the_session_when_the_removal_is_refused_after_
 
 /// The menu keys that open Problems… from a row with a checkout and sessions configured.
 #[cfg(unix)]
-const OPEN_PROBLEMS: &[u8] = b"mjjjjjjjjjj\r";
+const OPEN_PROBLEMS: &[u8] = b"mjjjjjjjjjjj\r";
 
 #[cfg(unix)]
 #[test]

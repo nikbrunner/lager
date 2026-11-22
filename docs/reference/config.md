@@ -209,7 +209,7 @@ page_down = ["x", "PageDown"]
 ```
 
 Normal actions are `up`, `down`, `refresh`, `search`, `clear_search`, `inspect`,
-`menu`, `mark`, `add`, `remove`, `worktrees` (default `w`), `session` (default `s`), `help` and `quit`. `session` opens the session of the current row and needs a [`[session]` section](#session); without one its key does nothing. `register`, `unregister`,
+`menu`, `mark`, `add`, `remove`, `worktrees` (default `w`), `lazygit` (default `g`), `session` (default `s`), `help` and `quit`. `lazygit` opens lazygit in the current row's checkout. `session` opens the session of the current row and needs a [`[session]` section](#session); without one its key does nothing. `register`, `unregister`,
 `clone`, `clone_register`, `remove_unregister`, `copy`, `open`, `remote`, `retry`
 and `archives` have no default key. Bound to a key, each runs its menu entry on
 the marked rows or the current row, with the same previews, eligibility and

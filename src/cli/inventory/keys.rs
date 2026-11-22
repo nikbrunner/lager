@@ -52,6 +52,7 @@ pub(super) enum Action {
     DeleteRemote,
     CreateRemote,
     Session,
+    Lazygit,
 }
 
 impl Action {
@@ -91,6 +92,7 @@ impl Action {
             Self::DeleteRemote => "delete_remote",
             Self::CreateRemote => "create_remote",
             Self::Session => "session",
+            Self::Lazygit => "lazygit",
         }
     }
 
@@ -127,6 +129,7 @@ impl Action {
                     | Self::DeleteRemote
                     | Self::CreateRemote
                     | Self::Session
+                    | Self::Lazygit
             ),
             Mode::Menu => matches!(
                 self,
@@ -191,9 +194,10 @@ impl Action {
 }
 
 /// Defaults that yield to an explicit key of the same mode, as (mode, action, key).
-const LATE_DEFAULTS: [(Mode, Action, &str); 11] = [
+const LATE_DEFAULTS: [(Mode, Action, &str); 12] = [
     (Mode::Normal, Action::Worktrees, "w"),
     (Mode::Normal, Action::Session, "s"),
+    (Mode::Normal, Action::Lazygit, "g"),
     (Mode::Worktrees, Action::Session, "s"),
     (Mode::Worktrees, Action::Add, "a"),
     (Mode::Worktrees, Action::Remove, "r"),
@@ -270,6 +274,7 @@ impl Bindings {
                     (DeleteRemote, vec![]),
                     (CreateRemote, vec![]),
                     (Session, vec!["s"]),
+                    (Lazygit, vec!["g"]),
                 ]);
             } else {
                 defaults.extend([

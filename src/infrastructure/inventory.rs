@@ -461,6 +461,11 @@ fn discover_checkout_paths(
     }
 }
 
+/// Observes one checkout on the caller's thread, as a scan does for each path it finds.
+pub fn probe_checkout(path: &Path) -> Option<LocalCheckout> {
+    inspect_checkout(path, &AtomicBool::new(false), |_| {})
+}
+
 fn inspect_checkout(
     path: &Path,
     cancel: &AtomicBool,

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -26,7 +27,7 @@ use crate::application::inventory::{
     SessionProblems,
 };
 use crate::application::ports::{
-    Desktop, EnsureEvent, EnsureReporter, HookRunner, HostError, ProviderCatalog,
+    Desktop, EnsureEvent, EnsureReporter, HookRunner, HostError, ProviderCatalog, ToolInspector,
 };
 use crate::application::remote::{
     self, ProviderPhase, ProviderState, RemoteBounds, RemoteDiscovery,
@@ -40,12 +41,13 @@ use crate::infrastructure::filesystem::Filesystem;
 use crate::infrastructure::git::NativeGit;
 use crate::infrastructure::inventory::{
     CANCELLATION_BOUND, LocalInventoryFilesystem, ScanContext, ScanEvent, ScanHandle,
-    start_local_scan_with_context,
+    probe_checkout, start_local_scan_with_context,
 };
 use crate::infrastructure::providers::ConfiguredProviders;
 use crate::infrastructure::rex::Rex;
 use crate::infrastructure::session_record::SessionFile;
 use crate::infrastructure::shell::{Shell, ShellError};
+use crate::infrastructure::tools::NativeTools;
 use crate::presentation::escape;
 
 use super::args::InventoryArgs;
@@ -170,6 +172,8 @@ struct InventorySession {
     opening: Option<String>,
     /// Why sessions are unavailable, shown as the state until the next refresh.
     host_notice: Option<String>,
+    /// The checkout lazygit is to be started in once the loop reaches its next pass.
+    lazygit: Option<PathBuf>,
     /// The line printed once the terminal is restored.
     farewell: Option<String>,
     /// The number of the latest list request; answers to older ones are dropped.
@@ -253,6 +257,7 @@ impl InventorySession {
             host_answers: mpsc::channel(),
             opening: None,
             host_notice: None,
+            lazygit: None,
             farewell: None,
             listing: 0,
             config,
@@ -388,6 +393,16 @@ impl InventorySession {
             });
             let _ = sender.send(HostAnswer::Listed(request, listed));
         });
+    }
+
+    /// Observes the checkout at `path` again, in place of a scan of every row.
+    fn reprobe(&mut self, path: &Path) {
+        if let Some(checkout) = probe_checkout(path) {
+            self.scan.checkouts.retain(|known| known.path != path);
+            self.scan.checkouts.push(checkout);
+            self.scan.stale_paths.retain(|stale| stale != path);
+            self.cached_report = None;
+        }
     }
 
     /// Opens the session of the primary checkout at `path` off the UI loop.
@@ -1146,6 +1161,39 @@ impl TerminalSession {
         self.terminal.clear().map_err(|error| error.to_string())
     }
 
+    /// Hands the terminal to lazygit in `path`, then observes the checkout again. lazygit's own
+    /// exit status is not the inventory's concern. Returns the exit code when a signal arrived.
+    fn run_lazygit(
+        &mut self,
+        session: &mut InventorySession,
+        path: &Path,
+        interrupted: &dyn Fn() -> Option<i32>,
+    ) -> Option<i32> {
+        self.suspend();
+        // Keys typed before lazygit starts are not for it.
+        discard_input();
+        let started = Command::new("lazygit").current_dir(path).status();
+        if let Some(code) = interrupted() {
+            session.worker.cancel();
+            return Some(code);
+        }
+        if let Err(error) = started {
+            session.message = Some(format!(
+                "lazygit could not start: {}",
+                escape(error.to_string())
+            ));
+        }
+        session.reprobe(path);
+        if let Err(error) = self.resume(true) {
+            eprintln!(
+                "lager: could not restore inventory terminal: {}",
+                escape(error)
+            );
+            return Some(1);
+        }
+        None
+    }
+
     fn draw_loading(&mut self) -> Result<(), String> {
         self.terminal
             .draw(|frame| {
@@ -1183,6 +1231,11 @@ impl TerminalSession {
         loop {
             if let Some(code) = interrupted() {
                 session.worker.cancel();
+                return code;
+            }
+            if let Some(path) = session.lazygit.take()
+                && let Some(code) = self.run_lazygit(session, &path, interrupted)
+            {
                 return code;
             }
             session.receive_events();
@@ -1421,7 +1474,8 @@ impl TerminalSession {
                                 | Action::Archive
                                 | Action::Visibility
                                 | Action::DeleteRemote
-                                | Action::CreateRemote),
+                                | Action::CreateRemote
+                                | Action::Lazygit),
                             ) if view == View::Normal => {
                                 if let Some(code) = run_direct(
                                     session,
@@ -2741,6 +2795,7 @@ fn footer_widget(
                     (Action::Add, "add"),
                     (Action::Remove, "remove"),
                     (Action::Worktrees, "worktrees"),
+                    (Action::Lazygit, "lazygit"),
                     (Action::Session, "session"),
                     (Action::Inspect, "inspect"),
                     (Action::Refresh, "refresh"),
@@ -2770,6 +2825,7 @@ fn footer_widget(
     };
     // Least needed first; exit, help and menu routes always stay visible.
     for dropped in [
+        "lazygit",
         "session",
         "worktrees",
         "mark",
@@ -3209,6 +3265,11 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
                     single(Worktrees),
                     "Worktrees of the current repository",
                     &[Worktrees],
+                ),
+                entry(
+                    single(Lazygit),
+                    "lazygit in the current repository",
+                    &[Lazygit],
                 ),
             ];
             if sessions {
@@ -3948,6 +4009,7 @@ enum Entry {
     Problems,
     Add,
     Worktrees,
+    Lazygit,
     OpenSession,
     Help,
     Quit,
@@ -4050,6 +4112,18 @@ fn menu_lines(
                         item(Entry::Worktrees, "Worktrees…", reason.to_owned(), false)
                     }
                     _ => on_row(Entry::Worktrees, "Worktrees…", key(Action::Worktrees)),
+                },
+                match row.map(model::worktree_checkout) {
+                    Some(Err(reason)) => {
+                        item(Entry::Lazygit, "Open lazygit", reason.to_owned(), false)
+                    }
+                    _ if session.running() => item(
+                        Entry::Lazygit,
+                        "Open lazygit",
+                        "a batch is running".to_owned(),
+                        false,
+                    ),
+                    _ => on_row(Entry::Lazygit, "Open lazygit", key(Action::Lazygit)),
                 },
             ]
             .into_iter()
@@ -4476,6 +4550,16 @@ fn activate_menu_entry(
             worktrees::open(session, selection, row, name);
             return None;
         }
+        (Entry::Lazygit, Some(row)) => match model::worktree_checkout(row) {
+            Ok(_) if !NativeTools.command_available("lazygit") => {
+                Some("lazygit not found on PATH".to_owned())
+            }
+            Ok(path) => {
+                session.lazygit = Some(path.to_path_buf());
+                None
+            }
+            Err(_) => None,
+        },
         (Entry::OpenSession, Some(row)) => {
             if let Ok(path) = model::worktree_checkout(row) {
                 session.open_session(path);
@@ -4650,6 +4734,7 @@ fn run_direct(
         Action::Visibility => (Menu::Repository, Entry::Open(Menu::Visibility)),
         Action::DeleteRemote => (Menu::Repository, Entry::Github(github::Act::Delete)),
         Action::Session => (Menu::Root, Entry::OpenSession),
+        Action::Lazygit => (Menu::Root, Entry::Lazygit),
         _ => (Menu::Root, Entry::Github(github::Act::Create)),
     };
     // Archive and visibility entries name the state they lead to.
@@ -6251,6 +6336,7 @@ mod tests {
             host_answers: std::sync::mpsc::channel(),
             opening: None,
             host_notice: None,
+            lazygit: None,
             farewell: None,
             listing: 0,
         };
