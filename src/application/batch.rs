@@ -415,7 +415,7 @@ pub struct BatchTarget {
     pub found: bool,
     /// The reference handed to the registry service.
     pub reference: Option<String>,
-    /// Hidden by the filter when the batch started.
+    /// Hidden by the search or the filter when the batch started.
     pub hidden: bool,
     /// Why the target cannot run, decided at invocation.
     pub blocked: Option<String>,

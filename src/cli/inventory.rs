@@ -52,6 +52,7 @@ use crate::presentation::escape;
 
 use super::args::InventoryArgs;
 
+mod filter;
 mod github;
 mod keys;
 pub(super) mod status;
@@ -393,6 +394,11 @@ impl InventorySession {
             });
             let _ = sender.send(HostAnswer::Listed(request, listed));
         });
+    }
+
+    /// The checkouts that have a live session, once the host has answered.
+    fn hosted_paths(&self) -> Option<&HashSet<PathBuf>> {
+        matches!(self.hosted, Some(Ok(_))).then_some(&self.hosted_rows)
     }
 
     /// Observes the checkout at `path` again, in place of a scan of every row.
@@ -1042,10 +1048,14 @@ fn stale_scan(previous: &LocalScan) -> LocalScan {
 fn stale_observation(field: model::ObservationField) -> model::ObservationField {
     match field {
         model::ObservationField::Known(value)
-        | model::ObservationField::Dirty(value)
         | model::ObservationField::Error(value)
         | model::ObservationField::Stale(value) => model::ObservationField::Stale(value),
-        model::ObservationField::Clean => model::ObservationField::Stale("known clean".to_owned()),
+        model::ObservationField::Dirty(value) | model::ObservationField::StaleDirty(value) => {
+            model::ObservationField::StaleDirty(value)
+        }
+        model::ObservationField::Clean => {
+            model::ObservationField::Stale(model::KNOWN_CLEAN.to_owned())
+        }
         model::ObservationField::Pending | model::ObservationField::NotApplicable => field,
     }
 }
@@ -1302,7 +1312,13 @@ impl TerminalSession {
                     None => removed,
                 });
             }
-            let visible_rows = matching_rows(&report, &selection.query);
+            let visible_rows = matching_rows(
+                &report,
+                &selection.query,
+                &selection.filter,
+                &session.root,
+                session.hosted_paths(),
+            );
             selection.reconcile(&visible_rows, session.complete);
             // A confirmation is answered only by keys typed once it is on screen.
             if matches!(
@@ -1577,6 +1593,71 @@ impl TerminalSession {
                             }
                             Some(Action::Menu) if view == View::Normal => {
                                 selection.open_menu(Menu::Root, &visible_rows);
+                            }
+                            Some(Action::Filter) if view == View::Normal => {
+                                selection.filtering = true;
+                            }
+                            Some(Action::OpenSessions) if view == View::Normal => {
+                                match (&session.hosted, session.session_layout.is_some()) {
+                                    (Some(Ok(_)), _) => {
+                                        selection.filter.toggle(&filter::Value::SessionOpen);
+                                    }
+                                    (Some(Err(reason)), _) => {
+                                        session.message = Some(format!(
+                                            "Open sessions unavailable: {}",
+                                            escape(reason)
+                                        ));
+                                    }
+                                    (None, true) => {
+                                        session.message = Some(
+                                            "Open sessions unavailable: the session list has not answered yet"
+                                                .to_owned(),
+                                        );
+                                    }
+                                    (None, false) => {
+                                        session.message = Some(
+                                            "Open sessions unavailable: no [session] section in the configuration"
+                                                .to_owned(),
+                                        );
+                                    }
+                                }
+                            }
+                            Some(Action::Cancel | Action::Accept) if view == View::Filter => {
+                                selection.filtering = false;
+                            }
+                            Some(Action::ClearFilter) if view == View::Filter => {
+                                selection.filter.clear();
+                            }
+                            Some(Action::Toggle) if view == View::Filter => {
+                                let items = filter::items(
+                                    &report.rows,
+                                    &session.root,
+                                    session.hosted_paths(),
+                                );
+                                if let Some(item) = items.get(selection.filter_cursor) {
+                                    selection.filter.toggle(&item.value);
+                                }
+                            }
+                            Some(
+                                action @ (Action::Up
+                                | Action::Down
+                                | Action::PageUp
+                                | Action::PageDown),
+                            ) if view == View::Filter => {
+                                let last = filter::items(
+                                    &report.rows,
+                                    &session.root,
+                                    session.hosted_paths(),
+                                )
+                                .len()
+                                .saturating_sub(1);
+                                selection.filter_cursor = match action {
+                                    Action::Up => selection.filter_cursor.saturating_sub(1),
+                                    Action::PageUp => selection.filter_cursor.saturating_sub(10),
+                                    Action::Down => selection.filter_cursor + 1,
+                                    _ => selection.filter_cursor + 10,
+                                }
+                                .min(last);
                             }
                             Some(Action::Search) => {
                                 selection.menu.clear();
@@ -1975,6 +2056,25 @@ impl TerminalSession {
                 line as u16,
             );
         }
+        let items = filter::items(&report.rows, &session.root, session.hosted_paths());
+        selection.filter_cursor = selection.filter_cursor.min(items.len().saturating_sub(1));
+        let (filter_body, filter_line) = filter::body(
+            &items,
+            &selection.filter,
+            selection.filter_cursor,
+            popup_body_width(self.area(), POPUP),
+        );
+        if selection.filtering {
+            // No menu is open beside the popup, so its scroll offset serves the list.
+            let area = above_status(self.area(), self.below_help);
+            let [_, _, content, _] = popup_regions(area, POPUP, &filter_body);
+            let viewport = content.height.max(1);
+            selection.clamp_menu_scroll(
+                (filter_body.line_count(content.width) as u16).saturating_sub(viewport),
+                viewport,
+                filter_line as u16,
+            );
+        }
         let bindings = &session.bindings;
         let view = selection.view();
         let local_hidden = hides_local(self.area().width);
@@ -2031,7 +2131,7 @@ impl TerminalSession {
             count => format!(" · {count} problems"),
         };
         // Marks and hints wait for the host's answer and stay away while it is unavailable.
-        let hosted = matches!(session.hosted, Some(Ok(_))).then_some(&session.hosted_rows);
+        let hosted = session.hosted_paths();
         let marked = session.marks.len();
         let counter = (marked > 0).then(|| {
             format!(
@@ -2072,8 +2172,12 @@ impl TerminalSession {
                         &format!(
                             "{} · {} {}{problems}",
                             view.label(),
-                            visible_rows.len(),
-                            if visible_rows.len() == 1 {
+                            if shown.filter.is_active() {
+                                format!("{} of {}", visible_rows.len(), report.rows.len())
+                            } else {
+                                visible_rows.len().to_string()
+                            },
+                            if visible_rows.len() == 1 && !shown.filter.is_active() {
                                 "row"
                             } else {
                                 "rows"
@@ -2084,7 +2188,16 @@ impl TerminalSession {
                     header,
                 );
                 frame.render_widget(
-                    Paragraph::new(source_line(session, report)).style(dim()),
+                    Paragraph::new(if shown.filter.is_active() {
+                        format!(
+                            "{} · filter: {}",
+                            source_line(session, report),
+                            shown.filter.label()
+                        )
+                    } else {
+                        source_line(session, report)
+                    })
+                    .style(dim()),
                     padded(source),
                 );
                 let query = escape(&shown.query);
@@ -2129,7 +2242,9 @@ impl TerminalSession {
                         ),
                         table,
                     );
-                    let message = if !report.rows.is_empty() && !shown.query.is_empty() {
+                    let message = if !report.rows.is_empty()
+                        && (!shown.query.is_empty() || shown.filter.is_active())
+                    {
                         Text::raw("No matching repositories.")
                     } else if !complete {
                         Text::raw("Discovering local repositories…")
@@ -2244,6 +2359,23 @@ impl TerminalSession {
                             ),
                         )
                     }
+                    View::Filter => draw_popup_in(
+                        frame,
+                        above_status(frame.area(), below_help),
+                        POPUP,
+                        "Filter",
+                        filter_body.scroll((shown.menu_scroll, 0)),
+                        [
+                            format!("{} move", rows_hint(bindings, Mode::Filter)),
+                            first_key_hint(bindings, Mode::Filter, Action::Toggle, "toggle"),
+                            first_key_hint(bindings, Mode::Filter, Action::ClearFilter, "clear"),
+                            format!("{} close", filter_close_keys(bindings)),
+                        ]
+                        .into_iter()
+                        .filter(|hint| !hint.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                    ),
                     View::Preview => {
                         if let Some(batch) = &shown.preview {
                             let lines =
@@ -2551,6 +2683,7 @@ enum View {
     Search,
     Inspect,
     Menu,
+    Filter,
     Problems,
     Preview,
     Batch,
@@ -2576,6 +2709,7 @@ impl View {
             Self::Search => "SEARCH",
             Self::Inspect => "INSPECT",
             Self::Menu => "MENU",
+            Self::Filter => "FILTER",
             Self::Problems => "PROBLEMS",
             Self::Preview
             | Self::QuitBatch
@@ -2599,6 +2733,7 @@ impl View {
             Self::Normal => Mode::Normal,
             Self::Search => Mode::Search,
             Self::Menu => Mode::Menu,
+            Self::Filter => Mode::Filter,
             Self::Inspect | Self::Problems | Self::Batch | Self::Help | Self::WorktreeBlocked => {
                 Mode::Inspection
             }
@@ -2755,6 +2890,15 @@ fn first_key_hint(bindings: &Bindings, mode: Mode, action: Action, label: &str) 
         .unwrap_or_default()
 }
 
+/// The first keys of accept and cancel in the Filter popup, which both close it.
+fn filter_close_keys(bindings: &Bindings) -> String {
+    [Action::Accept, Action::Cancel]
+        .into_iter()
+        .filter_map(|action| bindings.keys(Mode::Filter, action).first().copied())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// One line of hints; the least needed drop out when the line is too narrow.
 fn footer_widget(
     bindings: &Bindings,
@@ -2791,12 +2935,14 @@ fn footer_widget(
             items.extend(
                 [
                     (Action::Search, "search"),
+                    (Action::Filter, "filter"),
                     (Action::Mark, "mark"),
                     (Action::Add, "add"),
                     (Action::Remove, "remove"),
                     (Action::Worktrees, "worktrees"),
                     (Action::Lazygit, "lazygit"),
                     (Action::Session, "session"),
+                    (Action::OpenSessions, "sessions"),
                     (Action::Inspect, "inspect"),
                     (Action::Refresh, "refresh"),
                     (Action::Menu, "menu"),
@@ -2804,7 +2950,9 @@ fn footer_widget(
                     (Action::Quit, "quit"),
                 ]
                 .into_iter()
-                .filter(|(action, _)| sessions || *action != Action::Session)
+                .filter(|(action, _)| {
+                    sessions || !matches!(action, Action::Session | Action::OpenSessions)
+                })
                 .map(|(action, label)| (first(Mode::Normal, action), label)),
             );
             items
@@ -2825,6 +2973,8 @@ fn footer_widget(
     };
     // Least needed first; exit, help and menu routes always stay visible.
     for dropped in [
+        "sessions",
+        "filter",
         "lazygit",
         "session",
         "worktrees",
@@ -3093,7 +3243,7 @@ fn status_lines(
     let inspect = bindings.keys(Mode::Normal, Action::Inspect);
     let operation = match view {
         View::Search => format!(
-            "{} / {} retain filter · action letters are text",
+            "{} / {} retain search · action letters are text",
             bindings.hint(Mode::Search, Action::Accept),
             bindings.hint(Mode::Search, Action::Cancel)
         ),
@@ -3253,7 +3403,7 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
             let mut entries = vec![
                 entry(pair(Down, Up), "previous / next row", &[Down, Up]),
                 entry(single(Search), "live fuzzy search", &[Search]),
-                entry(single(ClearSearch), "clear filter", &[ClearSearch]),
+                entry(single(ClearSearch), "clear search", &[ClearSearch]),
                 entry(single(Mark), "toggle current mark", &[Mark]),
                 entry(single(Add), "Add repository", &[Add]),
                 entry(
@@ -3271,12 +3421,18 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
                     "lazygit in the current repository",
                     &[Lazygit],
                 ),
+                entry(single(Filter), "filter the rows by property", &[Filter]),
             ];
             if sessions {
                 entries.push(entry(
                     single(Session),
                     "Session of the current repository",
                     &[Session],
+                ));
+                entries.push(entry(
+                    single(OpenSessions),
+                    "filter to the open sessions, on or off",
+                    &[OpenSessions],
                 ));
             }
             entries.extend(
@@ -3300,7 +3456,7 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
             entry(single(Accept), "choose", &[Accept]),
             entry(single(Cancel), "back", &[Cancel]),
             entry(single(Search), "live fuzzy search", &[Search]),
-            entry(single(ClearSearch), "clear filter", &[ClearSearch]),
+            entry(single(ClearSearch), "clear search", &[ClearSearch]),
             entry(single(Inspect), "Inspect repository", &[Inspect]),
             entry(single(Refresh), "refresh local/config state", &[Refresh]),
             entry(help_quit(), "help / quit", &[Help, Quit]),
@@ -3308,7 +3464,7 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
         Mode::Search => vec![
             entry(
                 [keys(Accept), keys(Cancel)].concat().join(" / "),
-                "keep the filter",
+                "keep the search",
                 &[Accept, Cancel],
             ),
             entry(help_quit(), "help / quit", &[Help, Quit]),
@@ -3376,6 +3532,19 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
             entry(help_quit(), "help / quit", &[Help, Quit]),
         ])
         .collect(),
+        Mode::Filter => vec![
+            entry(pair(Down, Up), "previous / next value", &[Down, Up]),
+            entry(
+                pair(PageUp, PageDown),
+                "page up / down",
+                &[PageUp, PageDown],
+            ),
+            entry(single(Toggle), "tick or clear the value", &[Toggle]),
+            entry(single(ClearFilter), "clear every value", &[ClearFilter]),
+            entry(single(Accept), "close, the filter stays", &[Accept]),
+            entry(single(Cancel), "close, the filter stays", &[Cancel]),
+            entry(help_quit(), "help / quit", &[Help, Quit]),
+        ],
     };
     let entries = entries
         .into_iter()
@@ -3396,6 +3565,7 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
         Mode::Confirmation => "Confirmation mode",
         Mode::Inspection => "Inspect mode",
         Mode::Worktrees => "Worktrees mode",
+        Mode::Filter => "Filter mode",
     };
     let line = |keys: String, description: &str| {
         let padding = column
@@ -3456,6 +3626,7 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
         Mode::Confirmation,
         Mode::Inspection,
         Mode::Worktrees,
+        Mode::Filter,
     ] {
         if other == mode {
             continue;
@@ -3483,7 +3654,7 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
                         .filter(|key| !key.is_empty())
                         .collect::<Vec<_>>()
                         .join(" / "),
-                    "keep the filter · letters are text",
+                    "keep the search · letters are text",
                 )],
             ),
             Mode::Menu => (
@@ -3536,6 +3707,15 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
                     item(first(Cancel), "close"),
                 ],
             ),
+            Mode::Filter => (
+                "filter",
+                vec![
+                    item(rows, "move"),
+                    item(first(Toggle), "toggle"),
+                    item(first(ClearFilter), "clear"),
+                    item(filter_close_keys(bindings), "close"),
+                ],
+            ),
         };
         let items = items.into_iter().flatten().collect::<Vec<_>>();
         lines.push(line(name.to_owned(), &items.join(" · ")));
@@ -3551,12 +3731,13 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
         (Mode::Confirmation, "confirmation"),
         (Mode::Inspection, "inspection"),
         (Mode::Worktrees, "worktrees"),
+        (Mode::Filter, "filter"),
     ] {
         // The menu borrows these normal keys only where its own keys leave them free.
         let missing = bindings
             .unbound(other)
             .into_iter()
-            .filter(|action| sessions || *action != Session)
+            .filter(|action| sessions || !matches!(action, Session | OpenSessions))
             .filter(|action| match other {
                 Mode::Normal => {
                     !DIRECT_ACTIONS.contains(action)
@@ -4010,6 +4191,7 @@ enum Entry {
     Add,
     Worktrees,
     Lazygit,
+    Filter,
     OpenSession,
     Help,
     Quit,
@@ -4159,6 +4341,7 @@ fn menu_lines(
                 heading(String::new()),
                 heading("Inventory".to_owned()),
                 item(Entry::Add, "Add repository", key(Action::Add), true),
+                item(Entry::Filter, "Filter…", key(Action::Filter), true),
             ])
             .chain(github::create_line(session))
             .chain([
@@ -4544,6 +4727,11 @@ fn activate_menu_entry(
         }
         (Entry::Add, _) => {
             open_add(session, selection);
+            return None;
+        }
+        (Entry::Filter, _) => {
+            selection.menu.clear();
+            selection.filtering = true;
             return None;
         }
         (Entry::Worktrees, row) => {
@@ -5166,7 +5354,7 @@ fn batch_widget(batch: &Batch, width: u16, cancel: bool) -> Paragraph<'static> {
         .iter()
         .map(|target| {
             if target.hidden {
-                format!("{} (hidden by filter)", target.name)
+                format!("{} (hidden)", target.name)
             } else {
                 target.name.clone()
             }
@@ -5323,7 +5511,7 @@ fn preview_lines(batch: &Batch, home: &Path, width: u16) -> Vec<Line<'static>> {
             Span::raw(format!(" {}", target.name)),
         ];
         if target.hidden {
-            heading.push(Span::styled(" (hidden by filter)", dim()));
+            heading.push(Span::styled(" (hidden)", dim()));
         }
         let path = target
             .path
@@ -5411,8 +5599,8 @@ fn preview_choices(batch: &Batch, focus: usize) -> Vec<Line<'static>> {
     let hidden = batch.targets.iter().filter(|target| target.hidden).count();
     let with_hidden = |hint: &str| match (hint, hidden) {
         (hint, 0) => hint.to_owned(),
-        ("", hidden) => format!("{hidden} hidden by filter"),
-        (hint, hidden) => format!("{hint} · {hidden} hidden by filter"),
+        ("", hidden) => format!("{hidden} hidden"),
+        (hint, hidden) => format!("{hint} · {hidden} hidden"),
     };
     let choice = |label: String, hint: String, focused: bool| {
         let style = if focused {
@@ -5566,7 +5754,9 @@ fn checkout_style(state: &model::CheckoutState) -> Style {
 fn observation_style(field: &model::ObservationField) -> Style {
     match field {
         model::ObservationField::Clean => tint(Color::Green),
-        model::ObservationField::Pending | model::ObservationField::Stale(_) => warn(),
+        model::ObservationField::Pending
+        | model::ObservationField::Stale(_)
+        | model::ObservationField::StaleDirty(_) => warn(),
         model::ObservationField::Error(_) => tint(Color::Red),
         model::ObservationField::Known(_)
         | model::ObservationField::Dirty(_)
@@ -5626,6 +5816,11 @@ struct Selection {
     worktrees: Option<worktrees::Popup>,
     /// The open GitHub dialog.
     github: Option<github::Dialog>,
+    /// The ticked filter values; they last for the run.
+    filter: filter::Filter,
+    /// The Filter popup is open; its cursor counts values, headings excluded.
+    filtering: bool,
+    filter_cursor: usize,
     help: bool,
     help_mode: Mode,
     help_scroll: u16,
@@ -5729,6 +5924,8 @@ impl Selection {
             popup.view()
         } else if let Some(dialog) = &self.github {
             dialog.view()
+        } else if self.filtering {
+            View::Filter
         } else if !self.menu.is_empty() {
             View::Menu
         } else if let Some(add) = &self.add {
@@ -5853,11 +6050,17 @@ fn repository_path(row: &model::InventoryRow) -> Option<RepositoryPath> {
     }
 }
 
-fn matching_rows<'a>(report: &'a InventoryReport, query: &str) -> Vec<&'a model::InventoryRow> {
+fn matching_rows<'a>(
+    report: &'a InventoryReport,
+    query: &str,
+    filter: &filter::Filter,
+    root: &Path,
+    hosted: Option<&HashSet<PathBuf>>,
+) -> Vec<&'a model::InventoryRow> {
     report
         .rows
         .iter()
-        .filter(|row| row_matches_query(row, query))
+        .filter(|row| filter.matches(row, root, hosted) && row_matches_query(row, query))
         .collect()
 }
 
@@ -6000,17 +6203,20 @@ fn owner_cell(row: &model::InventoryRow, root: &Path) -> (String, Style) {
     })
 }
 
+/// The grid's owner order: ignoring case, with no owner last.
+fn owner_order(owner: Option<&str>) -> (bool, String) {
+    (owner.is_none(), owner.unwrap_or_default().to_lowercase())
+}
+
 /// The grid's row order: by owner, then by the repository name shown, ignoring case, with
 /// rows that have no owner last. The row key settles what remains.
 fn row_order(
     row: &model::InventoryRow,
     names: &HashMap<model::RowKey, String>,
     root: &Path,
-) -> (bool, String, String, model::RowKey) {
-    let owner = owner(row, root);
+) -> ((bool, String), String, model::RowKey) {
     (
-        owner.is_none(),
-        owner.unwrap_or_default().to_lowercase(),
+        owner_order(owner(row, root).as_deref()),
         names[&row.key].to_lowercase(),
         row.key.clone(),
     )

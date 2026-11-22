@@ -120,6 +120,9 @@ pub enum CheckoutState {
     RemoteOnly,
 }
 
+/// The `Stale` payload of a checkout that was observed clean before a refresh.
+pub const KNOWN_CLEAN: &str = "known clean";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObservationField {
     Pending,
@@ -128,6 +131,8 @@ pub enum ObservationField {
     Dirty(String),
     Error(String),
     Stale(String),
+    /// Changes observed before a refresh, not observed again yet.
+    StaleDirty(String),
     NotApplicable,
 }
 
@@ -378,7 +383,10 @@ pub fn build_inventory(
     for checkout in scan.checkouts {
         let observed = checkout.path.clone();
         let stale = matches!(&checkout.branch, ObservationField::Stale(_))
-            || matches!(&checkout.changes, ObservationField::Stale(_));
+            || matches!(
+                &checkout.changes,
+                ObservationField::Stale(_) | ObservationField::StaleDirty(_)
+            );
         if let Some(identity) = checkout.identity.clone() {
             let matching_declarations = declared_by_identity
                 .get(identity.as_str())
@@ -937,7 +945,7 @@ impl ObservationField {
             Self::Clean => "known clean".to_owned(),
             Self::Dirty(value) => value.clone(),
             Self::Error(value) => format!("error: {value}"),
-            Self::Stale(value) => format!("stale: {value}"),
+            Self::Stale(value) | Self::StaleDirty(value) => format!("stale: {value}"),
             Self::NotApplicable => "-".to_owned(),
         }
     }
@@ -1106,7 +1114,9 @@ pub fn copy_value(row: &InventoryRow, field: CopyField) -> Result<OsString, &'st
             }
             ObservationField::Known(branch) => Ok(branch.into()),
             ObservationField::Pending => Err("not observed yet"),
-            ObservationField::Stale(_) => Err("stale until observed again"),
+            ObservationField::Stale(_) | ObservationField::StaleDirty(_) => {
+                Err("stale until observed again")
+            }
             ObservationField::Error(_) => Err("observation failed"),
             _ => Err("no checkout"),
         },

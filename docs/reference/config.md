@@ -192,7 +192,7 @@ Lager records which session it opened for which checkout in `sessions.json`, bes
 ## Inventory key maps
 
 Shortcuts live under `[inventory.keys.<mode>]`. The modes are `normal`, `menu`,
-`search`, `input`, `confirmation`, `inspection` and `worktrees`. Omitted actions inherit their
+`search`, `input`, `confirmation`, `inspection`, `worktrees` and `filter`. Omitted actions inherit their
 defaults; an explicit list replaces every default key for that action.
 
 ```toml
@@ -209,7 +209,7 @@ page_down = ["x", "PageDown"]
 ```
 
 Normal actions are `up`, `down`, `refresh`, `search`, `clear_search`, `inspect`,
-`menu`, `mark`, `add`, `remove`, `worktrees` (default `w`), `lazygit` (default `g`), `session` (default `s`), `help` and `quit`. `lazygit` opens lazygit in the current row's checkout. `session` opens the session of the current row and needs a [`[session]` section](#session); without one its key does nothing. `register`, `unregister`,
+`menu`, `mark`, `add`, `remove`, `worktrees` (default `w`), `lazygit` (default `g`), `filter` (default `f`), `session` (default `s`), `help` and `quit`. `lazygit` opens lazygit in the current row's checkout. `filter` opens the Filter popup. `open_sessions` (default `Ctrl+o`) ticks or clears the Session value `open` of the filter, and needs a [`[session]` section](#session). `session` opens the session of the current row and needs a [`[session]` section](#session); without one its key does nothing. `register`, `unregister`,
 `clone`, `clone_register`, `remove_unregister`, `copy`, `open`, `remote`, `retry`
 and `archives` have no default key. Bound to a key, each runs its menu entry on
 the marked rows or the current row, with the same previews, eligibility and
@@ -235,6 +235,11 @@ form uses the input settings, its plan and its removal summary use the
 confirmation settings, and its blocker view scrolls with the inspection
 navigation keys and closes with the inspection accept and cancel keys.
 
+Filter drives the Filter popup: navigation, paging, `toggle` (default Space),
+which ticks or clears the value under the cursor, `clear_filter` (default `c`),
+accept and cancel, which both close the popup and keep the filter, help and
+quit, with the popup defaults for those.
+
 Search uses accept, cancel, help and quit, with Enter, Esc, F1 and Ctrl-Q as
 defaults. Its letters remain text. Confirmation settings drive the batch preview:
 up and down move the cursor between Cancel and the action, page up and down
@@ -259,12 +264,12 @@ actions:
 [inventory.keys.normal] binds x to remove and to clone
 ```
 
-Eleven defaults give way to an explicit key of the same mode instead of colliding:
-`worktrees` (`w`) and `session` (`s`) in normal, `add` (`a`), `remove` (`r`),
+Fourteen defaults give way to an explicit key of the same mode instead of colliding:
+`worktrees` (`w`), `lazygit` (`g`), `filter` (`f`), `open_sessions` (`Ctrl+o`) and `session` (`s`) in normal, `add` (`a`), `remove` (`r`),
 `copy` (`c`) and `session` (`s`) in worktrees, `copy` (`c`) in inspection, and
 `acknowledge` (Space), `session` (`s`), cancel's `q` and quit's Ctrl-Q in
 confirmation. The
-yielding action then has no key in that mode, and Help says so; Worktrees… and
+yielding action then has no key in that mode, and Help says so; Worktrees…, Filter… and
 Open session in the menu still work. When Ctrl-Q goes to another confirmation action and quit has no
 explicit list, quit moves to `q` and cancel keeps Esc; if `q` is taken as well,
 the map is rejected because quit is unreachable.

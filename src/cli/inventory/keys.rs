@@ -14,6 +14,7 @@ pub(super) enum Mode {
     Confirmation,
     Inspection,
     Worktrees,
+    Filter,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -53,6 +54,10 @@ pub(super) enum Action {
     CreateRemote,
     Session,
     Lazygit,
+    Filter,
+    Toggle,
+    ClearFilter,
+    OpenSessions,
 }
 
 impl Action {
@@ -93,6 +98,10 @@ impl Action {
             Self::CreateRemote => "create_remote",
             Self::Session => "session",
             Self::Lazygit => "lazygit",
+            Self::Filter => "filter",
+            Self::Toggle => "toggle",
+            Self::ClearFilter => "clear_filter",
+            Self::OpenSessions => "open_sessions",
         }
     }
 
@@ -130,6 +139,21 @@ impl Action {
                     | Self::CreateRemote
                     | Self::Session
                     | Self::Lazygit
+                    | Self::Filter
+                    | Self::OpenSessions
+            ),
+            Mode::Filter => matches!(
+                self,
+                Self::Up
+                    | Self::Down
+                    | Self::PageUp
+                    | Self::PageDown
+                    | Self::Accept
+                    | Self::Cancel
+                    | Self::Help
+                    | Self::Quit
+                    | Self::Toggle
+                    | Self::ClearFilter
             ),
             Mode::Menu => matches!(
                 self,
@@ -194,10 +218,12 @@ impl Action {
 }
 
 /// Defaults that yield to an explicit key of the same mode, as (mode, action, key).
-const LATE_DEFAULTS: [(Mode, Action, &str); 12] = [
+const LATE_DEFAULTS: [(Mode, Action, &str); 14] = [
     (Mode::Normal, Action::Worktrees, "w"),
     (Mode::Normal, Action::Session, "s"),
     (Mode::Normal, Action::Lazygit, "g"),
+    (Mode::Normal, Action::Filter, "f"),
+    (Mode::Normal, Action::OpenSessions, "Ctrl+o"),
     (Mode::Worktrees, Action::Session, "s"),
     (Mode::Worktrees, Action::Add, "a"),
     (Mode::Worktrees, Action::Remove, "r"),
@@ -226,6 +252,7 @@ impl Bindings {
             ("confirmation", Mode::Confirmation),
             ("inspection", Mode::Inspection),
             ("worktrees", Mode::Worktrees),
+            ("filter", Mode::Filter),
         ];
         for mode in overrides.keys() {
             if !modes.iter().any(|(name, _)| name == mode) {
@@ -238,7 +265,7 @@ impl Bindings {
             let typing = matches!(mode, Mode::Search | Mode::Input);
             let popup = matches!(
                 mode,
-                Mode::Menu | Mode::Inspection | Mode::Confirmation | Mode::Worktrees
+                Mode::Menu | Mode::Inspection | Mode::Confirmation | Mode::Worktrees | Mode::Filter
             );
             let mut defaults: Vec<(Action, Vec<&str>)> = vec![
                 (Help, vec![if typing { "F1" } else { "?" }]),
@@ -275,6 +302,8 @@ impl Bindings {
                     (CreateRemote, vec![]),
                     (Session, vec!["s"]),
                     (Lazygit, vec!["g"]),
+                    (Filter, vec!["f"]),
+                    (OpenSessions, vec!["Ctrl+o"]),
                 ]);
             } else {
                 defaults.extend([
@@ -302,6 +331,9 @@ impl Bindings {
                         (Copy, vec!["c"]),
                         (Session, vec!["s"]),
                     ]);
+                }
+                if mode == Mode::Filter {
+                    defaults.extend([(Toggle, vec!["Space"]), (ClearFilter, vec!["c"])]);
                 }
                 if mode == Mode::Menu {
                     // These inherit normal-mode shortcuts unless the menu map explicitly

@@ -288,7 +288,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         assert_eq!(inventory_rows(&screen).len(), 2, "{screen}");
         assert_eq!(
             lines[rows - 2],
-            "  Enter / Esc retain filter · action letters are text",
+            "  Enter / Esc retain search · action letters are text",
             "{screen}"
         );
         assert_eq!(
@@ -813,7 +813,7 @@ fn inventory_root_menu_uses_effective_hints_and_preserves_search_and_selection()
             (vec!["All actions"], b"\x1b".to_vec()),
             (vec!["NORMAL ·", "/ beta", "selected: beta"], b"q".to_vec()),
         ],
-        25,
+        26,
         80,
     );
 }
@@ -3305,7 +3305,7 @@ fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
                 vec![17],
             ),
         ],
-        12,
+        13,
         100,
         0,
         |action, writer, frame| match action {
@@ -3321,7 +3321,7 @@ fn inventory_help_paging_overrides_scroll_and_resize_clamps_the_offset() {
     let [scrolled_frame, resized_frame] = frames.as_slice() else {
         panic!("expected a scrolled and resized help frame: {frames:?}");
     };
-    let scrolled = screen_text(scrolled_frame, 12, 100);
+    let scrolled = screen_text(scrolled_frame, 13, 100);
     assert!(scrolled.contains("? / q/Esc"), "{scrolled}");
     assert!(
         !scrolled.contains("j/k ↑/↓"),
@@ -3654,7 +3654,7 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
         let screen = screen_text(frame, 24, 500);
         assert!(
             screen.contains("NORMAL · 3 rows") && screen.contains("  / cloned"),
-            "filter did not survive refresh: {screen}"
+            "search did not survive refresh: {screen}"
         );
         let highlighted = highlighted_inventory_row(frame, 24, 500, "same")
             .unwrap_or_else(|| panic!("{representation} row was not selected:\n{screen}"));
@@ -3821,7 +3821,7 @@ fn inventory_menu_refresh_uses_effective_binding_and_preserves_filter() {
             (vec!["No active operation"], b"/alpha\rm".to_vec()),
             (
                 vec!["All actions", "pair: config x", "Refresh local / config"],
-                b"jjjjjjjjj\r".to_vec(),
+                b"jjjjjjjjjj\r".to_vec(),
             ),
             (
                 vec!["NORMAL ·", "/ alpha", "pair: y refresh", "selected: alpha"],
@@ -3977,7 +3977,7 @@ fn inventory_help_follows_its_board_with_one_hint_row_over_an_empty_hint_bar() {
             ),
             (vec!["NORMAL", "absent: Keyboard /"], b"q".to_vec()),
         ],
-        33,
+        35,
         132,
         0,
         |action, _, frame| {
@@ -3986,7 +3986,7 @@ fn inventory_help_follows_its_board_with_one_hint_row_over_an_empty_hint_bar() {
             }
         },
     );
-    let screen = screen_text(&help, 33, 132);
+    let screen = screen_text(&help, 35, 132);
     let lines = screen.split('\n').collect::<Vec<_>>();
     let body = lines
         .iter()
@@ -4007,22 +4007,23 @@ fn inventory_help_follows_its_board_with_one_hint_row_over_an_empty_hint_bar() {
     let other = at("Other modes");
     assert_eq!(body[other - 1], "", "{screen}");
     assert_eq!(
-        body[other + 1..other + 8],
+        body[other + 1..other + 9],
         [
-            "search        Enter / Esc keep the filter · letters are text",
+            "search        Enter / Esc keep the search · letters are text",
             "menu          j/k select · Enter choose · Esc back one level",
             "input         Enter accept · Esc cancel",
             "confirm       j/k focus · Space acknowledge · Enter choose · Esc cancel",
             "inspect       j/k PageUp/PageDown scroll · c copy a value · Esc close",
             "worktrees     j/k select · a add · r remove · c copy path · Esc close",
+            "filter        j/k move · Space toggle · c clear · Enter/Esc close",
             "j/k scroll · Esc close",
         ],
         "{screen}"
     );
     assert!(!screen.contains("No default key"), "{screen}");
-    assert_eq!(lines[32], "", "{screen}");
+    assert_eq!(lines[34], "", "{screen}");
     assert!(
-        styled_screen(&help, 33, 132)[32]
+        styled_screen(&help, 35, 132)[34]
             .iter()
             .all(|(_, reversed)| *reversed),
         "the empty hint bar stays a bar:\n{screen}"
@@ -4998,6 +4999,7 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
                     "Inventory",
                     "Add repository",
                     "pair: repository a",
+                    "pair: Filter… f",
                     "pair: discovery… off",
                     "pair: config R",
                     "pair: Problems… none",
@@ -5122,6 +5124,11 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
                 vec!["Add cancelled · nothing changed", "absent: Add /"],
                 root_entry(8),
             ),
+            (
+                vec!["FILTER · 1 row", "absent: All actions"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Filter"], root_entry(9)),
             // Without a configured provider the submenu opens and explains itself.
             (
                 vec![
@@ -5132,8 +5139,8 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
                 ],
                 b"qq".to_vec(),
             ),
-            (vec!["NORMAL", "absent: All actions"], root_entry(9)),
             (vec!["NORMAL", "absent: All actions"], root_entry(10)),
+            (vec!["NORMAL", "absent: All actions"], root_entry(11)),
             (vec!["All actions", "pair: Problems… none"], b"j\r".to_vec()),
             (vec!["All actions", "pair: batch no"], b"j\r".to_vec()),
             (
@@ -5142,7 +5149,7 @@ fn inventory_menu_reaches_every_entry_through_its_groups_and_submenus() {
             ),
             (vec!["All actions", "absent: Keyboard"], b"j\r".to_vec()),
         ],
-        25,
+        26,
         80,
     );
 }
@@ -5162,7 +5169,7 @@ fn inventory_session_problems_list_every_failure_behind_exit_one() {
         "root = \"repos\"\n[[repositories]]\nurl = \"github.com/org/alpha\"\n",
     )
     .unwrap();
-    let problems = format!("m{}\r", "j".repeat(10)).into_bytes();
+    let problems = format!("m{}\r", "j".repeat(11)).into_bytes();
     let mut popup = String::new();
 
     run_inventory_pty_with_exit_observing(
@@ -5606,7 +5613,7 @@ fn inventory_remapped_keys_work_in_every_mode_and_their_defaults_are_dead() {
                     "Other modes",
                     "pair: b back",
                     "pair: search Ctrl+a",
-                    "Ctrl+a / Esc keep the filter",
+                    "Ctrl+a / Esc keep the search",
                     "pair: Ctrl+p accept",
                     "pair: n cancel",
                     "pair: h close",
@@ -5992,7 +5999,7 @@ fn inventory_invalid_binding_refresh_keeps_the_previous_map_and_is_a_session_pro
             (vec!["Remove only cancelled"], b"m".to_vec()),
             (
                 vec!["All actions", "pair: 1 problem"],
-                b"jjjjjjjjjj\r".to_vec(),
+                b"jjjjjjjjjjj\r".to_vec(),
             ),
             (
                 vec![
@@ -6098,11 +6105,11 @@ fn inventory_registers_every_marked_row_including_hidden_ones_and_reports_each_o
                     "CONFIRM",
                     "Register / preview",
                     "absent: exact target",
-                    "NO-OP alpha (hidden by filter)",
+                    "NO-OP alpha (hidden)",
                     "~/repos/org/alpha · github.com/org/alpha · identity is already registered",
                     "ELIGIBLE beta",
                     "~/repos/org/beta · github.com/org/beta",
-                    "BLOCKED local (hidden by filter)",
+                    "BLOCKED local (hidden)",
                     "~/repos/scratch/local · no identity · no supported origin observed",
                     "absent: default",
                     "Register 1 target",
@@ -6127,7 +6134,7 @@ fn inventory_registers_every_marked_row_including_hidden_ones_and_reports_each_o
             ),
             (
                 vec!["NORMAL", "absent: Batch /", "absent: Scanning"],
-                format!("m{}\r", "j".repeat(10)).into_bytes(),
+                format!("m{}\r", "j".repeat(11)).into_bytes(),
             ),
             (
                 vec![
@@ -6197,7 +6204,7 @@ fn inventory_preview_and_outcomes_name_hidden_targets_at_80_by_24() {
                 vec![
                     "Register / preview",
                     "more lines",
-                    "Register 14 targets  13 hidden by filter",
+                    "Register 14 targets  13 hidden",
                 ],
                 b"j\r".to_vec(),
             ),
@@ -6205,7 +6212,7 @@ fn inventory_preview_and_outcomes_name_hidden_targets_at_80_by_24() {
                 vec![
                     "Batch / Register",
                     "j/k scroll · Esc return",
-                    "r02 (hidden by filter)",
+                    "r02 (hidden)",
                     "absent: r01 (hidden",
                 ],
                 b"\x1b".to_vec(),
@@ -6353,7 +6360,7 @@ fn inventory_cancelled_preview_changes_nothing_and_keeps_query_cursor_and_marks(
                 vec![
                     "Register / preview",
                     "absent: exact target",
-                    "ELIGIBLE zeta (hidden by filter)",
+                    "ELIGIBLE zeta (hidden)",
                     "~/repos/org/zeta · github.com/org/zeta",
                     "Register 1 target",
                 ],
@@ -6366,7 +6373,7 @@ fn inventory_cancelled_preview_changes_nothing_and_keeps_query_cursor_and_marks(
             (
                 vec![
                     "Unregister / preview",
-                    "NO-OP zeta (hidden by filter)",
+                    "NO-OP zeta (hidden)",
                     "identity is not registered",
                 ],
                 b"\r".to_vec(),
@@ -7373,7 +7380,7 @@ fn inventory_clone_batch_reports_each_target_and_continues_past_a_failed_and_a_s
             ),
             (
                 vec!["NORMAL · 4 rows", "absent: Batch /", "absent: Scanning"],
-                format!("m{}\r", "j".repeat(10)).into_bytes(),
+                format!("m{}\r", "j".repeat(11)).into_bytes(),
             ),
             (
                 vec![
@@ -8270,22 +8277,22 @@ fn inventory_removal_confirmation_lists_clean_loss_and_blocked_targets_and_cance
                     "Remove checkouts / keep registration",
                     "absent: exact target",
                     "absent: ensure can recreate",
-                    "ELIGIBLE alpha (hidden by filter)",
+                    "ELIGIBLE alpha (hidden)",
                     "~/repos/org/alpha · github.com/org/alpha · clean",
-                    "BLOCKED core (hidden by filter)",
+                    "BLOCKED core (hidden)",
                     "dependent worktree metadata",
                     "absent: force cannot waive",
                     "LOSS ACKNOWLEDGMENT REQUIRED draft",
                     "  - unstaged changes",
                     "  - untracked files",
-                    "BLOCKED local (hidden by filter)",
+                    "BLOCKED local (hidden)",
                     "~/repos/scratch/local · no identity · no supported origin observed",
                     "[ ] Also remove draft and accept its listed losses",
                     "absent: losses  Space",
                     "absent: default",
                     "Remove 1 checkout",
                     "pair: checkout cannot",
-                    "cannot be undone · 3 hidden by filter",
+                    "cannot be undone · 3 hidden",
                     "No active operation",
                     "Space acknowledge",
                     "pair: Esc cancel",
@@ -9726,12 +9733,12 @@ fn cancelled_batch_outcomes() -> Vec<(Vec<&'static str>, Vec<u8>)> {
 #[cfg(unix)]
 #[test]
 fn inventory_menu_cancellation_stops_the_remaining_targets_and_keeps_completed_ones() {
-    // Fifteen keys typed while the batch is held: all are read, in order, before gamma starts.
+    // Sixteen keys typed while the batch is held: all are read, in order, before gamma starts.
     // Esc directly before `m` reaches the inventory as one Alt+m and still is both keys. The
     // extra `j` and the `k` end on Cancel active batch in the menu only: in the batch popup
     // they would end on Return to browsing.
     let (_temp, root, _) =
-        removal_held_at_its_second_target(b"\x1bmjjjjjjjjjjjjk\r", cancelled_batch_outcomes());
+        removal_held_at_its_second_target(b"\x1bmjjjjjjjjjjjjjk\r", cancelled_batch_outcomes());
     assert!(root.join("org/gamma/.git").is_dir());
 }
 
@@ -9957,6 +9964,607 @@ fn desktop_stubs(directory: &std::path::Path, names: &[&str], body: &str) {
         fs::write(&stub, format!("#!/bin/sh\n{body}\n")).unwrap();
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
     }
+}
+
+/// Five checkouts: owners `black`, `imfusion` and none; `api` and `theme` declared; `api` and
+/// `lager` with changes. In grid order: lager, theme, api, web, scratch. `extra` follows the
+/// declarations.
+#[cfg(unix)]
+fn filter_fixture(extra: &str) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let temp = temp_dir();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        &config,
+        format!(
+            "root = \"repos\"\n[providers.\"github.com\"]\npreset = \"github\"\n\n\
+             [[repositories]]\nurl = \"github.com/imfusion/api\"\n\n\
+             [[repositories]]\nurl = \"github.com/black/theme\"\n\n{extra}"
+        ),
+    )
+    .unwrap();
+    for (path, origin, clean) in [
+        ("imfusion/api", "git@github.com:imfusion/api.git", false),
+        ("imfusion/web", "git@github.com:imfusion/web.git", true),
+        ("black/lager", "git@github.com:black/lager.git", false),
+        ("black/theme", "git@github.com:black/theme.git", true),
+    ] {
+        init_repo(&root.join(path), origin, clean);
+    }
+    init_repo_without_origin(&root.join("scratch"));
+    (temp, home, config)
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_filter_lists_every_value_with_its_count_and_narrows_the_table_live() {
+    let (_temp, home, config) = filter_fixture("");
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (
+                vec!["NORMAL · 5 rows", "absent: Scanning", "pair: f filter"],
+                b"f".to_vec(),
+            ),
+            (
+                vec![
+                    "FILTER · 5 rows",
+                    "Filter",
+                    "Changes",
+                    "pair: dirty 2",
+                    "pair: clean 3",
+                    "Owner",
+                    "pair: black 2",
+                    "pair: imfusion 2",
+                    "pair: — 1",
+                    "Registration",
+                    "pair: explicit 2",
+                    "pair: unregistered 3",
+                    "absent: wildcard",
+                    "absent: excluded",
+                    "absent: Session",
+                    "j/k move · Space toggle · c clear · Enter/Esc close",
+                    "absent: f filter",
+                ],
+                b" ".to_vec(),
+            ),
+            (
+                vec!["FILTER · 2 of 5 rows", "[x] dirty", "filter: dirty"],
+                b"\x1b".to_vec(),
+            ),
+            // Esc closes the popup and the filter stays.
+            (
+                vec![
+                    "NORMAL · 2 of 5 rows",
+                    "filter: dirty",
+                    "absent: Filter",
+                    "absent: scratch",
+                    "absent: web",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        140,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_filter_ors_within_a_group_ands_across_groups_and_clears() {
+    let (_temp, home, config) = filter_fixture("");
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (
+                vec!["NORMAL · 5 rows", "absent: Scanning"],
+                b"fjjj ".to_vec(),
+            ),
+            (
+                vec!["FILTER · 2 of 5 rows", "[x] imfusion", "filter: imfusion"],
+                b"k ".to_vec(),
+            ),
+            (
+                vec!["FILTER · 4 of 5 rows", "filter: black · imfusion"],
+                b"kk ".to_vec(),
+            ),
+            (
+                vec!["FILTER · 2 of 5 rows", "filter: dirty · black · imfusion"],
+                b"c".to_vec(),
+            ),
+            (
+                vec!["FILTER · 5 rows", "absent: filter:", "[ ] dirty"],
+                b"jjjjj ".to_vec(),
+            ),
+            // Enter closes the popup like Esc, ticks nothing, and the filter stays.
+            (
+                vec!["FILTER · 2 of 5 rows", "filter: explicit"],
+                b"\r".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 2 of 5 rows", "filter: explicit", "absent: Filter"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_filter_lists_only_the_registrations_present() {
+    let temp = temp_dir();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::write(
+        &config,
+        "root = \"repos\"\n[providers.\"github.com\"]\npreset = \"github\"\n\n\
+         [[repositories]]\nurl = \"github.com/team/*\"\nexclude = [\"gamma\"]\n",
+    )
+    .unwrap();
+    for name in ["delta", "gamma"] {
+        init_repo(
+            &root.join("team").join(name),
+            &format!("git@github.com:team/{name}.git"),
+            true,
+        );
+    }
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (vec!["NORMAL · 2 rows", "absent: Scanning"], b"f".to_vec()),
+            (
+                vec![
+                    "pair: wildcard 1",
+                    "pair: excluded 1",
+                    "absent: explicit",
+                    "absent: unregistered",
+                ],
+                b"jjj ".to_vec(),
+            ),
+            (
+                vec!["FILTER · 1 of 2 rows", "filter: excluded"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 of 2 rows", "gamma", "absent: delta"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_filter_by_owner_works_in_the_narrow_column_set() {
+    let (_temp, home, config) = filter_fixture("");
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (
+                vec![
+                    "NORMAL · 5 rows",
+                    "absent: Scanning",
+                    "absent: owner",
+                    "absent: f filter",
+                ],
+                b"fjjj ".to_vec(),
+            ),
+            (
+                vec!["FILTER · 2 of 5 rows", "filter: imfusion"],
+                b"q".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL · 2 of 5 rows",
+                    "api",
+                    "web",
+                    "absent: lager",
+                    "absent: scratch",
+                    "absent: owner",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        24,
+        80,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_search_applies_on_top_of_the_filter() {
+    let (_temp, home, config) = filter_fixture("");
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (
+                vec!["NORMAL · 5 rows", "absent: Scanning"],
+                b"fjjj ".to_vec(),
+            ),
+            (vec!["FILTER · 2 of 5 rows"], b"\x1b".to_vec()),
+            (vec!["NORMAL · 2 of 5 rows"], b"/api\r".to_vec()),
+            (
+                vec!["NORMAL · 1 of 5 rows", "filter: imfusion", "absent: web"],
+                b"\x7f".to_vec(),
+            ),
+            // The row search finds is hidden by the filter.
+            (vec!["NORMAL · 2 of 5 rows"], b"/scratch\r".to_vec()),
+            (
+                vec!["NORMAL · 0 of 5 rows", "No matching repositories."],
+                b"\x7f".to_vec(),
+            ),
+            (vec!["NORMAL · 2 of 5 rows", "api"], b"q".to_vec()),
+        ],
+        32,
+        132,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_marks_on_rows_the_filter_hides_count_as_hidden_in_a_batch() {
+    let (_temp, home, config) = filter_fixture("[inventory.keys.normal]\nregister = [\"g\"]\n");
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (vec!["NORMAL · 5 rows", "absent: Scanning"], b" ".to_vec()),
+            (vec!["1 marked · 0 hidden"], b"fj ".to_vec()),
+            (
+                vec!["FILTER · 3 of 5 rows", "1 marked · 1 hidden"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL · 3 of 5 rows"], b"g".to_vec()),
+            (vec!["Register / preview", "1 hidden"], b"\x1b".to_vec()),
+            (vec!["NORMAL", "absent: Register /"], b"q".to_vec()),
+        ],
+        32,
+        132,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_filter_keys_can_be_rebound_and_a_taken_f_keeps_the_config_loading() {
+    let (_temp, home, config) = filter_fixture(
+        "[inventory.keys.normal]\nfilter = [\"F\"]\n\n\
+         [inventory.keys.filter]\ntoggle = [\"t\"]\nclear_filter = [\"x\"]\n",
+    );
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (vec!["NORMAL · 5 rows", "absent: Scanning"], b"?".to_vec()),
+            (
+                vec![
+                    "Keyboard / effective bindings",
+                    "pair: F filter",
+                    "filter = [\"F\"]",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Keyboard /"], b"F".to_vec()),
+            (
+                vec!["FILTER · 5 rows", "t toggle · x clear"],
+                b"jjjt".to_vec(),
+            ),
+            (vec!["FILTER · 2 of 5 rows", "[x] imfusion"], b"x".to_vec()),
+            (vec!["FILTER · 5 rows", "absent: [x]"], b"\x1b".to_vec()),
+            (vec!["NORMAL · 5 rows", "absent: Filter"], b"q".to_vec()),
+        ],
+        32,
+        132,
+    );
+
+    // A configuration that already binds `f` keeps its binding; the filter has no key.
+    let (_temp, home, config) = filter_fixture("[inventory.keys.normal]\nrefresh = [\"f\"]\n");
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (vec!["NORMAL · 5 rows", "absent: Scanning"], b"?".to_vec()),
+            (
+                vec![
+                    "Keyboard / effective bindings",
+                    "pair: f refresh",
+                    "No key in normal mode: filter",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Keyboard /"], b"q".to_vec()),
+        ],
+        44,
+        132,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_menu_opens_the_filter() {
+    let (_temp, home, config) = filter_fixture("");
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (vec!["NORMAL · 5 rows", "absent: Scanning"], b"m".to_vec()),
+            (
+                vec!["All actions", "pair: Filter… f"],
+                format!("{}\r", "j".repeat(8)).into_bytes(),
+            ),
+            (
+                vec!["FILTER · 5 rows", "absent: All actions"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Filter"], b"q".to_vec()),
+        ],
+        32,
+        132,
+    );
+}
+
+/// Two checkouts, `core` with an open session and `other` without, and the fake Rex that
+/// answers the session list. `extra` follows the `[session]` section.
+#[cfg(unix)]
+fn open_session_fixture(
+    extra: &str,
+) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let temp = temp_dir();
+    let (home, config, _) = worktree_fixture(temp.path(), &format!("{SESSION_SECTION}\n{extra}"));
+    tracked_repo(
+        &home.join("repos/org/other"),
+        "git@github.com:org/other.git",
+    );
+    // Opening the session of `core` leaves it open for the next run.
+    let (mut command, _) = session_tui(temp.path(), &home, &config);
+    run_inventory_pty_with_exit(
+        &mut command,
+        &[(
+            vec!["NORMAL · 2 rows", "absent: Scanning", "selected: core"],
+            b"s".to_vec(),
+        )],
+        32,
+        132,
+        0,
+        |_| {},
+    );
+    (temp, home, config)
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_filter_offers_the_session_group_only_with_a_session_host_and_filters_by_it() {
+    let (temp, home, config) = open_session_fixture("");
+    let (mut command, _) = session_tui(temp.path(), &home, &config);
+    run_inventory_pty_actions(
+        &mut command,
+        &[
+            (
+                vec!["NORMAL · 2 rows", "absent: Scanning", "pair: ● core"],
+                b"f".to_vec(),
+            ),
+            (
+                vec!["Session", "pair: open 1", "pair: none 1"],
+                b"jjj ".to_vec(),
+            ),
+            (
+                vec!["FILTER · 1 of 2 rows", "filter: session open"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 of 2 rows", "pair: ● core", "absent: other"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_filter_keeps_the_last_known_changes_of_a_stale_row_during_a_refresh() {
+    let (temp, home, config) = filter_fixture("");
+    let slow_marker = temp.path().join("slow-refresh");
+    let tools = temp.path().join("delayed-tools");
+    fs::create_dir_all(&tools).unwrap();
+    let wrapper = tools.join("git");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nif [ -e {} ]; then /bin/sleep 2; fi\nexec {} \"$@\"\n",
+            shell_word(&slow_marker),
+            shell_word(&support::real_tool("git"))
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+
+    run_inventory_pty_actions_with_hook(
+        support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
+        &[
+            (vec!["NORMAL · 5 rows", "absent: Scanning"], b"f ".to_vec()),
+            (vec!["FILTER · 2 of 5 rows"], b"\x1b".to_vec()),
+            (vec!["NORMAL · 2 of 5 rows"], b"R".to_vec()),
+            // The two dirty rows stay while their changes read stale.
+            (
+                vec!["NORMAL · 2 of 5 rows", "pair: stale: 1", "api", "lager"],
+                b"f".to_vec(),
+            ),
+            (
+                vec!["FILTER · 2 of 5 rows", "pair: dirty 2", "[x] dirty"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 2 of 5 rows", "absent: Filter"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        140,
+        |action| {
+            if action == 0 {
+                fs::write(&slow_marker, "slow").unwrap();
+            }
+        },
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_filter_lists_ticked_owners_in_the_grid_order() {
+    let temp = temp_dir();
+    let home = temp.path().join("home");
+    let root = home.join("repos");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&config, "root = \"repos\"\n").unwrap();
+    for (path, origin) in [
+        ("Beta/pear", "git@github.com:x/pear.git"),
+        ("alpha/mango", "git@github.com:y/mango.git"),
+    ] {
+        init_repo(&root.join(path), origin, true);
+    }
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (
+                vec!["NORMAL · 2 rows", "absent: Scanning"],
+                b"fj j ".to_vec(),
+            ),
+            // Case-sensitively `Beta` would come first.
+            (
+                vec!["FILTER · 2 of 2 rows", "filter: alpha · Beta"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 2 of 2 rows", "absent: Filter"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_ctrl_o_toggles_the_open_sessions_filter() {
+    let (temp, home, config) = open_session_fixture("");
+    let (mut command, _) = session_tui(temp.path(), &home, &config);
+
+    run_inventory_pty_actions(
+        &mut command,
+        &[
+            (
+                vec![
+                    "NORMAL · 2 rows",
+                    "absent: Scanning",
+                    "pair: ● core",
+                    "pair: Ctrl+o sessions",
+                ],
+                b"\x0f".to_vec(),
+            ),
+            (
+                vec![
+                    "NORMAL · 1 of 2 rows",
+                    "filter: session open",
+                    "pair: ● core",
+                    "absent: other",
+                ],
+                b"f".to_vec(),
+            ),
+            // The popup shows the same state.
+            (
+                vec!["FILTER · 1 of 2 rows", "[x] open", "[ ] none"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 of 2 rows", "absent: Filter"],
+                b"\x0f".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 2 rows", "absent: filter:", "other"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        170,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_ctrl_o_says_why_it_does_nothing_without_a_session_host() {
+    let (_temp, home, config) = filter_fixture("");
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (
+                vec!["NORMAL · 5 rows", "absent: Scanning", "absent: sessions"],
+                b"\x0f".to_vec(),
+            ),
+            (
+                vec![
+                    "Open sessions unavailable: no [session] section in the configuration",
+                    "NORMAL · 5 rows",
+                ],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        140,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_open_sessions_key_can_be_rebound_and_a_taken_ctrl_o_keeps_the_config_loading() {
+    let (temp, home, config) =
+        open_session_fixture("[inventory.keys.normal]\nopen_sessions = [\"O\"]\n");
+    let (mut command, _) = session_tui(temp.path(), &home, &config);
+    // The default key is dead: only `O` filters.
+    run_inventory_pty_actions(
+        &mut command,
+        &[
+            (
+                vec!["NORMAL · 2 rows", "absent: Scanning", "pair: ● core"],
+                b"\x0fO".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 of 2 rows", "filter: session open"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        140,
+    );
+
+    let (_temp, home, config) = filter_fixture("[inventory.keys.normal]\nrefresh = [\"Ctrl+o\"]\n");
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (vec!["NORMAL · 5 rows", "absent: Scanning"], b"?".to_vec()),
+            (
+                vec!["Keyboard / effective bindings", "pair: Ctrl+o refresh"],
+                b"\x1b".to_vec(),
+            ),
+            (vec!["NORMAL", "absent: Keyboard /"], b"q".to_vec()),
+        ],
+        32,
+        140,
+    );
 }
 
 fn output(command: &mut Command) -> std::process::Output {
@@ -12131,7 +12739,7 @@ impl RemoteFixture {
 
 /// Opens "Remote discovery…" from the action menu.
 #[cfg(unix)]
-const REMOTE_MENU: &[u8] = b"mjjjjjjjj\r";
+const REMOTE_MENU: &[u8] = b"mjjjjjjjjj\r";
 
 #[cfg(unix)]
 const REMOTE_READY: [&str; 3] = [
@@ -14119,7 +14727,7 @@ fn inventory_github_failure_names_the_fix_in_session_problems_and_exits_one() {
         &[
             (vec!["NORMAL · 1 row", "absent: Scanning"], b"A".to_vec()),
             (vec!["org/demo: failed, see Problems"], b"m".to_vec()),
-            (vec!["All actions", "1 problem"], b"jjjjjjjjjj\r".to_vec()),
+            (vec!["All actions", "1 problem"], b"jjjjjjjjjjj\r".to_vec()),
             (
                 vec!["Problems / 1", "gh auth login --hostname github.com"],
                 b"\x1b".to_vec(),
@@ -14642,7 +15250,7 @@ fn inventory_s_opens_the_session_closes_and_names_it() {
             (vec!["All actions", "pair: session s"], b"\x1b".to_vec()),
             (vec!["NORMAL · 1 row", "absent: All actions"], b"s".to_vec()),
         ],
-        32,
+        33,
         132,
         0,
         |_| {},
@@ -15390,7 +15998,7 @@ fn inventory_worktree_popup_keeps_the_session_when_the_removal_is_refused_after_
 
 /// The menu keys that open Problems… from a row with a checkout and sessions configured.
 #[cfg(unix)]
-const OPEN_PROBLEMS: &[u8] = b"mjjjjjjjjjjj\r";
+const OPEN_PROBLEMS: &[u8] = b"mjjjjjjjjjjjj\r";
 
 #[cfg(unix)]
 #[test]

@@ -333,7 +333,9 @@ fn observation(field: &ObservationField) -> Fact {
         ObservationField::Clean => Fact::new("clean", None),
         ObservationField::Dirty(value) => Fact::new("dirty", Some(value)),
         ObservationField::Error(value) => Fact::new("error", Some(value)),
-        ObservationField::Stale(value) => Fact::new("stale", Some(value)),
+        ObservationField::Stale(value) | ObservationField::StaleDirty(value) => {
+            Fact::new("stale", Some(value))
+        }
         ObservationField::NotApplicable => Fact::new("not_applicable", None),
     }
 }

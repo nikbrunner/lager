@@ -112,7 +112,7 @@ The proof covers what the remote-tracking refs held at the last fetch; Lager doe
 
 ## Inventory
 
-The screen reads top to bottom: a header bar with the mode, the visible row count and, once one has occurred, the problem count; the source line; the search row; the unbordered table with a mark column; the status line, which shows the current state only; and the hint footer. The grid has the columns repository, owner, local, branch, status and registration. The owner is the first folder of the row's path below the root, so `~/repos/imfusion/cp/repo` shows `imfusion`; a path outside the root, or a repository directly in the root, shows `—`. Rows are ordered by owner, then by the repository name shown, both ignoring case, with rows that have no owner last; the order holds through refreshes and search filters the ordered list. `status --json` keeps its row-key order. The grid shows the widest of three column sets that fits the terminal: all six columns from 113 columns, without registration from 99 columns, and below that repository, branch and status. A hidden column is not drawn, and Inspect still shows its value. The table shows short repository names and `~`-relative paths; Inspect shows the full values, the origin among them. A row is selected whole, without shifting its text, and there is no permanent detail pane or cell focus. Query, cursor, marks and cached provider answers last for one run.
+The screen reads top to bottom: a header bar with the mode, the visible row count and, once one has occurred, the problem count; the source line; the search row; the unbordered table with a mark column; the status line, which shows the current state only; and the hint footer. The grid has the columns repository, owner, local, branch, status and registration. The owner is the first folder of the row's path below the root, so `~/repos/imfusion/cp/repo` shows `imfusion`; a path outside the root, or a repository directly in the root, shows `—`. Rows are ordered by owner, then by the repository name shown, both ignoring case, with rows that have no owner last; the order holds through refreshes and search narrows the ordered list. `status --json` keeps its row-key order. The grid shows the widest of three column sets that fits the terminal: all six columns from 113 columns, without registration from 99 columns, and below that repository, branch and status. A hidden column is not drawn, and Inspect still shows its value. The table shows short repository names and `~`-relative paths; Inspect shows the full values, the origin among them. A row is selected whole, without shifting its text, and there is no permanent detail pane or cell focus. Query, cursor, marks and cached provider answers last for one run.
 
 `tui` starts from declarations and local
 Git roots beneath the configured root. It makes no provider request until remote
@@ -148,18 +148,45 @@ refresh; otherwise it returns `0`. Informational exclusions and deliberate
 cancellation do not count as failures.
 
 Use `j`/`k` or arrow keys to select a row, `/` for live fuzzy search, Space to
-mark the row, `a` to add a repository by reference, `r` to remove the checkout and keep its registration, `w` for the worktrees of the selected repository, `g` for lazygit in its checkout, `s` for its session, Enter to inspect the selected repository, `m` for the action menu,
+mark the row, `a` to add a repository by reference, `r` to remove the checkout and keep its registration, `w` for the worktrees of the selected repository, `g` for lazygit in its checkout, `f` to filter the rows by property, `s` for its session, Enter to inspect the selected repository, `m` for the action menu,
 and `?` for effective bindings. Search matches full attributes, paths and origins; Enter/Esc
-retain the filter and normal-mode Backspace clears it. Ordinary search letters
+retain the search and normal-mode Backspace clears it. Ordinary search letters
 remain text; F1 opens search help. Help describes the mode it was opened from.
-Marks survive filtering and refresh while their exact target remains; the search
+Marks survive search, filter and refresh while their exact target remains; the search
 row shows the marked and hidden-marked counts, and the status line reports marks
 removed with a vanished entry. Wildcard pattern rows cannot be marked.
 The menu groups actions for this row (Repository actions…, Inspect, Copy value…,
 Open origin, Worktrees…, Open lazygit, and Open session with a `[session]` section), the
 selection (mark this row, mark visible concrete rows, clear all marks) and the
-inventory (Add, Remote discovery…, Refresh, Problems…, batch cancellation, Help
+inventory (Add, Filter…, Remote discovery…, Refresh, Problems…, batch cancellation, Help
 and Quit).
+`f` or Filter… opens a popup that narrows the rows by property. Changes offers
+`dirty` (the row has changes) and `clean` (observed clean); Owner offers every
+owner of the inventory in the grid's order, and `—` for rows without one;
+Registration offers `explicit`, `wildcard`, `unregistered` and `excluded`,
+each only while a row has it. With a `[session]` section and once the session
+list has answered, Session offers `open` (the row's primary checkout has a
+live session, the `●` of the grid) and `none`. Each value shows the number of
+rows that have it in the whole inventory, before search. Values within a group
+combine with "or", groups combine with "and", and a group with no value ticked
+does not filter. A row without a changes observation (missing, remote only,
+unknown, error) matches neither `dirty` nor `clean`, so a ticked Changes value
+hides it. A row whose changes are stale after a refresh keeps its last known
+value until it is observed again.
+`j`/`k` move over the values, Space ticks one and the table behind the
+popup narrows at once, `c` clears every value, and Enter, Esc or `q` closes the
+popup with the filter in place. While a filter is active the source line ends with
+`filter:` and the ticked values (a session value reads `session open`), and the
+header counts `N of M rows`. Search applies on top of the filter, and marks on
+rows the filter hides behave as under search: the search row counts them as
+hidden and a batch names them as hidden. The filter reads row data, so it
+applies in every column set. It lasts for the run and survives a refresh; a
+value that disappears stops matching and drops out of the popup, and a ticked
+session value keeps applying while the session list is refreshed.
+`Ctrl+o` ticks or clears the Session value `open` of that same filter without
+the popup, so the popup, the source line and the header show it. Without a
+`[session]` section, or before the session list has answered, it changes
+nothing and the status line gives the reason.
 On a row whose host has a `github` provider, Repository actions… adds an
 `On <host>` group with Rename…, Archive, Delete everywhere… and the visibility
 entries. Their forms and confirmations, and the form of New repository on
@@ -211,8 +238,8 @@ Unregister removes the explicit declaration and excludes the member from every
 matching wildcard. On marked rows a preview lists every target with its exact
 path and identity, eligible, no-op or blocked with the reason; the list scrolls
 while Cancel and the action stay in view, Cancel is the default and changes
-nothing. A target the filter hides carries `(hidden by filter)` in the list and
-in the outcomes, and the action choice adds `K hidden by filter`. The current row alone acts directly. Targets are fixed when
+nothing. A target that the search or the filter hides carries `(hidden)` in the list and
+in the outcomes, and the action choice adds `K hidden`. The current row alone acts directly. Targets are fixed when
 the action starts, and a refresh never changes them. They run one after another,
 each with its own configuration write; targets of one identity share one change
 and one reported failure. The batch popup lists every target with its outcome
