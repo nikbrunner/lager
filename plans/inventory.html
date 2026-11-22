@@ -132,7 +132,7 @@ function act(action){
  if(action==='simulate-copy')return announce('Copy simulated; this prototype does not access your clipboard. The application copies the full original cell value.');
  if(action.startsWith('simulate-'))return announce('Action preview accepted in the prototype. No files or configuration were changed.');
  if(action==='confirm-remove'){acknowledged=$('force')?.checked??false;batch=targets.length>2;show('batch');$('caption').textContent='Simulation only. '+(removal==='keep'?'Remove-only preserves every declaration and exclusion.':'Combined removal reports disk and config outcomes separately.');return}
- if(action==='validate'){if(!/^(https:\/\/github\.com\/)?[\w.-]+\/[\w.-]+(?:\.git)?$/.test(reference)){$('input-error').textContent='Prototype supports owner/repo or a GitHub HTTPS URL. The implementation validates all PRD reference formats.';return}show('preview');return}
+ if(action==='validate'){if(!/^(https:\/\/github\.com\/)?[\w.-]+\/[\w.-]+(?:\.git)?$/.test(reference)){$('input-error').textContent='Prototype supports owner/repo or a GitHub HTTPS URL. The implementation validates every reference format the CLI accepts.';return}show('preview');return}
  show(action);
 }
 $('terminal').addEventListener('click',e=>{const action=e.target.closest('[data-action]');if(action&&!action.disabled)act(action.dataset.action);const row=e.target.closest('[data-row]');if(row){current=Number(row.dataset.row);renderBase();$('terminal').focus()}});

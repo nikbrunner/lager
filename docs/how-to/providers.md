@@ -63,4 +63,8 @@ lager add --include-archived
 lager ensure --include-archived
 ```
 
-`status --include-archived` requires `--remote`. For a no-argument `add`, successful picker selections still run when another provider fails, but the command exits 1 to report that failure.
+`status --include-archived` requires `--remote`.
+
+## When a provider fails
+
+Lager reads every page of a provider's catalog. A provider that fails does not discard the answers of the others. For a no-argument `register`, `unregister`, `add` or `hook`, the picker offers the candidates that were found, the selection still runs, and the command exits `1` to report the failure. `status --remote` and the inventory keep the rows of the providers that answered and count the failure as a problem.

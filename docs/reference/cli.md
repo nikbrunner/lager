@@ -19,9 +19,9 @@ Lager selects the configuration path in this order:
 | `init` | `init --root ROOT [--create-root\|--no-create-root] [--github\|--no-github]` | Creates a configuration once. It optionally creates the root and adds the GitHub provider. |
 | `register` | `register [REPOSITORY]... [--post-clone CMD] [--include-archived]` | Declares repositories or wildcards. A hook belongs to an explicit declaration. |
 | `unregister` | `unregister [REPOSITORY]... [--include-archived]` | Removes explicit declarations, or excludes concrete members from matching wildcards. |
-| `add` | `add [REPOSITORY]... [--register\|--no-register] [--post-clone CMD] [--include-archived]` | Creates local checkouts. `--post-clone` implies `--register`. |
+| `add` | `add [REPOSITORY]... [--register\|--no-register] [--post-clone CMD] [--include-archived]` | Creates local checkouts. A checkout already at the destination is a no-op. `--post-clone` implies `--register`. |
 | `remove` | `remove [REPOSITORY]... [--unregister\|--keep-registered] [--yes] [--force]` | Permanently deletes validated local checkouts. `--force` accepts local-state warnings only. |
-| `ensure` | `ensure [--include-archived]` | Creates missing effective declarations sequentially. |
+| `ensure` | `ensure [--include-archived]` | Creates missing effective declarations sequentially. It never pulls or resets an existing checkout. |
 | `hook` | `hook [REPOSITORY]...` | Runs hooks for explicit declarations. Without repositories, it selects explicit declarations. |
 | `status`, `list`, `ls` | `status [--remote] [--include-archived] [--registered] [--json]` | Prints the rows `tui` shows, once its scan has finished: a table, or one JSON document with `--json`. `--remote` expands wildcards through providers; `tui` with remote discovery on shows those rows and adds the providers' unregistered and excluded repositories as candidates. `--registered` keeps declared repositories and wildcard patterns. |
 | `tui` | `tui [--remote] [--include-archived]` | Opens the inventory with its repository actions; requires TTY stdin and stdout. `--remote` starts with remote discovery on. |
@@ -104,11 +104,15 @@ all-or-nothing clone batches.
 | `autostash of a stopped rebase`, `autostash of a stopped merge`, `autostash of an interrupted checkout` | Git set local changes aside in the Git directory and has not put them back. |
 | `unknown entries in .git: NAME, NAME` | The Git directory has a top-level entry that Git does not keep there in normal use and that holds something, such as the state of another tool. An empty file or directory is not listed, nor are `CLAUDE_BASE` and `opencode`, which hold only an id a coding agent keeps. |
 
+The commits part reads the real objects, without replacement refs or grafts, so neither can make a commit look pushed. The Git-directory part reads top-level entries only. A checkout's Git directory holds without a warning `HEAD`, `config`, `config.worktree`, `description`, `index`, `objects`, `refs`, `reftable`, `packed-refs`, `info`, `hooks`, `logs`, `FETCH_HEAD`, `ORIG_HEAD`, `COMMIT_EDITMSG`, `REBASE_HEAD`, `AUTO_MERGE`, `gc.log`, `shallow`, `lfs`, `fsmonitor--daemon`, any `.ipc` socket, `CLAUDE_BASE`, `opencode` and `modules`. A symlink in `modules` counts as an unused submodule repository. The Git directory of a linked worktree has its own set, listed under [`worktree remove`](#worktree-remove).
+
 Two inspections of the same checkout give the same warnings, word for word. The inventory lists them as the losses of a target.
 
 The proof covers what the remote-tracking refs held at the last fetch; Lager does not contact the remote, so a branch deleted there after the last fetch still counts as pushed. Commits that only a reflog reaches, the names of local branches and tags whose commits a remote holds, local configuration, and the files inside `info/`, `logs/`, `hooks/` and `lfs/` (custom hooks, notes in `info/`, LFS objects never uploaded) go with the checkout unnamed: of the Git directory only the top-level entries are read.
 
 ## Inventory
+
+The screen reads top to bottom: a header bar with the mode, the visible row count and, once one has occurred, the problem count; the source line; the search row; the unbordered table with a mark column; the status line, which shows the current state only; and the hint footer. The grid has the columns repository, local, branch, status and registration. Below 132 columns the grid hides branch, and the status cell shows a branch error in its place. The table shows short repository names and `~`-relative paths; Inspect shows the full values, the origin among them. A row is selected whole, without shifting its text, and there is no permanent detail pane or cell focus. Query, cursor, marks and cached provider answers last for one run.
 
 `tui` starts from declarations and local
 Git roots beneath the configured root. It makes no provider request until remote
@@ -248,9 +252,14 @@ at the configured destination of another identity's declaration is removed at
 that found path, and the confirmation names the declaration, which stays.
 Cancel is the default and changes nothing. A confirmation, like the batch
 previews of the other actions and the Add preview, is answered only by keys
-typed once it is on screen: input typed before it is drawn is discarded. Targets with losses stay unless the acknowledgment
-row is ticked (Space, or Enter on the row); it covers exactly the listed losses
-at the listed paths. Confirming runs the eligible targets one after another;
+typed once it is on screen: input typed before it is drawn is discarded. A target's losses come one per line before its identity. When the
+list does not fit, its last row reads `… N more lines` and names the key that
+pages on; a page is the visible list. The hint row puts the keys that act before
+the scroll keys, so a narrow popup cuts the scroll keys first. Targets with
+losses stay unless the acknowledgment row is ticked (Space, or Enter on the
+row); it covers exactly the listed losses at the listed paths. Until the list
+has been paged to its end the acknowledgment does nothing and the status line
+reads `Scroll through every loss before accepting`. Confirming runs the eligible targets one after another;
 blocked targets and unacknowledged losses are reported as `BLOCKED` and the
 others go on. Immediately before a deletion the target is checked again: the
 configuration must still declare the identity as it did, the checkout must
@@ -533,7 +542,7 @@ A failure after the repository is found is one line on stderr and exit `1`, with
 
 `--start` applies only to a new branch, and `--branch` conflicts with `--new-branch`; both mistakes exit `2`. A new branch whose name exists, an `--branch` that names no local branch, and a `--start` that names no local commit exit `1`. Lager never fetches, never moves an existing branch, and leaves a branch that is checked out elsewhere to Git, which refuses it.
 
-`NAME` is one path component: ASCII letters, digits, `.`, `_` and `-`, starting with a letter or digit. Git checks the branch name separately.
+`NAME` is one path component: ASCII letters, digits, `.`, `_` and `-`, starting with a letter or digit. Git checks the branch name separately. A derived destination (the second and third entries below) lies directly inside its `.worktrees` container; an explicit `--path` need not.
 
 The destination is the first of these that applies:
 
@@ -592,6 +601,8 @@ The confirmation defaults to no. Declining prints `Skipped PATH` and exits `0`; 
 
 `losses` lists modified files, untracked files and ignored files on one line, then each named state of the worktree on a line of its own. A tracked file marked skip-worktree or assume-unchanged counts as modified whether or not it was edited, because Git's status hides it. A repository deeper inside an ignored directory is part of the ignored files. The Git directory of a linked worktree is read like the one of a checkout in [What `remove` proves](#what-remove-proves): a stopped rebase, `git am`, merge, cherry-pick, revert or bisect is named with the commands that finish or drop it, as `git -C PATH ... --continue or --abort` (the popup, which shows the path, reads `in the worktree: git ...`), and an entry Git does not keep there in normal use is named as `unknown entries in GITDIR: NAME`, with the absolute path of `.git/worktrees/NAME`. Each ref only this worktree sees (`refs/worktree/*`, `refs/bisect/*`, `refs/rewritten/*`) is named as `per-worktree ref REF`, since it goes with the worktree. With any of them the command exits `1` unless `--force` is given, with `error: local changes would be lost; rerun with --force to accept these losses` when the losses are files only and `error: the listed state would be lost; ...` otherwise, and the question reads "Accept these losses and remove this worktree?". Git receives `--force` only in that case.
 
+The Git directory of a linked worktree holds without a warning `HEAD`, `index`, `logs`, `refs`, `reftable`, `info`, `config.worktree`, `commondir`, `gitdir`, `locked`, `FETCH_HEAD`, `ORIG_HEAD`, `COMMIT_EDITMSG`, `REBASE_HEAD`, `AUTO_MERGE`, `gc.log`, `fsmonitor--daemon`, any `.ipc` socket, `CLAUDE_BASE`, `opencode` and `modules`, and an entry that is an empty file or directory is not named either.
+
 These block the removal with or without `--force`. Each prints `error: blocked: ...` and, where Git has a command for it, a `hint:` line:
 
 | Blocker | Hint |
@@ -624,7 +635,7 @@ The worktree commands print `error:` and `hint:` lines, the session commands pri
 
 ## Sessions
 
-`lager session` opens a checkout as a terminal session in Rex with the tabs and panes of the configured layout. Every pane starts in the checkout. The commands need a [`[session]` section](config.md#session) in the configuration; without one they exit `1` with `error: sessions are not configured; add [session] to CONFIG` and call no Rex. The [sessions how-to](../how-to/sessions.md) walks through the setup.
+`lager session` opens a checkout as a terminal session in Rex with the tabs and panes of the configured layout. Every pane starts in the checkout. The commands need a [`[session]` section](config.md#session) in the configuration; without one they exit `1` with `error: sessions are not configured; add [session] to CONFIG` and call no Rex. Only `session open`, `--open-session`, `s` in the inventory or the Worktrees popup, and a worktree created from the popup with `[x] Open session` change what Rex shows. Every other call, `session create` and `--create-session` included, leaves Rex's view alone. The [sessions how-to](../how-to/sessions.md) walks through the setup.
 
 Lager keeps one session per checkout and finds it again through a record on this machine, never by its label. A session made by hand, or by another tool, is unknown to lager. Every command first asks Rex which sessions are live and forgets the records of the others, so a session closed in Rex is created again on the next `open` or `create`.
 

@@ -477,8 +477,8 @@ def main():
             env, config, unreadable = make_fixture(directory, size)
             result = {"mix": counts(size)}
             if not args.provider_only:
-                # Lager keeps no cache between processes, so every launch is cold in the PRD's
-                # sense; the cold series starts right after fixture generation, the warm series
+                # Lager keeps no cache between processes, so every launch is cold: no Lager
+                # run cache and no flushed OS disk caches; the cold series starts right after fixture generation, the warm series
                 # after three discarded launches have warmed the OS caches.
                 first, done = startup(args.binary, env, config, args.runs)
                 result["startup_cold_first_frame"] = summary(first, 250)

@@ -122,6 +122,25 @@ worktree guards.
 - [status JSON](docs/reference/status-json.md) · [worktree JSON](docs/reference/worktree-json.md) · [session JSON](docs/reference/session-json.md) · [exit codes](docs/reference/exit-codes.md) · [performance](docs/reference/performance.md)
 - [Declarations and local state](docs/explanation/declarations-and-local-state.md)
 
+## Roadmap
+
+Lager covers declarations and wildcards, guarded clone and removal, the inventory TUI with provider discovery, worktrees and Rex sessions. Open work lives in [GitHub issues](https://github.com/nikbrunner/lager/issues).
+
+Next:
+
+- Daily use on Linux.
+- An inventory that opens instantly from a cache and refreshes in the background.
+- Lazygit from the inventory, to clean up a repository's changes in place.
+- An organization column and a filter menu, such as dirty repositories or one organization.
+- Deeper provider integration through `gh` and `bkt`, and opening repositories in editors and other apps.
+
+Out of scope:
+
+- General Git management: branches, staging, merge, rebase and submodules.
+- Declarative worktrees and worktree setup automation.
+- Daemons, and web, cloud or multi-user features.
+- Terminal hosts other than Rex.
+
 ## Development
 
 Install standalone [Lefthook](https://lefthook.dev/) before working on a clone,
@@ -141,9 +160,14 @@ cargo test --locked --all-targets
 ```
 
 Use the sandboxed [human acceptance checklist](HOW_TO_TEST.md) to verify the
-repository-management journeys. Current milestone evidence is recorded in
-[PRD §3](docs/prd/1.0.0.md#3-repository-management); local macOS results are not
-a substitute for the outstanding Linux validation.
+repository-management journeys. Its results come from macOS; Linux acceptance is
+still open.
+
+release-please cuts releases from `main`. The release workflow builds archives
+for Linux and macOS on x86_64 and ARM64, checks the tag against the crate version
+and `lager --version`, and publishes checksums and build provenance. Before a
+release, the help text and the config, CLI and JSON references match the behavior,
+and the Cargo, Mise and archive installs work.
 
 ## License
 

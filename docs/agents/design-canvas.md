@@ -2,7 +2,7 @@
 
 The Design canvas "Lager" at https://claude.ai/artifact/VqhtkQHMxKMFd6T2hN8X9p is the working space for every screen Lager shows: the inventory TUI, its popups and the human output of commands. It is private to Nik and the single source of its boards.
 
-A board fixes what a screen says and how it is laid out. The PRD and the reference docs fix what it does.
+A board fixes what a screen says and how it is laid out. The reference docs fix what it does.
 
 ## Reading
 
@@ -26,3 +26,9 @@ Read the canvas with the Artifact tool: `read` with the URL, then single files b
 A popup in the inventory holds a title, the table or list, and one row of key hints inside its frame. While it is open, the hint bar at the bottom of the screen stays empty and the status line above it shows the current state.
 
 Sentences that explain the interface stay out of the popup. A rule shows when it applies: a key that the rule refuses answers with one line giving the reason. A rule that no key refuses lives in the reference docs. Text that says what the user is about to lose stays in the popup: the losses of a removal and their acknowledgment, the typed name and the permanence line of a GitHub delete, lock states, and the outcome of a batch.
+
+## Presentation
+
+Every screen has a dark, a light and a no-color rendering. Status is carried by text or a symbol and never by color alone, focus is visible, and empty, loading and error states each have a board. A selected row is highlighted whole and shifts no text.
+
+The registration cell takes its color from the state: green for explicit, blue for wildcard, muted for unregistered, yellow for excluded.

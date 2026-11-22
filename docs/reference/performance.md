@@ -1,6 +1,6 @@
 # Inventory performance
 
-This page records the [PRD §6.2](../prd/1.0.0.md#62-responsiveness-and-verification) measurements: process start to first usable frame, source completion, and input latency while a refresh or a slow provider is loading, against fixtures of 100 and 1,000 repositories. Each p95 is nearest-rank. A target that misses is recorded as measured.
+This page records the inventory's responsiveness: process start to first usable frame (target p95 ≤250 ms), source completion, and input latency while a refresh or a slow provider is loading (target p95 ≤50 ms), against fixtures of 100 and 1,000 repositories. Each startup condition has at least 20 runs and each interactive condition at least 100 events. Each p95 is nearest-rank. A target that misses is recorded as measured. A performance claim needs a measured comparison, and a change of target needs review.
 
 ## Results
 
@@ -50,7 +50,7 @@ Every measurement runs `lager tui` on a pseudo-terminal of 132×32 that is its c
 
 - **First usable frame:** from just before the process is spawned to the read after which the header shows `NORMAL ·`, which the table frame draws and the loading frame does not.
 - **Source completion:** from the same start to the read after which the source line reads `Local + declarations` or `Local: incomplete` without `scanning` and without a `pending` count.
-- **Cold and warm:** Lager keeps no cache between processes, so every launch is cold in the PRD's sense. The cold series starts right after the fixture is built. The warm series follows three discarded launches that warm the OS caches.
+- **Cold and warm:** Lager keeps no cache between processes, so every launch is cold: no Lager run cache exists, and the OS disk caches are not flushed. The cold series starts right after the fixture is built. The warm series follows three discarded launches that warm the OS caches.
 - **Search:** `/` opens search, then `z` and Backspace alternate; each key is timed from the write to the read after which the search row shows the new query.
 - **Navigation:** `j` and `k` alternate; each key is timed from the write to the read after which another row is highlighted.
 - **During local refresh:** after the first scan completes, `R` starts a refresh, ten keys follow, and the cycle repeats. Only keys sent while the source line shows `scanning` or `pending` count, until 100 have.
