@@ -76,6 +76,7 @@ pub fn run(
         Command::Session(command) => {
             super::session::run(&config_path, command, selector, interactive)
         }
+        Command::Skill(command) => super::skill::run(command),
     }
 }
 

@@ -64,6 +64,23 @@ pub enum Command {
         about = "Open, create, close and list terminal sessions of checkouts"
     )]
     Session(SessionCommand),
+    #[command(
+        about = "Print the usage guide for agents, or install the agent skill",
+        after_help = "Examples:\n  lager skill\n  lager skill install"
+    )]
+    Skill(SkillArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct SkillArgs {
+    #[command(subcommand)]
+    pub command: Option<SkillCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SkillCommand {
+    #[command(about = "Write the skill to $HOME/.agents/skills/lager, replacing existing files")]
+    Install,
 }
 
 #[derive(Debug, Subcommand)]

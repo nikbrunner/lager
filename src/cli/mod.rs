@@ -4,6 +4,7 @@ pub mod interaction;
 mod inventory;
 mod session;
 mod signals;
+mod skill;
 mod worktree;
 use std::io::IsTerminal;
 

@@ -32,6 +32,7 @@ Lager selects the configuration path in this order:
 | `session create` | `session create <REPOSITORY> [NAME] [--json]` | Creates the checkout's session without showing it. |
 | `session close` | `session close [REPOSITORY] [NAME]` | Closes the checkout's session. |
 | `session list` | `session list [--json]` | Lists the checkouts that have a session. |
+| `skill` | `skill [install]` | Prints the usage guide for agents. `skill install` writes the agent skill to `$HOME/.agents/skills/lager`. |
 
 `list` and `ls` are visible aliases of `status`. All three names accept the same arguments, options, and configuration selection, and produce identical output and exit statuses.
 
@@ -747,6 +748,14 @@ $ lager session list
 core              /home/dev/repos/acme/core                      session:01a1f8aa-76be-721e-8f28-6e3ba611fe57
 core · Dev spike  /home/dev/repos/acme/core.worktrees/dev-spike  session:01a1f8ab-8ffc-76ae-836e-30d02892582e
 ```
+
+## Agent skill
+
+`lager skill` writes the usage guide for coding agents to stdout. The guide is embedded in the binary, so it describes the commands of the installed version. It reads no configuration and touches no file.
+
+`lager skill install` writes `SKILL.md` and `references/setup.md` to `$HOME/.agents/skills/lager`, creating the directories and replacing existing files, then prints `Installed skill to PATH`. `SKILL.md` tells the agent to run `lager skill`; `references/setup.md` covers installing lager for the case that the command is missing; configuration is part of the guide. The command fails with exit `1` when `HOME` is unset or a file cannot be written.
+
+`npx skills add nikbrunner/lager --skill lager` installs the same two files from GitHub.
 
 ## Non-interactive use
 

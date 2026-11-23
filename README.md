@@ -113,6 +113,17 @@ Git/hook streams are unchanged. See [safe removal](docs/how-to/remove-safely.md)
 before deleting checkouts; `--force` never bypasses ownership or dependent
 worktree guards.
 
+## Agent skill
+
+The `lager` skill teaches a coding agent to use lager: a short stub that runs `lager skill`, which prints a usage guide embedded in the installed binary. The guide always matches the installed version. When lager is missing, the skill walks the agent through installing it.
+
+```sh
+lager skill install                            # writes ~/.agents/skills/lager
+npx skills add nikbrunner/lager --skill lager  # installs from GitHub
+```
+
+`lager skill` prints the guide itself.
+
 ## Documentation
 
 - [First repository tutorial](docs/tutorials/first-repository.md)
