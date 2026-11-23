@@ -315,6 +315,19 @@ fn a_failing_change_passes_gh_s_error_through() {
     assert_eq!(state(&fixture.state, "archived"), "false");
 }
 
+#[test]
+fn a_failing_change_without_a_message_names_gh_s_exit_status() {
+    let fixture = Fixture::github("\"archive\"");
+    fixture.set("archive-fails-silently", "");
+    let output = fixture.run(&["archive", "org/demo"]);
+    assert_outcome(&output, 1, "");
+    assert!(
+        text(&output.stderr).contains("org/demo: gh exited with status 1 and no message"),
+        "{}",
+        text(&output.stderr)
+    );
+}
+
 /// A fixture allowing `create` whose github.com clones come from bare repositories it holds.
 fn create_fixture() -> (Fixture, PathBuf) {
     let fixture = Fixture::github("\"create\"");

@@ -364,6 +364,10 @@ fn gh_error(error: ProbeError) -> String {
             "GitHub provider requires `gh`; install GitHub CLI and run `gh auth login`".to_owned()
         }
         ProbeError::Spawn(_, error) => format!("could not start gh: {error}"),
+        ProbeError::Exit { code, stderr } if stderr.is_empty() => match code {
+            Some(code) => format!("gh exited with status {code} and no message"),
+            None => "gh was stopped by a signal".to_owned(),
+        },
         ProbeError::Exit { stderr, .. } => stderr,
         other => other.to_string(),
     }

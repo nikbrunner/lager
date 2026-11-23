@@ -46,6 +46,9 @@ case "$1 $2" in
       printf '%s\n' "HTTP 403: Must have admin rights to Repository." >&2
       exit 1
     fi
+    if [ -e "$GH_STATE/archive-fails-silently" ]; then
+      exit 1
+    fi
     # Stands in for a slow GitHub until the test removes the hold file.
     while [ -e "$GH_STATE/hold" ]; do sleep 0.05; done
     printf 'true' > "$GH_STATE/archived"
