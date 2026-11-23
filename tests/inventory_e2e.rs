@@ -1606,11 +1606,16 @@ fn inventory_empty_and_partial_states_follow_the_canvas_at_both_sizes() {
             support::lager_with_path(&home, &config, Some(&tools)).arg("tui"),
             &[
                 (
-                    vec![
+                    // Directory order decides whether `mirror.git` or `private` is listed first,
+                    // and at 80 columns the second one is cut. Only `private` is a problem.
+                    [
                         "· 1 problem",
                         "Local: incomplete, still scanning · status: ",
-                        "! Scan incomplete: ~/repos/private permission denied",
-                    ],
+                        "! Scan incomplete: ",
+                    ]
+                    .into_iter()
+                    .chain((cols >= 132).then_some("~/repos/private permission denied"))
+                    .collect(),
                     Vec::new(),
                 ),
                 (
@@ -2397,7 +2402,7 @@ fn inventory_keeps_partial_summary_visible_when_rows_overflow_the_viewport() {
     fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
     let transcript = run_inventory_pty_with_exit(
         support::lager(&home, &config).arg("tui"),
-        &[(vec!["Scan incomplete:"], b"q".to_vec())],
+        &[(vec!["· 30 rows", "Scan incomplete:"], b"q".to_vec())],
         12,
         220,
         1,
@@ -13387,8 +13392,9 @@ fn inventory_local_refresh_merges_the_cache_into_the_new_config_without_a_provid
             (REMOTE_READY.to_vec(), b"kkj".to_vec()),
             (REMOTE_READY.to_vec(), b"R".to_vec()),
             (
+                // The failed lookup of the new `added` row is a session problem, so it exits 1.
                 vec![
-                    "NORMAL · 7 rows",
+                    "NORMAL · 7 rows · 1 problem",
                     "No active operation",
                     "bitbucket.org: ready, 1 candidate",
                     "github.com: ready, 3 candidates",
@@ -13398,7 +13404,7 @@ fn inventory_local_refresh_merges_the_cache_into_the_new_config_without_a_provid
         ],
         32,
         132,
-        0,
+        1,
         |action, _, frame| {
             rows.push(inventory_rows(&screen_text(frame, 32, 132)));
             if action == 1 {
