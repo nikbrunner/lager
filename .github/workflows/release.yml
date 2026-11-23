@@ -7,8 +7,11 @@ on:
         description: Existing release tag to publish or replace assets for
         required: true
         type: string
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
+  push:
     tags:
       - 'v*.*.*'
 
@@ -17,7 +20,10 @@ permissions:
 
 jobs:
   release:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -26,7 +32,16 @@ jobs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
+      # release-please reads the tip of main, so a commit pushed after the one CI passed waits for its own CI.
+      - id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          tip="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          echo "current=$([ "$tip" = "$SHA" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - id: release
+        if: steps.tip.outputs.current == 'true'
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         with:
           config-file: .github/release-please-config.json

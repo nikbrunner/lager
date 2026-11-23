@@ -172,7 +172,7 @@ Use the sandboxed [human acceptance checklist](HOW_TO_TEST.md) to verify the
 repository-management journeys. Its results come from macOS; Linux acceptance is
 still open.
 
-release-please cuts releases from `main`. The release workflow builds archives
+release-please cuts releases from `main` once CI passes on its tip. The release workflow builds archives
 for Linux and macOS on x86_64 and ARM64, checks the tag against the crate version
 and `lager --version`, and publishes checksums and build provenance. Before a
 release, the help text and the config, CLI and JSON references match the behavior,
