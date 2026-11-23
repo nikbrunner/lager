@@ -10,6 +10,8 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
@@ -1317,6 +1319,7 @@ impl TerminalSession {
                 &selection.query,
                 &selection.filter,
                 &session.root,
+                &session.home,
                 session.hosted_paths(),
             );
             selection.reconcile(&visible_rows, session.complete);
@@ -1915,7 +1918,13 @@ impl TerminalSession {
                             }
                             Some(Action::Up) => selection.move_by(&visible_rows, -1),
                             Some(Action::Down) => selection.move_by(&visible_rows, 1),
-                            None if view == View::Search => edit_text(&mut selection.query, key),
+                            None if view == View::Search => {
+                                let before = selection.query.clone();
+                                edit_text(&mut selection.query, key);
+                                // A new query ranks the rows anew; the cursor returns to the
+                                // best match.
+                                selection.moved &= selection.query == before;
+                            }
                             _ => {}
                         }
                     }
@@ -2209,7 +2218,7 @@ impl TerminalSession {
                 if editing {
                     query_line.extend([Span::raw(query), Span::raw("█")]);
                 } else if query.is_empty() {
-                    query_line.push(Span::styled("Search repositories, paths, origins…", dim()));
+                    query_line.push(Span::styled("Search repositories, or paths with /…", dim()));
                 } else {
                     query_line.push(Span::raw(query));
                 }
@@ -3405,7 +3414,11 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
         Mode::Normal => {
             let mut entries = vec![
                 entry(pair(Down, Up), "previous / next row", &[Down, Up]),
-                entry(single(Search), "live fuzzy search", &[Search]),
+                entry(
+                    single(Search),
+                    "ranked search by name and owner, / by path",
+                    &[Search],
+                ),
                 entry(single(ClearSearch), "clear search", &[ClearSearch]),
                 entry(single(Mark), "toggle current mark", &[Mark]),
                 entry(single(Add), "Add repository", &[Add]),
@@ -3466,7 +3479,11 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
             ),
             entry(single(Accept), "choose", &[Accept]),
             entry(single(Cancel), "back", &[Cancel]),
-            entry(single(Search), "live fuzzy search", &[Search]),
+            entry(
+                single(Search),
+                "ranked search by name and owner, / by path",
+                &[Search],
+            ),
             entry(single(ClearSearch), "clear search", &[ClearSearch]),
             entry(single(Inspect), "Inspect repository", &[Inspect]),
             entry(single(Refresh), "refresh local/config state", &[Refresh]),
@@ -6066,42 +6083,53 @@ fn matching_rows<'a>(
     query: &str,
     filter: &filter::Filter,
     root: &Path,
+    home: &Path,
     hosted: Option<&HashSet<PathBuf>>,
 ) -> Vec<&'a model::InventoryRow> {
-    report
+    let rows = report
         .rows
         .iter()
-        .filter(|row| filter.matches(row, root, hosted) && row_matches_query(row, query))
-        .collect()
-}
-
-fn row_matches_query(row: &model::InventoryRow, query: &str) -> bool {
-    query.is_empty()
-        || fuzzy_subsequence(&row.repository, query)
-        || fuzzy_subsequence(&row.path, query)
-        || fuzzy_subsequence(&row.origin, query)
-        || fuzzy_subsequence(row.registration.label(), query)
-        || fuzzy_subsequence(row.checkout.label(), query)
-        || fuzzy_subsequence(&row.branch.label(), query)
-        || fuzzy_subsequence(&row.changes.label(), query)
-        || fuzzy_subsequence(registration_text(&row.registration), query)
-        || fuzzy_subsequence(checkout_text(&row.checkout), query)
-        || fuzzy_subsequence(&observation_text(&row.branch), query)
-        || fuzzy_subsequence(&observation_text(&row.changes), query)
-}
-
-fn fuzzy_subsequence(value: &str, query: &str) -> bool {
-    let mut query = query.chars().flat_map(char::to_lowercase);
-    let mut wanted = query.next();
-    for character in value.chars().flat_map(char::to_lowercase) {
-        if Some(character) == wanted {
-            wanted = query.next();
-        }
-        if wanted.is_none() {
-            return true;
-        }
+        .filter(|row| filter.matches(row, root, hosted));
+    if query.is_empty() {
+        return rows.collect();
     }
-    wanted.is_none()
+    ranked_rows(rows, query, &short_names(&report.rows), root, home)
+}
+
+/// Keeps the rows that match `query` in fzf syntax, best score first; equal scores keep the
+/// given order. A query with a `/` scores the local path as the grid shows it, any other the
+/// repository name and the owner.
+fn ranked_rows<'a>(
+    rows: impl Iterator<Item = &'a model::InventoryRow>,
+    query: &str,
+    names: &HashMap<model::RowKey, String>,
+    root: &Path,
+    home: &Path,
+) -> Vec<&'a model::InventoryRow> {
+    let paths = query.contains('/');
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let mut matcher = Matcher::new(if paths {
+        Config::DEFAULT.match_paths()
+    } else {
+        Config::DEFAULT
+    });
+    let mut buffer = Vec::new();
+    let mut scored = rows
+        .filter_map(|row| {
+            let haystack = if paths {
+                home_relative(Path::new(&row.path), home)
+            } else {
+                let name = &names[&row.key];
+                owner(row, root)
+                    .map_or_else(|| name.clone(), |owner| format!("{name} {}", escape(owner)))
+            };
+            pattern
+                .score(Utf32Str::new(&haystack, &mut buffer), &mut matcher)
+                .map(|score| (row, score))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
+    scored.into_iter().map(|(row, _)| row).collect()
 }
 
 const HEADINGS: [&str; 6] = [
@@ -6436,6 +6464,7 @@ fn abbreviate_name(name: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::path::Path;
     use std::rc::Rc;
     use std::sync::mpsc;
 
@@ -6685,11 +6714,88 @@ mod tests {
         assert_eq!(super::checkout_text(&CheckoutState::Unknown), "unknown");
     }
 
+    /// Ranks rows at `/home/repos/<owner>/<name>` in the given order and returns their
+    /// `<owner>/<name>`. Names are set by hand, so equal names stay unqualified.
+    fn ranked(rows: &[&str], query: &str) -> Vec<String> {
+        let rows = rows
+            .iter()
+            .map(|path| {
+                let mut row = display_row(
+                    RowKey::Path(format!("/home/repos/{path}").into()),
+                    CheckoutState::Cloned,
+                );
+                row.path = format!("/home/repos/{path}");
+                row
+            })
+            .collect::<Vec<_>>();
+        let names = rows
+            .iter()
+            .map(|row| {
+                let name = row.path.rsplit('/').next().unwrap().to_owned();
+                (row.key.clone(), name)
+            })
+            .collect();
+        super::ranked_rows(
+            rows.iter(),
+            query,
+            &names,
+            Path::new("/home/repos"),
+            Path::new("/home"),
+        )
+        .into_iter()
+        .map(|row| row.path.trim_start_matches("/home/repos/").to_owned())
+        .collect()
+    }
+
     #[test]
-    fn search_matches_the_labels_the_table_shows() {
-        let mut clean = display_row(RowKey::Path("/repos/clean".into()), CheckoutState::Cloned);
-        clean.changes = ObservationField::Clean;
-        assert!(super::row_matches_query(&clean, "known clean"));
+    fn search_ranks_name_matches_above_scattered_ones() {
+        let rows = [
+            "black-atom/node-tests",
+            "black-atom/notes",
+            "nikbrunner/.github",
+            "nikbrunner/notes",
+        ];
+        assert_eq!(
+            ranked(&rows, "notes"),
+            [
+                "black-atom/notes",
+                "nikbrunner/notes",
+                "black-atom/node-tests"
+            ]
+        );
+    }
+
+    #[test]
+    fn search_matches_owners_and_combines_words() {
+        let rows = ["black-atom/core", "nikbrunner/notes", "black-atom/notes"];
+        assert_eq!(
+            ranked(&rows, "black"),
+            ["black-atom/core", "black-atom/notes"]
+        );
+        assert_eq!(ranked(&rows, "notes black"), ["black-atom/notes"]);
+        assert_eq!(ranked(&rows, "^core"), ["black-atom/core"]);
+        assert_eq!(ranked(&rows, "notes !nik"), ["black-atom/notes"]);
+        // A repository directly in the root has no owner, so its name ends the text.
+        assert_eq!(ranked(&["solo"], "solo$"), ["solo"]);
+        // Smart case: an uppercase letter makes the word case-sensitive.
+        assert!(ranked(&rows, "Notes").is_empty());
+    }
+
+    #[test]
+    fn search_with_a_slash_matches_the_local_path_only() {
+        let rows = ["nikbrunner/atom", "black-atom/core", "black-atom/notes"];
+        assert_eq!(
+            ranked(&rows, "black-atom/"),
+            ["black-atom/core", "black-atom/notes"]
+        );
+        assert_eq!(ranked(&rows, "~/repos/nik"), ["nikbrunner/atom"]);
+        assert_eq!(ranked(&rows, "repos/").len(), 3);
+    }
+
+    #[test]
+    fn search_keeps_the_given_order_for_equal_scores() {
+        let rows = ["c-owner/notes", "a-owner/notes", "b-owner/notes"];
+        assert_eq!(ranked(&rows, "notes"), rows);
     }
 
     #[test]

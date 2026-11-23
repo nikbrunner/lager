@@ -147,9 +147,11 @@ an operational failure occurred during the run, even after a successful
 refresh; otherwise it returns `0`. Informational exclusions and deliberate
 cancellation do not count as failures.
 
-Use `j`/`k` or arrow keys to select a row, `/` for live fuzzy search, Space to
+Use `j`/`k` or arrow keys to select a row, `/` for live ranked search, Space to
 mark the row, `a` to add a repository by reference, `r` to remove the checkout and keep its registration, `w` for the worktrees of the selected repository, `g` for lazygit in its checkout, `f` to filter the rows by property, `s` for its session, Enter to inspect the selected repository, `m` for the action menu,
-and `?` for effective bindings. Search matches full attributes, paths and origins; Enter/Esc
+and `?` for effective bindings. Search ranks the rows by repository name and owner, best
+match first, in fzf syntax (space, `'`, `^`, `$`, `!`, smart case); a query with a `/`
+matches the local path as the grid shows it. Typing moves the cursor to the best match. Enter/Esc
 retain the search and normal-mode Backspace clears it. Ordinary search letters
 remain text; F1 opens search help. Help describes the mode it was opened from.
 Marks survive search, filter and refresh while their exact target remains; the search

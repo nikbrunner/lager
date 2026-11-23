@@ -59,9 +59,9 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
             &[
                 (
                     vec!["absent: Scanning", "NORMAL · 5 rows", "1 modified"],
-                    b"/org/alpha".to_vec(),
+                    b"/alpha".to_vec(),
                 ),
-                (vec!["SEARCH · 2 rows", "/ org/alpha"], b"\r".to_vec()),
+                (vec!["SEARCH · 2 rows", "/ alpha"], b"\r".to_vec()),
                 // The filtered rows order by owner, so `alpha` in `org` is the second.
                 (vec!["NORMAL · 2 rows"], b"j\r".to_vec()),
                 (
@@ -134,7 +134,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         );
         assert_eq!(lines[1], "  Local + declarations · remote off", "{screen}");
         assert_eq!(
-            lines[2], "  / Search repositories, paths, origins…",
+            lines[2], "  / Search repositories, or paths with /…",
             "{screen}"
         );
         assert_eq!(lines[3], "", "{screen}");
@@ -284,7 +284,7 @@ fn inventory_frames_follow_the_canvas_regions_at_wide_and_compact_sizes() {
         let screen = screen_text(search, rows, cols);
         let lines = screen.lines().collect::<Vec<_>>();
         assert!(lines[0].ends_with("SEARCH · 2 rows"), "{screen}");
-        assert_eq!(lines[2], "  / org/alpha█", "{screen}");
+        assert_eq!(lines[2], "  / alpha█", "{screen}");
         assert_eq!(inventory_rows(&screen).len(), 2, "{screen}");
         assert_eq!(
             lines[rows - 2],
@@ -820,7 +820,7 @@ fn inventory_root_menu_uses_effective_hints_and_preserves_search_and_selection()
 
 #[cfg(unix)]
 #[test]
-fn inventory_search_matches_full_origins_and_keeps_text_and_filters_safe() {
+fn inventory_search_with_a_slash_matches_local_paths_and_keeps_text_and_filters_safe() {
     let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
@@ -840,28 +840,25 @@ fn inventory_search_matches_full_origins_and_keeps_text_and_filters_safe() {
     run_inventory_pty_actions(
         support::lager(&home, &config).arg("tui"),
         &[
-            (vec!["alpha", "beta"], b"/gto/rgap".to_vec()),
+            (vec!["alpha", "beta"], b"/hdn/".to_vec()),
             (
-                vec!["SEARCH ·", "/ gto/rgap", "alpha", "excluded"],
+                vec!["SEARCH · 1 row", "/ hdn/", "alpha", "excluded"],
                 b"raRq".to_vec(),
             ),
             (
-                vec!["SEARCH ·", "/ gto/rgapraRq", "No matching repositories"],
+                vec!["SEARCH ·", "/ hdn/raRq", "No matching repositories"],
                 b"\x7f\x7f\x7f\x7f".to_vec(),
             ),
             (
-                vec!["SEARCH ·", "/ gto/rgap", "selected: alpha"],
+                vec!["SEARCH ·", "/ hdn/", "selected: alpha"],
                 b"\r".to_vec(),
             ),
+            (vec!["NORMAL ·", "/ hdn/", "selected: alpha"], b"/".to_vec()),
             (
-                vec!["NORMAL ·", "/ gto/rgap", "selected: alpha"],
-                b"/".to_vec(),
-            ),
-            (
-                vec!["SEARCH ·", "/ gto/rgap", "selected: alpha"],
+                vec!["SEARCH ·", "/ hdn/", "selected: alpha"],
                 b"\x1b".to_vec(),
             ),
-            (vec!["NORMAL ·", "/ gto/rgap"], b"\x7f".to_vec()),
+            (vec!["NORMAL ·", "/ hdn/"], b"\x7f".to_vec()),
             (
                 vec!["NORMAL · 2 rows", "/ Search repositories", "beta"],
                 b"q".to_vec(),
@@ -874,7 +871,7 @@ fn inventory_search_matches_full_origins_and_keeps_text_and_filters_safe() {
 
 #[cfg(unix)]
 #[test]
-fn inventory_search_matches_checkout_state_without_matching_contrasting_rows() {
+fn inventory_search_ranks_name_matches_first_and_ignores_status() {
     let temp = temp_dir();
     let home = temp.path().join("home");
     let root = home.join("repos");
@@ -882,17 +879,20 @@ fn inventory_search_matches_checkout_state_without_matching_contrasting_rows() {
     fs::create_dir_all(&root).unwrap();
     fs::write(
         &config,
-        "root = \"repos\"\n\n[[repositories]]\nurl = \"github.com/aid/alpha\"\n\n[[repositories]]\nurl = \"github.com/aid/beta\"\n",
+        "root = \"repos\"\n\n[[repositories]]\nurl = \"github.com/aid/.github\"\n\n[[repositories]]\nurl = \"github.com/aid/node-tests\"\n\n[[repositories]]\nurl = \"github.com/aid/notes\"\n",
     )
     .unwrap();
-    init_repo(&root.join("aid/beta"), "git@github.com:aid/beta.git", true);
 
     let transcript = run_inventory_pty_actions(
         support::lager(&home, &config).arg("tui"),
         &[
             (vec!["No active operation"], b"/missing\r".to_vec()),
             (
-                vec!["NORMAL · 1 row", "/ missing", "alpha", "missing"],
+                vec!["NORMAL · 0 rows", "/ missing", "No matching repositories"],
+                b"\x7f/notes\r".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 2 rows", "/ notes", "selected: notes"],
                 b"q".to_vec(),
             ),
         ],
@@ -901,12 +901,8 @@ fn inventory_search_matches_checkout_state_without_matching_contrasting_rows() {
     );
     let screen = screen_text(&transcript, 24, 220);
     let rows = inventory_rows(&screen);
-    assert_eq!(rows.len(), 1, "{screen}");
-    assert_eq!(rows[0][0], "alpha", "{screen}");
-    assert!(
-        !screen.contains("beta"),
-        "checkout-state query retained contrasting row:\n{screen}"
-    );
+    let names = rows.iter().map(|row| row[0].as_str()).collect::<Vec<_>>();
+    assert_eq!(names, ["notes", "node-tests"], "{screen}");
 }
 
 #[cfg(unix)]
@@ -917,7 +913,6 @@ fn inventory_filter_pulls_the_scrolled_table_back_to_the_first_match() {
     let config = temp.path().join("config.toml");
     fs::create_dir_all(home.join("repos")).unwrap();
     let mut text = String::from("root = \"repos\"\n");
-    // Search also matches the absolute temp path, so the query must be one no temp dir spells.
     for name in (1..=30)
         .map(|index| format!("r{index:02}"))
         .chain(["zphqxjvk1".to_owned(), "zphqxjvk2".to_owned()])
@@ -1546,7 +1541,7 @@ fn inventory_empty_and_partial_states_follow_the_canvas_at_both_sizes() {
         );
         assert_eq!(lines[1], "  Local + declarations · remote off", "{screen}");
         assert_eq!(
-            lines[2], "  / Search repositories, paths, origins…",
+            lines[2], "  / Search repositories, or paths with /…",
             "{screen}"
         );
         assert!(lines[4].trim_start().starts_with("repository"), "{screen}");
@@ -1818,7 +1813,7 @@ exclude = ["repo"]
                 b"\x1b".to_vec(),
             ),
             (vec!["NORMAL ·", "absent: Inspect /"], b"\x7f".to_vec()),
-            (vec!["NORMAL · 5 rows"], b"/sub\r\r".to_vec()),
+            (vec!["NORMAL · 5 rows"], b"/sub/\r\r".to_vec()),
             (
                 vec![
                     "Inspect / repo",
@@ -3593,14 +3588,18 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
         &[
             (
                 vec!["No active operation", "3 rows"],
-                b"kk/cloned\r".to_vec(),
+                b"/~/repos/\rkk".to_vec(),
             ),
             (
-                vec!["NORMAL · 3 rows", "/ cloned", "selected: same"],
+                vec!["NORMAL · 3 rows", "/ ~/repos/", "selected: same"],
                 b"R".to_vec(),
             ),
             (
-                vec!["NORMAL · 1 row", "/ cloned", "~/repos/alpha"],
+                vec![
+                    "NORMAL · 3 rows",
+                    "/ ~/repos/",
+                    "absent: No active operation",
+                ],
                 Vec::new(),
             ),
             (
@@ -3608,7 +3607,11 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
                 b"R".to_vec(),
             ),
             (
-                vec!["NORMAL · 1 row", "/ cloned", "~/repos/alpha"],
+                vec![
+                    "NORMAL · 3 rows",
+                    "/ ~/repos/",
+                    "absent: No active operation",
+                ],
                 Vec::new(),
             ),
             (
@@ -3653,7 +3656,7 @@ fn inventory_refresh_preserves_selection_across_checkout_and_declaration_rows() 
     ] {
         let screen = screen_text(frame, 24, 500);
         assert!(
-            screen.contains("NORMAL · 3 rows") && screen.contains("  / cloned"),
+            screen.contains("NORMAL · 3 rows") && screen.contains("  / ~/repos/"),
             "search did not survive refresh: {screen}"
         );
         let highlighted = highlighted_inventory_row(frame, 24, 500, "same")
@@ -4245,10 +4248,10 @@ fn inventory_search_and_inspection_remain_live_during_a_controlled_probe() {
             (vec!["Inspect / unavailable"], b"\x1b".to_vec()),
             (
                 vec!["Path and origin:", "NORMAL ·", "/ zphrtrgt"],
-                b"\x7f/git@github.com:org/alpha.git\r".to_vec(),
+                b"\x7f/~/repos/hidden/zephyr-target\r".to_vec(),
             ),
             (
-                vec!["NORMAL ·", "/ git@github.com:org/alpha.git", "1 row"],
+                vec!["NORMAL ·", "/ ~/repos/hidden/zephyr-target", "1 row"],
                 b"q".to_vec(),
             ),
         ],
@@ -4272,7 +4275,6 @@ fn inventory_search_and_inspection_remain_live_during_a_controlled_probe() {
 #[test]
 fn inventory_during_a_scan_inspect_and_the_menu_keep_an_unobserved_destination_unknown() {
     let temp = temp_dir();
-    // Search also matches the absolute temp path, so the query must be one no temp dir spells.
     let home = temp.path().join("home");
     let root = home.join("repos");
     let config = temp.path().join("config.toml");
@@ -4595,21 +4597,16 @@ fn inventory_popup_q_returns_to_the_previous_view() {
     run_inventory_pty_actions(
         support::lager(&home, &config).arg("tui"),
         &[
-            (vec!["Path and origin:"], b"/github.com/org/beta\r".to_vec()),
+            (vec!["Path and origin:"], b"/org/beta\r".to_vec()),
             (
-                vec!["NORMAL ·", "/ github.com/org/beta", "selected: beta"],
+                vec!["NORMAL ·", "/ org/beta", "selected: beta"],
                 b"m".to_vec(),
             ),
             (vec!["All actions"], b"?".to_vec()),
             (vec!["Keyboard / effective bindings"], b"q".to_vec()),
             (vec!["All actions", "absent: HELP"], b"q".to_vec()),
             (
-                vec![
-                    "NORMAL ·",
-                    "/ github.com/org/beta",
-                    "selected: beta",
-                    "absent: MENU",
-                ],
+                vec!["NORMAL ·", "/ org/beta", "selected: beta", "absent: MENU"],
                 b"\r".to_vec(),
             ),
             (vec!["Inspect / beta"], b"?".to_vec()),
@@ -4618,7 +4615,7 @@ fn inventory_popup_q_returns_to_the_previous_view() {
             (
                 vec![
                     "NORMAL ·",
-                    "/ github.com/org/beta",
+                    "/ org/beta",
                     "selected: beta",
                     "absent: INSPECT",
                 ],
@@ -4626,21 +4623,16 @@ fn inventory_popup_q_returns_to_the_previous_view() {
             ),
             (vec!["Keyboard / effective bindings"], b"q".to_vec()),
             (
-                vec![
-                    "NORMAL ·",
-                    "/ github.com/org/beta",
-                    "selected: beta",
-                    "absent: HELP",
-                ],
+                vec!["NORMAL ·", "/ org/beta", "selected: beta", "absent: HELP"],
                 b"/\x1bOP".to_vec(),
             ),
             (vec!["Keyboard / effective bindings"], b"q".to_vec()),
             (
-                vec!["SEARCH ·", "/ github.com/org/beta", "absent: HELP"],
+                vec!["SEARCH ·", "/ org/beta", "absent: HELP"],
                 b"q".to_vec(),
             ),
-            (vec!["SEARCH ·", "/ github.com/org/betaq"], b"\x1b".to_vec()),
-            (vec!["NORMAL ·", "/ github.com/org/betaq"], vec![127]),
+            (vec!["SEARCH ·", "/ org/betaq"], b"\x1b".to_vec()),
+            (vec!["NORMAL ·", "/ org/betaq"], vec![127]),
             (
                 vec!["NORMAL · 2 rows", "/ Search repositories"],
                 b"q".to_vec(),
@@ -6094,7 +6086,7 @@ fn inventory_registers_every_marked_row_including_hidden_ones_and_reports_each_o
             ),
             (
                 vec!["NORMAL", "absent: Inspect /", "selected: local"],
-                b"kk j j /github.com/org/beta\r".to_vec(),
+                b"kk j j /org/beta\r".to_vec(),
             ),
             (
                 vec!["NORMAL · 1 row", "3 marked · 2 hidden", "selected: beta"],
@@ -6338,7 +6330,7 @@ fn inventory_cancelled_preview_changes_nothing_and_keeps_query_cursor_and_marks(
             message,
             "NORMAL · 2 rows",
             "1 marked · 1 hidden",
-            "/ github.com/org/alpha",
+            "/ org/alpha",
             selected,
             "absent: problem",
             "absent: Batch /",
@@ -6350,10 +6342,10 @@ fn inventory_cancelled_preview_changes_nothing_and_keeps_query_cursor_and_marks(
         &[
             (
                 vec!["NORMAL · 3 rows", "absent: Scanning"],
-                b"kkjj /github.com/org/alpha\r".to_vec(),
+                b"kkjj /org/alpha\r".to_vec(),
             ),
             (
-                vec!["NORMAL · 2 rows", "1 marked · 1 hidden", "selected: alpha2"],
+                vec!["NORMAL · 2 rows", "1 marked · 1 hidden", "selected: alpha1"],
                 b"m\r\r".to_vec(),
             ),
             (
@@ -6367,7 +6359,7 @@ fn inventory_cancelled_preview_changes_nothing_and_keeps_query_cursor_and_marks(
                 b"q".to_vec(),
             ),
             (
-                kept("Register cancelled · nothing changed", "selected: alpha2"),
+                kept("Register cancelled · nothing changed", "selected: alpha1"),
                 b"km\rj\r".to_vec(),
             ),
             (
@@ -6654,8 +6646,8 @@ fn inventory_cancelled_add_changes_nothing_and_keeps_query_cursor_and_marks() {
         "Add cancelled · nothing changed",
         "absent: Add /",
         "1 marked · 1 hidden",
-        "/ github.com/org/alpha",
-        "selected: alpha2",
+        "/ org/alpha",
+        "selected: alpha1",
         "absent: problem",
         "absent: Batch /",
     ];
@@ -6665,10 +6657,10 @@ fn inventory_cancelled_add_changes_nothing_and_keeps_query_cursor_and_marks() {
         &[
             (
                 vec!["NORMAL · 3 rows", "absent: Scanning"],
-                b"kkjj /github.com/org/alpha\r".to_vec(),
+                b"kkjj /org/alpha\r".to_vec(),
             ),
             (
-                vec!["NORMAL · 2 rows", "1 marked · 1 hidden", "selected: alpha2"],
+                vec!["NORMAL · 2 rows", "1 marked · 1 hidden", "selected: alpha1"],
                 b"a".to_vec(),
             ),
             (
@@ -8265,7 +8257,7 @@ fn inventory_removal_confirmation_lists_clean_loss_and_blocked_targets_and_cance
         &[
             (
                 vec!["NORMAL · 4 rows", "absent: Scanning"],
-                b"kk j j j /github.com/org/draft\r".to_vec(),
+                b"kk j j j /org/draft\r".to_vec(),
             ),
             (
                 vec!["NORMAL · 1 row", "4 marked · 3 hidden", "pair: r remove"],
@@ -10610,8 +10602,9 @@ fn output(command: &mut Command) -> std::process::Output {
 static TRANSCRIPT_ID: AtomicU64 = AtomicU64::new(1);
 static TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
-/// A fresh directory named by digits under a fixed base. Search matches absolute paths, so a
-/// fixture path must not spell a test's query by chance, whatever TMPDIR or a random name holds.
+/// A fresh directory named by digits under a fixed base. A path search sees a path outside home
+/// in full, so a fixture path must not spell a test's query by chance, whatever TMPDIR or a random
+/// name holds.
 fn temp_dir() -> tempfile::TempDir {
     let name = format!(
         "{}-{}",
