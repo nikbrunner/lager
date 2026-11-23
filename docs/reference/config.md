@@ -209,7 +209,7 @@ page_down = ["x", "PageDown"]
 ```
 
 Normal actions are `up`, `down`, `refresh`, `search`, `clear_search`, `inspect`,
-`menu`, `mark`, `add`, `remove`, `worktrees` (default `w`), `lazygit` (default `g`), `filter` (default `f`), `session` (default `s`), `help` and `quit`. `lazygit` opens lazygit in the current row's checkout. `filter` opens the Filter popup. `open_sessions` (default `Ctrl+o`) ticks or clears the Session value `open` of the filter, and needs a [`[session]` section](#session). `session` opens the session of the current row and needs a [`[session]` section](#session); without one its key does nothing. `register`, `unregister`,
+`menu`, `mark`, `add`, `remove`, `worktrees` (default `w`), `lazygit` (default `g`), `filter` (default `f`), `session` (default `s`), `help` and `quit`. `lazygit` opens lazygit in the current row's checkout. `filter` opens the Filter popup. `open_sessions` (default `Ctrl+o`) ticks or clears the Session value `open` of the filter, and needs a [`[session]` section](#session). `dirty` (default `Ctrl+d`) ticks or clears the Changes value `dirty` of the filter. `session` opens the session of the current row and needs a [`[session]` section](#session); without one its key does nothing. `register`, `unregister`,
 `clone`, `clone_register`, `remove_unregister`, `copy`, `open`, `remote`, `retry`
 and `archives` have no default key. Bound to a key, each runs its menu entry on
 the marked rows or the current row, with the same previews, eligibility and
@@ -264,8 +264,8 @@ actions:
 [inventory.keys.normal] binds x to remove and to clone
 ```
 
-Fourteen defaults give way to an explicit key of the same mode instead of colliding:
-`worktrees` (`w`), `lazygit` (`g`), `filter` (`f`), `open_sessions` (`Ctrl+o`) and `session` (`s`) in normal, `add` (`a`), `remove` (`r`),
+Fifteen defaults give way to an explicit key of the same mode instead of colliding:
+`worktrees` (`w`), `lazygit` (`g`), `filter` (`f`), `open_sessions` (`Ctrl+o`), `dirty` (`Ctrl+d`) and `session` (`s`) in normal, `add` (`a`), `remove` (`r`),
 `copy` (`c`) and `session` (`s`) in worktrees, `copy` (`c`) in inspection, and
 `acknowledge` (Space), `session` (`s`), cancel's `q` and quit's Ctrl-Q in
 confirmation. The

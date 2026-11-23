@@ -1622,6 +1622,9 @@ impl TerminalSession {
                                     }
                                 }
                             }
+                            Some(Action::Dirty) if view == View::Normal => {
+                                selection.filter.toggle(&filter::Value::Dirty);
+                            }
                             Some(Action::Cancel | Action::Accept) if view == View::Filter => {
                                 selection.filtering = false;
                             }
@@ -3421,7 +3424,15 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
                     "lazygit in the current repository",
                     &[Lazygit],
                 ),
-                entry(single(Filter), "filter the rows by property", &[Filter]),
+                entry(
+                    [single(Filter), single(Dirty)]
+                        .into_iter()
+                        .filter(|keys| !keys.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" / "),
+                    "filter the rows by property / dirty only, on or off",
+                    &[Filter, Dirty],
+                ),
             ];
             if sessions {
                 entries.push(entry(

@@ -10249,7 +10249,8 @@ fn inventory_filter_keys_can_be_rebound_and_a_taken_f_keeps_the_config_loading()
             (
                 vec![
                     "Keyboard / effective bindings",
-                    "pair: F filter",
+                    "F / Ctrl+d",
+                    "pair: Ctrl+d filter",
                     "filter = [\"F\"]",
                 ],
                 b"\x1b".to_vec(),
@@ -10495,6 +10496,40 @@ fn inventory_ctrl_o_toggles_the_open_sessions_filter() {
             ),
             (
                 vec!["NORMAL · 2 rows", "absent: filter:", "other"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        170,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_ctrl_d_toggles_the_dirty_filter() {
+    let (_temp, home, config) = filter_fixture("");
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (
+                vec!["NORMAL · 5 rows", "absent: Scanning"],
+                b"\x04".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 2 of 5 rows", "filter: dirty", "absent: theme"],
+                b"f".to_vec(),
+            ),
+            (
+                vec!["FILTER · 2 of 5 rows", "[x] dirty", "[ ] clean"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 2 of 5 rows", "absent: Filter"],
+                b"\x04".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 5 rows", "absent: filter:", "theme"],
                 b"q".to_vec(),
             ),
         ],

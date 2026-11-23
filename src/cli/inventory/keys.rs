@@ -58,6 +58,7 @@ pub(super) enum Action {
     Toggle,
     ClearFilter,
     OpenSessions,
+    Dirty,
 }
 
 impl Action {
@@ -102,6 +103,7 @@ impl Action {
             Self::Toggle => "toggle",
             Self::ClearFilter => "clear_filter",
             Self::OpenSessions => "open_sessions",
+            Self::Dirty => "dirty",
         }
     }
 
@@ -141,6 +143,7 @@ impl Action {
                     | Self::Lazygit
                     | Self::Filter
                     | Self::OpenSessions
+                    | Self::Dirty
             ),
             Mode::Filter => matches!(
                 self,
@@ -218,12 +221,13 @@ impl Action {
 }
 
 /// Defaults that yield to an explicit key of the same mode, as (mode, action, key).
-const LATE_DEFAULTS: [(Mode, Action, &str); 14] = [
+const LATE_DEFAULTS: [(Mode, Action, &str); 15] = [
     (Mode::Normal, Action::Worktrees, "w"),
     (Mode::Normal, Action::Session, "s"),
     (Mode::Normal, Action::Lazygit, "g"),
     (Mode::Normal, Action::Filter, "f"),
     (Mode::Normal, Action::OpenSessions, "Ctrl+o"),
+    (Mode::Normal, Action::Dirty, "Ctrl+d"),
     (Mode::Worktrees, Action::Session, "s"),
     (Mode::Worktrees, Action::Add, "a"),
     (Mode::Worktrees, Action::Remove, "r"),
@@ -304,6 +308,7 @@ impl Bindings {
                     (Lazygit, vec!["g"]),
                     (Filter, vec!["f"]),
                     (OpenSessions, vec!["Ctrl+o"]),
+                    (Dirty, vec!["Ctrl+d"]),
                 ]);
             } else {
                 defaults.extend([

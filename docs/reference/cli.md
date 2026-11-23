@@ -187,6 +187,7 @@ session value keeps applying while the session list is refreshed.
 the popup, so the popup, the source line and the header show it. Without a
 `[session]` section, or before the session list has answered, it changes
 nothing and the status line gives the reason.
+`Ctrl+d` ticks or clears the Changes value `dirty` the same way.
 On a row whose host has a `github` provider, Repository actions… adds an
 `On <host>` group with Rename…, Archive, Delete everywhere… and the visibility
 entries. Their forms and confirmations, and the form of New repository on
