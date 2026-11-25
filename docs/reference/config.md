@@ -244,10 +244,15 @@ Worktrees drives the list of the Worktrees popup: navigation, paging, `add`
 (default `a`), `remove` (default `r`), `copy` (default `c`), `session` (default
 `s`), accept and cancel, which both close it, help and quit, with the popup
 defaults for those. `session` opens the session of the selected worktree and
-needs a [`[session]` section](#session). Its name
-form uses the input settings, its plan and its removal summary use the
-confirmation settings, and its blocker view scrolls with the inspection
-navigation keys and closes with the inspection accept and cancel keys.
+needs a [`[session]` section](#session). The Local and Remote tabs of Add
+worktree use the worktrees settings too: navigation and paging move the
+selection, `previous_tab` (default `[`) and `next_tab` (default `]`) switch the
+tab, `filter` (default `/`) types into the branch filter, `fetch` (default `f`)
+fetches on Remote, accept plans the selected branch and cancel closes Add. The
+tab keys also switch away from the New tab unless they can be part of a `NAME`.
+Its name form and its filter use the input settings, its plan and its removal
+summary use the confirmation settings, and its blocker view scrolls with the
+inspection navigation keys and closes with the inspection accept and cancel keys.
 
 Filter drives the Filter popup: navigation, paging, `toggle` (default Space),
 which ticks or clears the value under the cursor, `clear_filter` (default `c`),
@@ -278,9 +283,10 @@ actions:
 [inventory.keys.normal] binds x to remove and to clone
 ```
 
-Fifteen defaults give way to an explicit key of the same mode instead of colliding:
+Nineteen defaults give way to an explicit key of the same mode instead of colliding:
 `worktrees` (`w`), `lazygit` (`g`), `filter` (`f`), `open_sessions` (`Ctrl+o`), `dirty` (`Ctrl+d`) and `session` (`s`) in normal, `add` (`a`), `remove` (`r`),
-`copy` (`c`) and `session` (`s`) in worktrees, `copy` (`c`) in inspection, and
+`copy` (`c`), `session` (`s`), `previous_tab` (`[`), `next_tab` (`]`), `filter`
+(`/`) and `fetch` (`f`) in worktrees, `copy` (`c`) in inspection, and
 `acknowledge` (Space), `session` (`s`), cancel's `q` and quit's Ctrl-Q in
 confirmation. The
 yielding action then has no key in that mode, and Help says so; Worktrees…, Filter… and

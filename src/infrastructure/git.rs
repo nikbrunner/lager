@@ -11,7 +11,7 @@ use rustix::fs::{AtFlags, Dir, Mode, OFlags, mkdirat, openat, unlinkat};
 
 use crate::application::git_dir;
 use crate::application::ports::{
-    GitClient, GitRemoval, GitState, WorktreeCommandError, WorktreeEntry, WorktreeFault,
+    BranchRef, GitClient, GitRemoval, GitState, WorktreeCommandError, WorktreeEntry, WorktreeFault,
     WorktreeGit, WorktreeLocation, WorktreeState,
 };
 use crate::domain::repository::normalize_remote;
@@ -1037,16 +1037,30 @@ impl WorktreeGit for NativeGit {
             .collect())
     }
 
-    fn fetch(&self, repository: &Path, remote: &str) -> Result<(), String> {
-        let output = git_at(repository)
-            .args(["fetch", "--", remote])
-            .stdin(Stdio::null())
+    fn fetch(&self, repository: &Path, remote: &str, quiet: bool) -> Result<(), String> {
+        let mut command = git_at(repository);
+        command.args(["fetch", "--", remote]).stdin(Stdio::null());
+        if quiet {
+            command.env("GIT_TERMINAL_PROMPT", "0");
+            // SAFETY: setsid is async-signal-safe and allocates nothing. Without a controlling
+            // terminal, ssh and credential helpers cannot prompt on the terminal lager draws on.
+            unsafe {
+                command.pre_exec(|| {
+                    rustix::process::setsid()
+                        .map(drop)
+                        .map_err(std::io::Error::from)
+                });
+            }
+        }
+        let output = command
             .output()
             .map_err(|error| format!("could not start git: {error}"))?;
         if output.status.success() {
-            let mut stderr = std::io::stderr().lock();
-            let _ = stderr.write_all(&output.stdout);
-            let _ = stderr.write_all(&output.stderr);
+            if !quiet {
+                let mut stderr = std::io::stderr().lock();
+                let _ = stderr.write_all(&output.stdout);
+                let _ = stderr.write_all(&output.stderr);
+            }
             return Ok(());
         }
         Err(String::from_utf8_lossy(&output.stderr)
@@ -1062,6 +1076,32 @@ impl WorktreeGit for NativeGit {
                 },
                 str::to_owned,
             ))
+    }
+
+    fn branch_refs(&self, repository: &Path) -> Result<Vec<BranchRef>, String> {
+        let output = captured(git_at(repository).args([
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname)%00%(objectname)%00%(committerdate:unix)%00%(symref)",
+            "refs/heads",
+            "refs/remotes",
+        ]))?;
+        Ok(output
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| {
+                let mut fields = line.split(|byte| *byte == 0);
+                let name = std::str::from_utf8(fields.next()?).ok()?;
+                let commit = std::str::from_utf8(fields.next()?).ok()?;
+                let committed = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
+                // A symbolic ref such as `refs/remotes/origin/HEAD` names no branch of its own.
+                fields.next().filter(|symref| symref.is_empty())?;
+                Some(BranchRef {
+                    name: name.to_owned(),
+                    commit: commit.to_owned(),
+                    committed,
+                })
+            })
+            .collect())
     }
 
     fn last_fetch(&self, common_dir: &Path) -> Option<std::time::SystemTime> {

@@ -59,6 +59,9 @@ pub(super) enum Action {
     ClearFilter,
     OpenSessions,
     Dirty,
+    PreviousTab,
+    NextTab,
+    Fetch,
 }
 
 impl Action {
@@ -104,6 +107,9 @@ impl Action {
             Self::ClearFilter => "clear_filter",
             Self::OpenSessions => "open_sessions",
             Self::Dirty => "dirty",
+            Self::PreviousTab => "previous_tab",
+            Self::NextTab => "next_tab",
+            Self::Fetch => "fetch",
         }
     }
 
@@ -211,6 +217,10 @@ impl Action {
                     | Self::Remove
                     | Self::Copy
                     | Self::Session
+                    | Self::PreviousTab
+                    | Self::NextTab
+                    | Self::Filter
+                    | Self::Fetch
                     | Self::Accept
                     | Self::Cancel
                     | Self::Help
@@ -221,7 +231,7 @@ impl Action {
 }
 
 /// Defaults that yield to an explicit key of the same mode, as (mode, action, key).
-const LATE_DEFAULTS: [(Mode, Action, &str); 15] = [
+const LATE_DEFAULTS: [(Mode, Action, &str); 19] = [
     (Mode::Normal, Action::Worktrees, "w"),
     (Mode::Normal, Action::Session, "s"),
     (Mode::Normal, Action::Lazygit, "g"),
@@ -232,6 +242,10 @@ const LATE_DEFAULTS: [(Mode, Action, &str); 15] = [
     (Mode::Worktrees, Action::Add, "a"),
     (Mode::Worktrees, Action::Remove, "r"),
     (Mode::Worktrees, Action::Copy, "c"),
+    (Mode::Worktrees, Action::PreviousTab, "["),
+    (Mode::Worktrees, Action::NextTab, "]"),
+    (Mode::Worktrees, Action::Filter, "/"),
+    (Mode::Worktrees, Action::Fetch, "f"),
     (Mode::Inspection, Action::Copy, "c"),
     (Mode::Confirmation, Action::Acknowledge, "Space"),
     (Mode::Confirmation, Action::Session, "s"),
@@ -335,6 +349,10 @@ impl Bindings {
                         (Remove, vec!["r"]),
                         (Copy, vec!["c"]),
                         (Session, vec!["s"]),
+                        (PreviousTab, vec!["["]),
+                        (NextTab, vec!["]"]),
+                        (Filter, vec!["/"]),
+                        (Fetch, vec!["f"]),
                     ]);
                 }
                 if mode == Mode::Filter {
@@ -613,4 +631,23 @@ fn parse_key(value: &str) -> Result<KeyEvent, String> {
         return Err(format!("unsupported Ctrl binding `{value}`"));
     }
     Ok(event)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Action, Bindings, Mode, parse_key};
+
+    #[test]
+    fn a_worktrees_default_yields_to_an_explicit_key_of_another_action() {
+        let overrides = [(
+            "worktrees".to_owned(),
+            [("fetch".to_owned(), vec!["/".to_owned()])].into(),
+        )]
+        .into();
+        let bindings = Bindings::load(overrides).expect("the map loads without a collision");
+        let slash = parse_key("/").unwrap();
+        assert_eq!(bindings.action(Mode::Worktrees, slash), Some(Action::Fetch));
+        assert!(bindings.keys(Mode::Worktrees, Action::Filter).is_empty());
+        assert!(bindings.unbound(Mode::Worktrees).contains(&Action::Filter));
+    }
 }

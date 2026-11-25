@@ -373,7 +373,7 @@ fn add(settings: &Settings, args: WorktreeAddArgs, layout: Option<&Layout>) -> i
         }
     };
     if args.fetch {
-        match worktrees::fetch_remotes(&GIT, &repository) {
+        match worktrees::fetch_remotes(&GIT, &repository, false) {
             Ok(failures) => {
                 for (remote, reason) in failures {
                     eprintln!(

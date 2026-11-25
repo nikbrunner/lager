@@ -420,6 +420,17 @@ pub struct WorktreeEntry {
     pub prune_reason: Option<String>,
 }
 
+/// One branch ref with the commit it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchRef {
+    /// Full ref, such as `refs/heads/feat/x` or `refs/remotes/origin/feat/x`.
+    pub name: String,
+    /// Full object ID.
+    pub commit: String,
+    /// Committer date of the commit, in seconds since the Unix epoch.
+    pub committed: i64,
+}
+
 /// `git_failed`, `unreadable` or `invalid_metadata`, with a readable message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeFault {
@@ -477,8 +488,11 @@ pub trait WorktreeGit {
     /// The names of the repository's remotes.
     fn remotes(&self, repository: &Path) -> Result<Vec<String>, String>;
     /// `git fetch <remote>`, leaving pruning to Git's configuration. Git's output goes to
-    /// stderr; the error is the first line of Git's complaint.
-    fn fetch(&self, repository: &Path, remote: &str) -> Result<(), String>;
+    /// stderr; with `quiet` it is dropped and Git runs detached from the terminal, so it asks
+    /// for no credentials there. The error is the first line of Git's complaint.
+    fn fetch(&self, repository: &Path, remote: &str, quiet: bool) -> Result<(), String>;
+    /// Every local and remote-tracking branch, the newest commit first.
+    fn branch_refs(&self, repository: &Path) -> Result<Vec<BranchRef>, String>;
     /// When a fetch last wrote `FETCH_HEAD` in `common_dir`; `None` when it never did.
     fn last_fetch(&self, common_dir: &Path) -> Option<std::time::SystemTime>;
     /// The origin URL as written, before `url.<base>.insteadOf` rewrites; `None` without an

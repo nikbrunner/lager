@@ -11577,7 +11577,8 @@ fn inventory_worktree_popup_adds_a_worktree_through_input_and_plan() {
         "fix"
     );
 
-    // An existing local branch of that name is checked out, and `worktree_path` places it.
+    // New refuses a name whose branch exists; Local checks that branch out, and
+    // `worktree_path` places it.
     let (home, config, core) = worktree_fixture(
         &temp.path().join("placed"),
         "worktree_path = \"~/wt/{relative}.worktrees/{name}\"\n",
@@ -11590,10 +11591,26 @@ fn inventory_worktree_popup_adds_a_worktree_through_input_and_plan() {
             (vec!["Add worktree / core"], b"topic\r".to_vec()),
             (
                 vec![
+                    "Rejected: branch topic exists; pick it on Local",
+                    "[New]",
+                    "absent: / plan",
+                ],
+                b"]".to_vec(),
+            ),
+            (
+                vec!["[Local]", "2 branches", "primary", "topic"],
+                b"/top".to_vec(),
+            ),
+            (vec!["/ top█", "absent: primary"], b"\r\r".to_vec()),
+            (
+                vec![
                     "Add worktree / plan",
+                    "pair: name topic",
                     "pair: path ~/wt/org/core.worktrees/topic",
                     "pair: branch topic",
                     "existing",
+                    "Change name",
+                    "Back to branches",
                 ],
                 b"\r".to_vec(),
             ),
@@ -11618,6 +11635,349 @@ fn inventory_worktree_popup_adds_a_worktree_through_input_and_plan() {
             &["rev-parse", "--abbrev-ref", "HEAD"]
         ),
         "topic"
+    );
+}
+
+/// Points `refs/remotes/<remote_branch>` at a new commit that no local branch holds.
+#[cfg(unix)]
+fn remote_only_branch(core: &std::path::Path, remote_branch: &str) -> String {
+    run_git(core, &["checkout", "-qb", "scratch"]);
+    fs::write(core.join("remote-only"), remote_branch).unwrap();
+    run_git(core, &["add", "remote-only"]);
+    run_git(core, &["commit", "-qm", remote_branch]);
+    let commit = git_stdout(core, &["rev-parse", "HEAD"]);
+    run_git(
+        core,
+        &[
+            "update-ref",
+            &format!("refs/remotes/{remote_branch}"),
+            &commit,
+        ],
+    );
+    run_git(core, &["checkout", "-q", "main"]);
+    run_git(core, &["branch", "-qD", "scratch"]);
+    commit
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_switches_tabs_and_refuses_a_checked_out_branch() {
+    let temp = temp_dir();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    linked_worktree(&core, "wildcards", &["-b", "fix/wildcards"]);
+    run_git(&core, &["branch", "spike/tabs"]);
+    run_git(
+        &core,
+        &[
+            "update-ref",
+            "refs/remotes/origin/fix/wildcards",
+            "fix/wildcards",
+        ],
+    );
+
+    let mut command = support::lager(&home, &config);
+    command.arg("tui").env("NO_COLOR", "1");
+    run_inventory_pty_actions(
+        &mut command,
+        &[
+            (POPUP_READY.to_vec(), b"wa".to_vec()),
+            (
+                vec![
+                    "Add worktree / core",
+                    "[New]",
+                    " Local ",
+                    " Remote ",
+                    "[ ] tab · Enter preview · Esc back",
+                ],
+                b"]".to_vec(),
+            ),
+            (
+                vec![
+                    "WORKTREES · 1 row",
+                    "[Local]",
+                    "absent: [New]",
+                    "3 branches",
+                    "pair: checked out",
+                    "primary",
+                    "core.worktrees/wildcards",
+                    "spike/tabs",
+                    "/ Filter branches…",
+                    "[ ] tab · j/k select · / filter · Enter plan · Esc back",
+                ],
+                b"]".to_vec(),
+            ),
+            (
+                vec![
+                    "[Remote]",
+                    "absent: [Local]",
+                    "never fetched",
+                    "origin/main",
+                    // Where the local branch is checked out is text, not only a dimmed row.
+                    "main · same commit · primary",
+                    "fix/wildcards · same commit · in core.worktrees/wildcards",
+                    "[ ] tab · j/k select · / filter · f fetch · Enter plan · Esc back",
+                ],
+                b"]".to_vec(),
+            ),
+            (vec!["[New]", "absent: [Remote]"], b"[".to_vec()),
+            (vec!["[Remote]"], b"[/wild\r\r".to_vec()),
+            (
+                vec![
+                    "! fix/wildcards is checked out in core.worktrees/wildcards",
+                    "[Local]",
+                    "/ wild",
+                    "absent: spike/tabs",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec![
+                    "Add worktree cancelled · nothing changed",
+                    "Worktrees / core",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Worktrees /", "selected: core"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_tab_key_rebound_to_a_letter_stays_text_on_new() {
+    let temp = temp_dir();
+    let (home, config, _) = worktree_fixture(
+        temp.path(),
+        "[inventory.keys.worktrees]\nnext_tab = [\"n\"]\n",
+    );
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"wa".to_vec()),
+            (
+                vec!["[New]", "Enter preview · Esc back", "absent: tab ·"],
+                b"n".to_vec(),
+            ),
+            // `n` can be part of a NAME, so on New it is text.
+            (vec!["[New]", "n█"], b"[".to_vec()),
+            (vec!["[Remote]"], b"[".to_vec()),
+            (vec!["[Local]", "[ n tab · j/k select"], b"n".to_vec()),
+            (vec!["[Remote]", "absent: [Local]"], b"\x1b".to_vec()),
+            (
+                vec!["Add worktree cancelled · nothing changed"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Worktrees /", "selected: core"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_creates_a_tracking_worktree_from_a_remote_branch() {
+    let temp = temp_dir();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    let commit = remote_only_branch(&core, "origin/feat/session-tabs");
+    let created = core.parent().unwrap().join("core.worktrees/tabs");
+
+    let transcript = run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"wa]]".to_vec()),
+            (
+                vec!["[Remote]", "origin/feat/session-tabs", "origin/main"],
+                b"/session\r\r".to_vec(),
+            ),
+            (
+                vec![
+                    "CONFIRM · 1 row",
+                    "Add worktree / plan",
+                    "pair: name session-tabs",
+                    "pair: path ~/repos/org/core.worktrees/session-tabs",
+                    &format!(
+                        "feat/session-tabs · new, at {} · tracking origin/feat/session-tabs",
+                        &commit[..7]
+                    ),
+                    "Create worktree",
+                    "Change name",
+                    "Back to branches",
+                ],
+                b"jj\r".to_vec(),
+            ),
+            (vec!["[Remote]", "/ session"], b"\r".to_vec()),
+            (vec!["Add worktree / plan"], b"j\r".to_vec()),
+            (
+                vec!["INPUT · 1 row", "session-tabs█"],
+                [&b"\x7f".repeat("session-tabs".len())[..], b"tabs\r"].concat(),
+            ),
+            (
+                vec![
+                    "Add worktree / plan",
+                    "pair: name tabs",
+                    "pair: path ~/repos/org/core.worktrees/tabs",
+                ],
+                b"\r".to_vec(),
+            ),
+            (
+                vec![
+                    "Created worktree ~/repos/org/core.worktrees/tabs on new branch feat/session-tabs, tracking origin/feat/session-tabs",
+                    "WORKTREES · 1 row",
+                    "pair: ~/repos/org/core.worktrees/tabs feat/session-tabs",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Worktrees /", "selected: core"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    assert!(!transcript.contains("fatal:"), "{transcript}");
+    assert_eq!(
+        git_stdout(&created, &["rev-parse", "--abbrev-ref", "@{u}"]),
+        "origin/feat/session-tabs"
+    );
+    assert_eq!(git_stdout(&created, &["rev-parse", "HEAD"]), commit);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_fetches_each_remote_and_keeps_the_list_when_one_fails() {
+    let temp = temp_dir();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    // Every remote is a local path, so the fetch never reaches the network.
+    let bare = temp.path().join("upstream.git");
+    run_git(
+        temp.path(),
+        &["init", "-q", "--bare", bare.to_str().unwrap()],
+    );
+    run_git(&core, &["remote", "remove", "origin"]);
+    run_git(
+        &core,
+        &["remote", "add", "upstream", bare.to_str().unwrap()],
+    );
+    let missing = temp.path().join("missing.git");
+    run_git(
+        &core,
+        &["remote", "add", "broken", missing.to_str().unwrap()],
+    );
+    run_git(&core, &["push", "-q", "upstream", "main"]);
+    let other = temp.path().join("other");
+    run_git(
+        temp.path(),
+        &[
+            "clone",
+            "-q",
+            bare.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    run_git(&other, &["config", "user.email", "lager@example.invalid"]);
+    run_git(&other, &["config", "user.name", "lager"]);
+    run_git(&other, &["checkout", "-qb", "feat/fetched"]);
+    fs::write(other.join("fetched"), "fetched\n").unwrap();
+    run_git(&other, &["add", "fetched"]);
+    run_git(&other, &["commit", "-qm", "fetched"]);
+    run_git(&other, &["push", "-q", "origin", "feat/fetched"]);
+
+    let transcript = run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"wa]]".to_vec()),
+            (
+                vec![
+                    "[Remote]",
+                    "never fetched",
+                    "upstream/main",
+                    "absent: upstream/feat/fetched",
+                ],
+                b"f".to_vec(),
+            ),
+            (
+                vec![
+                    "! fetch broken failed: ",
+                    "upstream/feat/fetched",
+                    "upstream/main",
+                    "last fetch ",
+                    "fetch failed",
+                    "absent: never fetched",
+                    "[Remote]",
+                ],
+                b"\r".to_vec(),
+            ),
+            // The fetched branch sorts first, and the selection stays on upstream/main.
+            (
+                vec![
+                    "! main is checked out in core",
+                    "absent: ! fetch broken",
+                    "upstream/feat/fetched",
+                    "absent: Add worktree / plan",
+                ],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Add worktree cancelled · nothing changed"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Worktrees /", "selected: core"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
+    );
+    // Git's own fetch output never reaches the terminal the inventory draws on.
+    assert!(!transcript.contains("[new branch]"), "{transcript}");
+    assert_eq!(
+        git_stdout(&core, &["rev-parse", "refs/remotes/upstream/feat/fetched"]),
+        git_stdout(&other, &["rev-parse", "HEAD"])
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_worktree_popup_says_a_repository_without_remotes_has_nothing_to_fetch() {
+    let temp = temp_dir();
+    let (home, config, core) = worktree_fixture(temp.path(), "");
+    run_git(&core, &["remote", "remove", "origin"]);
+
+    run_inventory_pty_actions(
+        support::lager(&home, &config).arg("tui"),
+        &[
+            (POPUP_READY.to_vec(), b"wa]]".to_vec()),
+            (
+                vec!["[Remote]", "no remotes", "No remote branches"],
+                b"f".to_vec(),
+            ),
+            (
+                vec!["! core has no remote to fetch", "No remote branches"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["Add worktree cancelled · nothing changed"],
+                b"\x1b".to_vec(),
+            ),
+            (
+                vec!["NORMAL · 1 row", "absent: Worktrees /", "selected: core"],
+                b"q".to_vec(),
+            ),
+        ],
+        32,
+        132,
     );
 }
 

@@ -95,10 +95,10 @@ Lager closes the session only once Git has removed the worktree, and prints `Clo
 
 In `lager tui`, select a repository and press `w`. The popup lists the same working trees as `worktree list`:
 
-- `a` asks for a name and shows the planned path and branch before anything is created. A name whose local branch exists checks that branch out, unless another worktree has it; any other name creates a new branch.
+- `a` opens three tabs, which `[` and `]` switch. New asks for a name and creates a new branch of that name; a name whose branch exists is refused. Local and Remote list the branches with the newest commit first, `/` filters them, and Enter picks one, unless another worktree has it checked out. On Remote, `f` fetches every remote. Each way shows the planned path and branch before anything is created.
 - `r` inspects the selected worktree and shows blockers, or the losses with Cancel as the default.
 - `c` copies the selected path.
 
 With a [`[session]` section](sessions.md#set-up-the-section), a `●` marks each worktree that has a session, and `s` opens the selected one. The plan opens the new worktree's session after Git created it, and the removal summary closes the worktree's session after Git removed it. Each shows as a ticked line, and `s` clears the tick for that worktree.
 
-The primary checkout is removed from the table with `r`, not from the popup. `--new-branch`, `--start`, `--path` and `--fetch` are available on the command only.
+The primary checkout is removed from the table with `r`, not from the popup. `--new-branch`, `--start` and `--path` are available on the command only.

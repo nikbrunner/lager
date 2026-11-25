@@ -201,23 +201,43 @@ the old URL to the new name.
 not used. The popup lists the primary checkout and every linked worktree Git
 knows, wherever it sits, with its path, branch and state: `primary`, `locked`
 and `prunable` with Git's reason, and `clean` or the counts of modified and
-untracked files. `a` asks for one name with the form of `NAME` in
-[`worktree add`](#worktree-add). The popup and the command treat a name whose
-local branch exists differently. The popup checks that branch out, which is
-`worktree add REPOSITORY NAME --branch NAME`, and its plan marks the branch
-`existing`, and says how far the branch is from its remote-tracking branch. The
-command without `--branch` refuses with
-`branch already exists`. For any other name both create a new branch of that
-name at the primary checkout's HEAD. A branch that is checked out in another
-worktree is refused as in the command. `--new-branch`, `--start`, `--path`, `--fetch` and
-remote branches belong to the command only. Enter shows the planned path and branch; nothing is
-created before "Create worktree" is chosen there. `r` runs the guards of [`worktree remove`](#worktree-remove) on
+untracked files. `a` opens Add worktree with three tabs, New, Local and Remote;
+`[` and `]` switch them, and the selected tab shows in brackets, `[Local]`. New
+asks for one name with the form of `NAME` in [`worktree add`](#worktree-add) and
+creates a new branch of that name at the primary checkout's HEAD, as the command
+does without `--branch`. A name whose local branch exists is refused with
+`branch NAME exists; pick it on Local`. Local lists the local branches and
+Remote the remote-tracking branches, the newest commit first, each with its
+commit and its age. Local shows where a branch is checked out, `primary` for the
+primary checkout; Remote shows the local branch of the same name and how far
+apart the two are, such as `feat/x · 2 behind` or `main · same commit`, and where
+that local branch is checked out, such as `feat/x · 2 behind · in core.worktrees/x`
+or `main · same commit · primary`. A remote's `HEAD` is left out. `/` types into
+a filter by branch name; while typing, Enter keeps the filter and Esc clears it.
+Outside the filter, Esc closes Add. Enter on a branch picks it as `--branch` does:
+a local branch is checked out as it is, and a remote-tracking branch gets a new
+local branch that tracks it. The worktree is named after the branch's last `/`
+segment. A branch that is checked out in another worktree is refused on the
+status line with `! BRANCH is checked out in PATH`. On Remote, `f` fetches each
+remote on its own while the list stays usable; the status line reads
+`Fetching NAME: origin, upstream… N s`, and afterwards `Fetched origin, upstream`, or
+`! fetch REMOTE failed: REASON` for each remote that failed, and the list is read
+again with the selection kept on its branch. A list that cannot be read again stays
+as it was, and the status line says so. Git shows no prompt on the terminal during
+that fetch. The fetch goes on when the popup closes; until it ends, `f` reports
+`! a fetch is already running` and its hint is hidden. The tab row shows
+`last fetch HH:MM`, or `never fetched`. A repository without remotes shows
+`No remote branches`, and `f` reports `! NAME has no remote to fetch`.
+`--new-branch`, `--start` and `--path` belong to the command only. Enter shows
+the planned path and branch; a picked branch also shows the worktree's `name`,
+with "Change name" to edit it and "Back to branches". Nothing is created before
+"Create worktree" is chosen there. `r` runs the guards of [`worktree remove`](#worktree-remove) on
 the selected worktree. A blocker is shown with its hint and no confirmation.
 Otherwise a summary of losses, path and kept branch asks with Cancel as the
 default; choosing removal accepts exactly the listed losses, and a worktree that
 changed since the summary is left alone. The choices stay at the bottom of the
 popup. In a terminal too small to show the losses, the full path, the kept
-branch and both choices, or the plan and both choices, the popup says so and the changing choice does nothing until
+branch and both choices, or the plan and its choices, the popup says so and the changing choice does nothing until
 the terminal is enlarged. The blocker view scrolls. Keys typed before a plan or summary is
 on screen do not answer it. `r` on the primary checkout reports that it is
 removed from the table. `c` copies the selected path. While Git runs, the

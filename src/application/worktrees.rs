@@ -292,46 +292,115 @@ pub fn check_request<G: WorktreeGit>(git: &G, request: &AddRequest<'_>) -> Resul
     Ok(())
 }
 
-/// The request a bare name stands for: the local branch of that name when it exists, else a
-/// new branch of that name.
-pub fn request_named<'a, G: WorktreeGit>(
-    git: &G,
-    repository: &Repository,
-    name: &'a str,
-) -> Result<AddRequest<'a>, String> {
-    let named = AddRequest {
-        name: Some(name),
-        branch: BranchChoice::Named,
-        start: None,
-        path: None,
-    };
-    check_request(git, &named)?;
-    Ok(if git.branch_exists(&repository.primary, name)? {
-        AddRequest {
-            branch: BranchChoice::Existing(name),
-            ..named
-        }
-    } else {
-        named
-    })
-}
-
 /// Fetches each remote on its own, so one that fails does not stop the others. Returns the
-/// remotes that failed, each with Git's reason.
+/// remotes that failed, each with Git's reason. `quiet` drops Git's output.
 pub fn fetch_remotes<G: WorktreeGit>(
     git: &G,
     repository: &Repository,
+    quiet: bool,
 ) -> Result<Vec<(String, String)>, String> {
     let primary = &repository.primary;
     Ok(git
         .remotes(primary)?
         .into_iter()
         .filter_map(|remote| {
-            git.fetch(primary, &remote)
+            git.fetch(primary, &remote, quiet)
                 .err()
                 .map(|reason| (remote, reason))
         })
         .collect())
+}
+
+/// The local branch of the same name as a remote-tracking branch, and how far apart the two are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalMatch {
+    pub name: String,
+    /// Commits only on the local branch, then commits only on the remote-tracking branch;
+    /// `None` when Git could not count them.
+    pub ahead_behind: Option<(usize, usize)>,
+}
+
+/// One local or remote-tracking branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Branch {
+    /// Such as `feat/x`, or `origin/feat/x` for a remote-tracking branch.
+    pub name: String,
+    /// The remote of a remote-tracking branch; `None` for a local branch.
+    pub remote: Option<String>,
+    pub commit: String,
+    /// Committer date of the commit, in seconds since the Unix epoch.
+    pub committed: i64,
+    /// The working tree that has the local branch checked out.
+    pub checked_out: Option<PathBuf>,
+    /// For a remote-tracking branch, the local branch of the same name.
+    pub local: Option<LocalMatch>,
+}
+
+/// Every branch of a repository, the newest commit first in each list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BranchListing {
+    pub local: Vec<Branch>,
+    pub remote: Vec<Branch>,
+}
+
+/// Lists the local and the remote-tracking branches with where each local branch is checked
+/// out. Remote-tracking refs of no configured remote, and each remote's `HEAD`, are left out.
+pub fn branches<G: WorktreeGit>(git: &G, repository: &Repository) -> Result<BranchListing, String> {
+    let primary = &repository.primary;
+    let entries = git.entries(primary).map_err(|fault| fault.error)?;
+    let checked_out = |branch: &str| {
+        let ref_name = format!("refs/heads/{branch}");
+        entries
+            .iter()
+            .find(|entry| entry.branch.as_deref() == Some(ref_name.as_str()))
+            .map(|entry| entry.path.clone())
+    };
+    let mut remotes = git.remotes(primary)?;
+    // A remote whose name extends another's, such as `origin/fork` beside `origin`, wins.
+    remotes.sort_by_key(|remote| std::cmp::Reverse(remote.len()));
+    let refs = git.branch_refs(primary)?;
+    let mut listing = BranchListing::default();
+    for reference in &refs {
+        if let Some(name) = reference.name.strip_prefix("refs/heads/") {
+            listing.local.push(Branch {
+                name: name.to_owned(),
+                remote: None,
+                commit: reference.commit.clone(),
+                committed: reference.committed,
+                checked_out: checked_out(name),
+                local: None,
+            });
+        }
+    }
+    for reference in &refs {
+        let Some(name) = reference.name.strip_prefix("refs/remotes/") else {
+            continue;
+        };
+        let Some((remote, branch)) = remotes.iter().find_map(|remote| {
+            name.strip_prefix(&format!("{remote}/"))
+                .filter(|branch| !branch.is_empty() && *branch != "HEAD")
+                .map(|branch| (remote, branch))
+        }) else {
+            continue;
+        };
+        let local = listing
+            .local
+            .iter()
+            .find(|local| local.name == branch)
+            .map(|local| LocalMatch {
+                name: local.name.clone(),
+                ahead_behind: git.ahead_behind(primary, &local.name, name).ok(),
+            });
+        listing.remote.push(Branch {
+            name: name.to_owned(),
+            remote: Some(remote.clone()),
+            commit: reference.commit.clone(),
+            committed: reference.committed,
+            checked_out: None,
+            local,
+        });
+    }
+    Ok(listing)
 }
 
 /// The branch an existing-branch request names.

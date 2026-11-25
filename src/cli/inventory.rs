@@ -1255,6 +1255,7 @@ impl TerminalSession {
                 return quit(session);
             }
             github::poll(session, &mut selection);
+            worktrees::poll(session, &mut selection);
             session.reload_changed_config(selection.view() == View::Normal && !selection.quit);
             // The batch waits while the user decides whether to cancel it.
             let deciding = selection.quit;
@@ -2109,6 +2110,7 @@ impl TerminalSession {
                 )
             })
             .or_else(|| github::status(session))
+            .or_else(|| worktrees::status(selection))
             .or_else(|| {
                 (session.opening.as_ref())
                     .map(|label| format!("Opening session {}…", escape(label)))
@@ -2660,6 +2662,7 @@ impl TerminalSession {
                                     .hosted
                                     .as_ref()
                                     .and_then(|hosted| hosted.as_ref().ok()),
+                                shown.worktree_fetch.as_ref(),
                                 above_status(frame.area(), below_help),
                             );
                         }
@@ -3545,6 +3548,20 @@ fn help_widget(bindings: &Bindings, mode: Mode, sessions: bool) -> Paragraph<'st
             entry(single(Add), "add a worktree…", &[Add]),
             entry(single(Remove), "remove the selected worktree", &[Remove]),
             entry(single(Copy), "copy path", &[Copy]),
+            entry(
+                paired_keys(&keys(PreviousTab), &keys(NextTab)),
+                "add: previous / next tab",
+                &[PreviousTab, NextTab],
+            ),
+            entry(
+                [single(Filter), single(Fetch)]
+                    .into_iter()
+                    .filter(|keys| !keys.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+                "add: filter the branches · fetch every remote on Remote",
+                &[Filter, Fetch],
+            ),
         ]
         .into_iter()
         .chain(sessions.then(|| {
@@ -5842,6 +5859,8 @@ struct Selection {
     add: Option<AddForm>,
     /// The open Worktrees popup; it keeps the repository it was opened on.
     worktrees: Option<worktrees::Popup>,
+    /// The running fetch of a repository's remotes; it outlives the popup that started it.
+    worktree_fetch: Option<worktrees::Fetch>,
     /// The open GitHub dialog.
     github: Option<github::Dialog>,
     /// The ticked filter values; they last for the run.
