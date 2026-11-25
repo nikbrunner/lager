@@ -39,14 +39,14 @@ For one worktree, pass the destination:
 lager worktree add . spike --path ../spike
 ```
 
-For every worktree, set `worktree_root` in the configuration:
+For every worktree, set `worktree_path` in the configuration:
 
 ```toml
 root = "~/repos"
-worktree_root = "~/worktrees"
+worktree_path = "~/worktrees/{relative}.worktrees/{name}"
 ```
 
-`lager worktree add org/project hotfix` then creates `~/worktrees/org/project.worktrees/hotfix`. A primary checkout outside `root` needs `--path` while `worktree_root` is set.
+`lager worktree add org/project hotfix` then creates `~/worktrees/org/project.worktrees/hotfix`. A primary checkout outside `root` needs `--path` while the template uses `{relative}`. [Worktree path](../reference/config.md#worktree-path) lists the other placeholders, such as `{parent}/{repo}-{name}` for a sibling folder.
 
 ## See what exists
 

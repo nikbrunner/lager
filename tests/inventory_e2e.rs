@@ -11577,9 +11577,11 @@ fn inventory_worktree_popup_adds_a_worktree_through_input_and_plan() {
         "fix"
     );
 
-    // An existing local branch of that name is checked out, and `worktree_root` places it.
-    let (home, config, core) =
-        worktree_fixture(&temp.path().join("placed"), "worktree_root = \"wt\"\n");
+    // An existing local branch of that name is checked out, and `worktree_path` places it.
+    let (home, config, core) = worktree_fixture(
+        &temp.path().join("placed"),
+        "worktree_path = \"~/wt/{relative}.worktrees/{name}\"\n",
+    );
     run_git(&core, &["branch", "topic"]);
     run_inventory_pty_actions(
         support::lager(&home, &config).arg("tui"),

@@ -598,19 +598,35 @@ fn add_reports_the_branch_a_failed_checkout_leaves_behind() {
 // ---- add: placement ----------------------------------------------------------------------
 
 #[test]
-fn add_places_worktrees_under_worktree_root_by_the_primary_path_below_root() {
-    for (value, root) in [
-        ("~/trees", "trees"),
-        ("trees/deep", "trees/deep"),
-        ("~", ""),
+fn add_places_worktrees_by_the_worktree_path_template() {
+    for (template, destination) in [
+        (
+            "~/trees/{relative}.worktrees/{name}",
+            "trees/acme/core.worktrees/hotfix",
+        ),
+        (
+            "~/trees/deep/{relative}.worktrees/{name}",
+            "trees/deep/acme/core.worktrees/hotfix",
+        ),
+        (
+            "~/{relative}.worktrees/{name}",
+            "acme/core.worktrees/hotfix",
+        ),
+        ("{parent}/{repo}-{name}", "repos/acme/core-hotfix"),
+        (
+            "{primary}.worktrees/{name}",
+            "repos/acme/core.worktrees/hotfix",
+        ),
+        ("~/wt/{repo}/{name}", "wt/core/hotfix"),
+        ("~/wt/{name}/{name}", "wt/hotfix/hotfix"),
     ] {
         let fixture = Fixture::new();
         fs::write(
             &fixture.config,
-            format!("root = \"repos\"\nworktree_root = \"{value}\"\n"),
+            format!("root = \"repos\"\nworktree_path = \"{template}\"\n"),
         )
         .unwrap();
-        let destination = fixture.home.join(root).join("acme/core.worktrees/hotfix");
+        let destination = fixture.home.join(destination);
 
         let output = fixture.worktree(&["add", ".", "hotfix"]);
 
@@ -627,16 +643,31 @@ fn add_places_worktrees_under_worktree_root_by_the_primary_path_below_root() {
             [fixture.primary.clone(), destination.clone()]
         );
         assert_eq!(tree(&destination), [".git", "README"]);
-        assert!(!fixture.container().exists());
+        assert_eq!(
+            fixture.container().exists(),
+            destination.starts_with(fixture.container()),
+            "{template}"
+        );
     }
 }
 
 #[test]
-fn add_with_worktree_root_needs_path_for_a_primary_outside_root() {
+fn add_without_a_worktree_path_places_beside_the_primary() {
+    let fixture = Fixture::new();
+    let destination = fixture.container().join("hotfix");
+
+    let output = fixture.worktree(&["add", ".", "hotfix"]);
+
+    assert_exit(&output, 0);
+    assert_eq!(fixture.listed(), [fixture.primary.clone(), destination]);
+}
+
+#[test]
+fn add_with_a_relative_template_needs_path_for_a_primary_outside_root() {
     let fixture = Fixture::new();
     fs::write(
         &fixture.config,
-        "root = \"repos\"\nworktree_root = \"~/trees\"\n",
+        "root = \"repos\"\nworktree_path = \"~/trees/{relative}.worktrees/{name}\"\n",
     )
     .unwrap();
     let outside = fixture.base.join("outside/repo");
@@ -648,7 +679,7 @@ fn add_with_worktree_root_needs_path_for_a_primary_outside_root() {
     assert_eq!(
         stderr(&refused),
         format!(
-            "error: {} is outside the configured root; worktree_root needs --path here\n",
+            "error: {} is outside the configured root; a worktree_path with {{relative}} needs --path here\n",
             outside.display()
         )
     );
@@ -675,6 +706,43 @@ fn add_with_worktree_root_needs_path_for_a_primary_outside_root() {
         ],
     );
     assert_exit(&placed, 0);
+    assert_eq!(tree(&destination), [".git", "README"]);
+    assert!(!fixture.home.join("trees").exists());
+}
+
+#[test]
+fn add_with_a_template_without_relative_places_a_primary_outside_root() {
+    let fixture = Fixture::new();
+    fs::write(
+        &fixture.config,
+        "root = \"repos\"\nworktree_path = \"{parent}/{repo}-{name}\"\n",
+    )
+    .unwrap();
+    let outside = fixture.base.join("outside/repo");
+    init(&outside);
+
+    let output = fixture.run(&outside, &["worktree", "add", ".", "hotfix"]);
+
+    assert_exit(&output, 0);
+    assert_eq!(
+        tree(&fixture.base.join("outside/repo-hotfix")),
+        [".git", "README"]
+    );
+}
+
+#[test]
+fn add_path_overrides_the_worktree_path_template() {
+    let fixture = Fixture::new();
+    fs::write(
+        &fixture.config,
+        "root = \"repos\"\nworktree_path = \"~/trees/{relative}.worktrees/{name}\"\n",
+    )
+    .unwrap();
+    let destination = fixture.base.join("elsewhere/hotfix");
+
+    let output = fixture.worktree(&["add", ".", "hotfix", "--path", text(&destination)]);
+
+    assert_exit(&output, 0);
     assert_eq!(tree(&destination), [".git", "README"]);
     assert!(!fixture.home.join("trees").exists());
 }
@@ -3010,14 +3078,73 @@ fn mutations_need_explicit_targets_and_excluded_commands_do_not_exist() {
 // ---- configuration -----------------------------------------------------------------------
 
 #[test]
-fn worktree_root_rejects_absolute_parent_empty_and_non_string_values() {
-    for value in [
-        "\"/abs/trees\"",
-        "\"../trees\"",
-        "\"~/../trees\"",
-        "\"a/../b\"",
-        "\"\"",
-        "3",
+fn worktree_path_rejects_invalid_templates() {
+    for (value, message) in [
+        ("\"~/trees/{relative}.worktrees\"", "must contain {name}"),
+        (
+            "\"~/trees/{branch}/{name}\"",
+            "has an unknown placeholder {branch}",
+        ),
+        ("\"~/trees/{name\"", "has an unmatched `{`"),
+        ("\"~/trees/}{name}\"", "has an unmatched `}`"),
+        ("\"~/trees/{{name}}\"", "has an unmatched `{`"),
+        ("\"/abs/trees/{name}\"", "must not be an absolute path"),
+        ("\"~/../trees/{name}\"", "must not contain `..`"),
+        ("\"{primary}/../{name}\"", "must not contain `..`"),
+        (
+            "\"trees/{name}\"",
+            "must start with {primary}, {parent} or ~/",
+        ),
+        (
+            "\"{repo}/{name}\"",
+            "must start with {primary}, {parent} or ~/",
+        ),
+        (
+            "\"~trees/{name}\"",
+            "must start with {primary}, {parent} or ~/",
+        ),
+        ("\"\"", "must start with {primary}, {parent} or ~/"),
+        (
+            "\"~/{primary}/{name}\"",
+            "allows {primary} and {parent} only at the start",
+        ),
+        ("3", "must be a string"),
+    ] {
+        let fixture = Fixture::new();
+        fs::write(
+            &fixture.config,
+            format!("root = \"repos\"\nworktree_path = {value}\n"),
+        )
+        .unwrap();
+        let before = (fixture.state(), tree(&fixture.home.join("repos/acme")));
+
+        for args in [
+            &["worktree", "add", ".", "hotfix"][..],
+            &["worktree", "list"],
+            &["status"],
+        ] {
+            let output = fixture.run(&fixture.primary, args);
+            assert_exit(&output, 1);
+            assert_eq!(stdout(&output), "", "{value}");
+            assert!(
+                stderr(&output).contains(&format!("worktree_path {message}")),
+                "{value}: {output:?}"
+            );
+            assert!(!stderr(&output).contains("trees"), "{value}: {output:?}");
+        }
+        assert_eq!(
+            (fixture.state(), tree(&fixture.home.join("repos/acme"))),
+            before
+        );
+    }
+}
+
+#[test]
+fn worktree_root_fails_with_the_worktree_path_to_write_instead() {
+    for (value, replacement) in [
+        ("\"~/trees\"", "~/trees/{relative}.worktrees/{name}"),
+        ("\"trees/deep\"", "~/trees/deep/{relative}.worktrees/{name}"),
+        ("\"~\"", "~/{relative}.worktrees/{name}"),
     ] {
         let fixture = Fixture::new();
         fs::write(
@@ -3036,16 +3163,38 @@ fn worktree_root_rejects_absolute_parent_empty_and_non_string_values() {
             assert_exit(&output, 1);
             assert_eq!(stdout(&output), "", "{value}");
             assert!(
-                stderr(&output).contains("worktree_root must be"),
+                stderr(&output).contains(&format!(
+                    "worktree_root is not supported; use worktree_path = \"{replacement}\""
+                )),
                 "{value}: {output:?}"
             );
-            assert!(!stderr(&output).contains("trees"), "{value}: {output:?}");
         }
         assert_eq!(
             (fixture.state(), tree(&fixture.home.join("repos/acme"))),
             before
         );
     }
+}
+
+#[test]
+fn add_refuses_a_template_destination_inside_a_checkout() {
+    let fixture = Fixture::new();
+    fs::write(
+        &fixture.config,
+        "root = \"repos\"\nworktree_path = \"{primary}/trees/{name}\"\n",
+    )
+    .unwrap();
+    let before = fixture.state();
+
+    let output = fixture.worktree(&["add", ".", "hotfix"]);
+
+    assert_exit(&output, 1);
+    assert!(
+        stderr(&output).contains("destination is inside the checkout"),
+        "{output:?}"
+    );
+    assert_eq!(fixture.state(), before);
+    assert!(!fixture.primary.join("trees").exists());
 }
 
 #[test]
@@ -3072,11 +3221,15 @@ fn usage_errors_are_reported_before_the_configuration_is_read() {
 }
 
 #[test]
-fn worktree_root_stays_portable_through_a_config_mutation_behind_a_symlink() {
+fn worktree_path_stays_as_written_through_a_config_mutation_behind_a_symlink() {
     let fixture = Fixture::new();
     let real = fixture.base.join("dotfiles/config.toml");
     fs::create_dir_all(real.parent().unwrap()).unwrap();
-    fs::write(&real, "root = \"repos\"\nworktree_root = \"~/trees\"\n").unwrap();
+    fs::write(
+        &real,
+        "root = \"repos\"\nworktree_path = \"~/trees/{relative}.worktrees/{name}\"\n",
+    )
+    .unwrap();
     fs::remove_file(&fixture.config).unwrap();
     std::os::unix::fs::symlink(&real, &fixture.config).unwrap();
 
@@ -3094,7 +3247,9 @@ fn worktree_root_stays_portable_through_a_config_mutation_behind_a_symlink() {
     );
     let written = fs::read_to_string(&real).unwrap();
     assert!(
-        written.starts_with("root = \"repos\"\nworktree_root = \"~/trees\"\n"),
+        written.starts_with(
+            "root = \"repos\"\nworktree_path = \"~/trees/{relative}.worktrees/{name}\"\n"
+        ),
         "{written}"
     );
     assert!(written.contains("github.com/acme/other"), "{written}");

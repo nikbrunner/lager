@@ -10,7 +10,7 @@ use toml_edit::{ArrayOfTables, Document, DocumentMut, Item, Table, Value, value}
 use crate::application::ports::{
     AtomicRegistrationStore, ConfigStore, Mutation, RegistrationRequest, RenamingStore,
 };
-use crate::domain::config::{Config, ConfigError};
+use crate::domain::config::{Config, ConfigError, WorktreeTemplate};
 use crate::domain::repository::{RepositoryRef, renamed_url};
 use crate::domain::session::SessionConfig;
 use crate::presentation::escape;
@@ -455,7 +455,7 @@ fn decode_config(path: &Path, document: &Document<String>) -> Result<Config, Con
     })?;
     config.validate()?;
     config.resolve_root(&home_dir())?;
-    worktree_root(document)?;
+    worktree_path(document)?;
     session(path, document)?;
     Ok(config)
 }
@@ -492,31 +492,45 @@ pub(crate) fn load_session(path: &Path) -> Result<Option<SessionConfig>, ConfigS
     session(path, &document)
 }
 
-/// The optional top-level `worktree_root` as written, once it is known to be portable.
-fn worktree_root(document: &Document<String>) -> Result<Option<String>, ConfigError> {
-    let Some(item) = document.as_table().get("worktree_root") else {
+/// The optional top-level `worktree_path`, once it is a valid template.
+fn worktree_path(document: &Document<String>) -> Result<Option<WorktreeTemplate>, ConfigError> {
+    if let Some(item) = document.as_table().get("worktree_root") {
+        let hint = match item.as_str().map(|value| value.trim_end_matches('/')) {
+            Some("" | "~") => "worktree_path = \"~/{relative}.worktrees/{name}\"".to_owned(),
+            Some(value) if value.starts_with("~/") => {
+                format!("worktree_path = \"{value}/{{relative}}.worktrees/{{name}}\"")
+            }
+            Some(value) => {
+                format!("worktree_path = \"~/{value}/{{relative}}.worktrees/{{name}}\"")
+            }
+            None => "worktree_path".to_owned(),
+        };
+        return Err(ConfigError::Semantic(format!(
+            "worktree_root is not supported; use {hint}"
+        )));
+    }
+    let Some(item) = document.as_table().get("worktree_path") else {
         return Ok(None);
     };
     let value = item
         .as_str()
-        .ok_or_else(|| ConfigError::Semantic("worktree_root must be a string".to_owned()))?;
-    crate::domain::config::resolve_worktree_root(value, &home_dir())?;
-    Ok(Some(value.to_owned()))
+        .ok_or_else(|| ConfigError::Semantic("worktree_path must be a string".to_owned()))?;
+    WorktreeTemplate::parse(value).map(Some)
 }
 
-/// The configuration, its `worktree_root` as written and the unknown-key warnings, for the
-/// worktree commands and the inventory popup. Prints nothing.
+/// The configuration, its `worktree_path` and the unknown-key warnings, for the worktree
+/// commands and the inventory popup. Prints nothing.
 pub(crate) fn load_worktrees(
     path: &Path,
-) -> Result<(Config, Option<String>, Vec<String>), ConfigStoreError> {
+) -> Result<(Config, Option<WorktreeTemplate>, Vec<String>), ConfigStoreError> {
     let content = fs::read_to_string(path).map_err(|source| ConfigStoreError::Read {
         path: path.to_path_buf(),
         source,
     })?;
     let document = parse_document(path, &content)?;
     let config = decode_config(path, &document)?;
-    let root = worktree_root(&document)?;
-    Ok((config, root, unknown_key_warnings(&document.into_mut())))
+    let template = worktree_path(&document)?;
+    Ok((config, template, unknown_key_warnings(&document.into_mut())))
 }
 
 fn parse_document(path: &Path, content: &str) -> Result<Document<String>, ConfigStoreError> {
@@ -670,7 +684,7 @@ fn unknown_key_warnings(document: &DocumentMut) -> Vec<String> {
     for (key, _) in document.iter() {
         if !matches!(
             key,
-            "root" | "providers" | "repositories" | "inventory" | "worktree_root" | "session"
+            "root" | "providers" | "repositories" | "inventory" | "worktree_path" | "session"
         ) {
             warnings.push(format!("unknown config key `{}`", escape(key)));
         }

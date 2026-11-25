@@ -197,7 +197,7 @@ pub struct WorktreeAddArgs {
     #[arg(
         long,
         value_name = "PATH",
-        help = "Destination, absolute or relative to the working directory"
+        help = "Destination, absolute or relative to the working directory; overrides worktree_path"
     )]
     pub path: Option<PathBuf>,
     #[arg(

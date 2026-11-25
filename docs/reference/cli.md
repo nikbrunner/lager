@@ -581,12 +581,12 @@ A failure after the repository is found is one line on stderr and exit `1`, with
 
 `--start` applies only to a new branch, and `--branch` conflicts with `--new-branch`; both mistakes exit `2`. A new branch whose name exists, an `--branch` that names no local branch, and a `--start` that names no local commit exit `1`. Lager never fetches, never moves an existing branch, and leaves a branch that is checked out elsewhere to Git, which refuses it.
 
-`NAME` is one path component: ASCII letters, digits, `.`, `_` and `-`, starting with a letter or digit. Git checks the branch name separately. A derived destination (the second and third entries below) lies directly inside its `.worktrees` container; an explicit `--path` need not.
+`NAME` is one path component: ASCII letters, digits, `.`, `_` and `-`, starting with a letter or digit. Git checks the branch name separately.
 
 The destination is the first of these that applies:
 
 1. `--path PATH`, absolute or relative to the working directory. `..` is resolved by name. The path can lie outside the repository root and is never written to the configuration.
-2. With [`worktree_root`](config.md#top-level-fields) set: `<worktree_root>/<primary relative to root>.worktrees/<NAME>`. A primary checkout outside `root` needs `--path`.
+2. With [`worktree_path`](config.md#worktree-path) set: the template with its placeholders expanded. A template with `{relative}` needs `--path` for a primary checkout outside `root`.
 3. `<primary>.worktrees/<NAME>`, beside the primary checkout.
 
 Every destination has to be a path where nothing exists, an empty directory included. Lager refuses a destination below a symlink, inside a checkout, inside a Git directory, or still registered as a worktree whose directory is gone. On macOS `/tmp` and `/var` are symlinks, so an explicit path there is written as `/private/tmp/...`. Missing parent directories are created after every check has passed.

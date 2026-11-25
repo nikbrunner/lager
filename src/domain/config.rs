@@ -359,14 +359,110 @@ pub fn resolve_portable_path(value: &str, home: &Path) -> Result<PathBuf, Config
     Ok(home.join(path))
 }
 
-/// Resolves the optional top-level `worktree_root`, which follows the rules of `root`.
-pub fn resolve_worktree_root(value: &str, home: &Path) -> Result<PathBuf, ConfigError> {
-    resolve_portable_path(value, home).map_err(|_| {
-        ConfigError::Semantic(
-            "worktree_root must be `~`, `~/relative` or a relative path under HOME without `..`"
-                .to_owned(),
-        )
-    })
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TemplatePart {
+    Text(String),
+    Primary,
+    Parent,
+    Repo,
+    Relative,
+    Name,
+}
+
+/// The top-level `worktree_path`: a portable template for where a new worktree goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeTemplate(Vec<TemplatePart>);
+
+impl WorktreeTemplate {
+    pub fn parse(value: &str) -> Result<Self, ConfigError> {
+        let invalid = |message: &str| semantic(format!("worktree_path {message}"));
+        let mut parts = Vec::new();
+        let mut rest = value;
+        while let Some(index) = rest.find(['{', '}']) {
+            let (text, tail) = rest.split_at(index);
+            let Some(tail) = tail.strip_prefix('{') else {
+                return invalid("has an unmatched `}`");
+            };
+            let Some((placeholder, after)) = tail.split_once('}') else {
+                return invalid("has an unmatched `{`");
+            };
+            let part = match placeholder {
+                "primary" => TemplatePart::Primary,
+                "parent" => TemplatePart::Parent,
+                "repo" => TemplatePart::Repo,
+                "relative" => TemplatePart::Relative,
+                "name" => TemplatePart::Name,
+                _ if placeholder.contains('{') => return invalid("has an unmatched `{`"),
+                _ => {
+                    return invalid(&format!("has an unknown placeholder {{{placeholder}}}"));
+                }
+            };
+            if !text.is_empty() {
+                parts.push(TemplatePart::Text(text.to_owned()));
+            }
+            parts.push(part);
+            rest = after;
+        }
+        if !rest.is_empty() {
+            parts.push(TemplatePart::Text(rest.to_owned()));
+        }
+        if value.split('/').any(|segment| segment == "..") {
+            return invalid("must not contain `..`");
+        }
+        if Path::new(value).is_absolute() {
+            return invalid("must not be an absolute path");
+        }
+        let anchored = ["~/", "{primary}", "{parent}"]
+            .iter()
+            .any(|start| value.starts_with(start));
+        if !anchored {
+            return invalid("must start with {primary}, {parent} or ~/");
+        }
+        if !parts.contains(&TemplatePart::Name) {
+            return invalid("must contain {name}");
+        }
+        if parts[1..]
+            .iter()
+            .any(|part| matches!(part, TemplatePart::Primary | TemplatePart::Parent))
+        {
+            return invalid("allows {primary} and {parent} only at the start");
+        }
+        Ok(Self(parts))
+    }
+
+    /// Whether the template needs the primary checkout's path below the configured `root`.
+    pub fn uses_relative(&self) -> bool {
+        self.0.contains(&TemplatePart::Relative)
+    }
+
+    /// The destination for `name`, or `None` when the primary checkout has no parent or folder
+    /// name, or `relative` is absent while the template uses it.
+    pub fn expand(
+        &self,
+        home: &Path,
+        primary: &Path,
+        relative: Option<&Path>,
+        name: &str,
+    ) -> Option<PathBuf> {
+        let mut path = std::ffi::OsString::new();
+        for (index, part) in self.0.iter().enumerate() {
+            match part {
+                TemplatePart::Text(text) => match text.strip_prefix('~').filter(|_| index == 0) {
+                    Some(rest) => {
+                        path.push(home);
+                        path.push(rest);
+                    }
+                    None => path.push(text),
+                },
+                TemplatePart::Primary => path.push(primary),
+                TemplatePart::Parent => path.push(primary.parent()?),
+                TemplatePart::Repo => path.push(primary.file_name()?),
+                TemplatePart::Relative => path.push(relative?),
+                TemplatePart::Name => path.push(name),
+            }
+        }
+        Some(PathBuf::from(path).components().collect())
+    }
 }
 
 #[cfg(test)]

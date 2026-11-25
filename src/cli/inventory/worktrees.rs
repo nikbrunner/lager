@@ -24,7 +24,7 @@ use crate::application::worktrees::{
     short_id,
 };
 use crate::cli::worktree::{branch_label, kept_label, removal_losses};
-use crate::domain::config::resolve_worktree_root;
+use crate::domain::config::WorktreeTemplate;
 use crate::infrastructure::config::load_worktrees;
 use crate::infrastructure::desktop::NativeDesktop;
 use crate::infrastructure::filesystem::Filesystem;
@@ -253,19 +253,16 @@ pub(super) fn open(
 }
 
 /// Where the configuration places new worktrees, read when a plan is asked for.
-fn worktree_root(config_path: &Path, home: &Path) -> Result<Option<PathBuf>, String> {
+fn worktree_template(config_path: &Path) -> Result<Option<WorktreeTemplate>, String> {
     if std::fs::symlink_metadata(config_path).is_err() {
         return Ok(None);
     }
-    let (_, value, _) = load_worktrees(config_path).map_err(|error| error.to_string())?;
-    value
-        .map(|value| resolve_worktree_root(&value, home))
-        .transpose()
-        .map_err(|error| error.to_string())
+    let (_, template, _) = load_worktrees(config_path).map_err(|error| error.to_string())?;
+    Ok(template)
 }
 
 fn plan(popup: &Popup, session: &InventorySession, name: &str) -> Result<AddPlan, String> {
-    let worktree_root = worktree_root(&session.config_path, &popup.home)?;
+    let template = worktree_template(&session.config_path)?;
     let request = worktrees::request_named(&GIT, &popup.repository, name)?;
     worktrees::plan_add(
         &GIT,
@@ -273,8 +270,9 @@ fn plan(popup: &Popup, session: &InventorySession, name: &str) -> Result<AddPlan
         &popup.repository,
         &request,
         &Placement {
+            home: &popup.home,
             root: Some(&session.root),
-            worktree_root: worktree_root.as_deref(),
+            template: template.as_ref(),
         },
     )
     .map_err(|error| match error {

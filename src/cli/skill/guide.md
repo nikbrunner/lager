@@ -21,7 +21,7 @@ Lager reads `--config PATH`, then `LAGER_CONFIG`, then `$HOME/.config/lager/conf
 lager init --root ~/repos --create-root --github
 ```
 
-`--no-create-root` and `--no-github` are the other choices. `init` never overwrites an existing configuration. Bitbucket providers, `worktree_root` and the `[session]` section are optional; see `docs/reference/config.md` in https://github.com/nikbrunner/lager.
+`--no-create-root` and `--no-github` are the other choices. `init` never overwrites an existing configuration. Bitbucket providers, `worktree_path` and the `[session]` section are optional; see `docs/reference/config.md` in https://github.com/nikbrunner/lager.
 
 Declare and clone a first repository with `lager add org/project --register`, then confirm with `lager status --json`.
 

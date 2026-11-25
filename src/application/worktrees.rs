@@ -9,6 +9,7 @@ use crate::application::git_dir;
 use crate::application::ports::{
     PathKind, WorktreeCommandError, WorktreeFault, WorktreeFilesystem, WorktreeGit, WorktreeLosses,
 };
+use crate::domain::config::WorktreeTemplate;
 
 /// A repository with a non-bare primary checkout.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,11 +213,12 @@ pub struct AddRequest<'a> {
     pub path: Option<&'a Path>,
 }
 
-/// The configured `root` and `worktree_root`, resolved from HOME.
-#[derive(Debug, Clone, Copy, Default)]
+/// The configured `root` and `worktree_path`, with the HOME that `~` stands for.
+#[derive(Debug, Clone, Copy)]
 pub struct Placement<'a> {
+    pub home: &'a Path,
     pub root: Option<&'a Path>,
-    pub worktree_root: Option<&'a Path>,
+    pub template: Option<&'a WorktreeTemplate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,24 +307,35 @@ pub fn plan_add<G: WorktreeGit, F: WorktreeFilesystem>(
         BranchChoice::New(branch) => (branch, true),
         BranchChoice::Existing(branch) => (branch, false),
     };
-    let destination = match (request.path, placement.worktree_root) {
+    let destination = match (request.path, placement.template) {
         (Some(path), _) => path.to_path_buf(),
         (None, None) => derived(primary, request.name),
-        (None, Some(worktree_root)) => {
-            let outside = || {
-                AddError::Usage(format!(
-                    "{} is outside the configured root; worktree_root needs --path here",
-                    primary.display()
-                ))
+        (None, Some(template)) => {
+            let relative = if template.uses_relative() {
+                let canonical = |path: &Path| filesystem.canonicalize(path).ok();
+                let relative = placement
+                    .root
+                    .and_then(canonical)
+                    .and_then(|root| primary.strip_prefix(root).ok().map(Path::to_path_buf))
+                    .filter(|relative| !relative.as_os_str().is_empty())
+                    .ok_or_else(|| {
+                        AddError::Usage(format!(
+                            "{} is outside the configured root; a worktree_path with {{relative}} needs --path here",
+                            primary.display()
+                        ))
+                    })?;
+                Some(relative)
+            } else {
+                None
             };
-            let canonical = |path: &Path| filesystem.canonicalize(path).ok();
-            let relative = placement
-                .root
-                .and_then(canonical)
-                .and_then(|root| primary.strip_prefix(root).ok().map(Path::to_path_buf))
-                .filter(|relative| !relative.as_os_str().is_empty())
-                .ok_or_else(outside)?;
-            derived(&worktree_root.join(relative), request.name)
+            template
+                .expand(placement.home, primary, relative.as_deref(), request.name)
+                .ok_or_else(|| {
+                    AddError::Usage(format!(
+                        "{} has no parent directory or folder name for worktree_path; pass --path",
+                        primary.display()
+                    ))
+                })?
         }
     };
     let exists = git.branch_exists(primary, branch).map_err(refused)?;

@@ -14,7 +14,7 @@ use crate::application::worktrees::{
     self, AddError, AddPlan, AddRequest, Blocker, BranchChoice, Placement, RemovalInspection,
     RemoveError, Repository, WorktreeListing, short_id,
 };
-use crate::domain::config::{Config, resolve_worktree_root};
+use crate::domain::config::{Config, WorktreeTemplate};
 use crate::domain::repository::{RepositoryRef, validate_reference_safety};
 use crate::domain::session::Layout;
 use crate::infrastructure::{
@@ -33,7 +33,7 @@ pub(super) struct Settings {
     pub(super) home: PathBuf,
     pub(super) cwd: PathBuf,
     pub(super) config: Option<Config>,
-    worktree_root: Option<PathBuf>,
+    template: Option<WorktreeTemplate>,
 }
 
 impl Settings {
@@ -54,19 +54,16 @@ impl Settings {
             home,
             cwd,
             config: None,
-            worktree_root: None,
+            template: None,
         };
         if std::fs::symlink_metadata(config_path).is_ok() {
-            let (config, worktree_root, warnings) =
+            let (config, template, warnings) =
                 crate::infrastructure::config::load_worktrees(config_path)
                     .map_err(|source| fail(source.to_string()))?;
             for warning in warnings {
                 eprintln!("lager: warning: {warning}");
             }
-            settings.worktree_root = worktree_root
-                .map(|value| resolve_worktree_root(&value, &settings.home))
-                .transpose()
-                .map_err(|source| fail(source.to_string()))?;
+            settings.template = template;
             settings.config = Some(config);
         }
         Ok(settings)
@@ -392,8 +389,9 @@ fn add(settings: &Settings, args: WorktreeAddArgs, layout: Option<&Layout>) -> i
             ..request
         },
         &Placement {
+            home: &settings.home,
             root: root.as_deref(),
-            worktree_root: settings.worktree_root.as_deref(),
+            template: settings.template.as_ref(),
         },
     );
     let plan = match plan {

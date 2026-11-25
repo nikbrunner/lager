@@ -40,8 +40,8 @@ entry in the `errors` of `worktree list --json`, a session flag without a
 `[session]` section, and a session that fails after its worktree was created or
 removed. `2` covers invalid `NAME` or
 branch names, `--start` without a new branch, `worktree list` outside a
-repository without a target, `worktree_root` placement of a primary checkout
-outside `root` without `--path`, and `worktree remove` without `--yes` outside a
+repository without a target, `worktree_path` placement with `{relative}` of a
+primary checkout outside `root` without `--path`, and `worktree remove` without `--yes` outside a
 terminal. Declining the removal question exits `0`; Ctrl-C at it exits `130`.
 
 For `session`, `0` covers a created, existing, opened or closed session, a `close` that finds no session, and a picker with nothing to offer. `1` covers a missing `[session]` section, an invalid configuration, Rex that is not installed or not running, a Rex call that fails, a missing checkout, a `NAME` that matches no linked worktree or several, a record file that cannot be locked, read or written, an `fzf` that is missing or fails, and a root the `open` picker cannot resolve or walk. `2` covers invalid arguments, `open` or `close` without `REPOSITORY` outside a terminal, and more than one picked checkout. `130` covers a cancelled picker.

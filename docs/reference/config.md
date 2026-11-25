@@ -23,19 +23,33 @@ post_clone = "make setup"
 | `providers` | No | Empty table | Provider entries are keyed by lowercase host names. |
 | `repositories` | No | Empty array | Each item is an explicit repository or a trailing `/*` wildcard. |
 | `inventory` | No | Default bindings | Mode-aware inventory key maps. |
-| `worktree_root` | No | None | Base directory for new worktrees: `~`, `~/relative`, or a relative path under `HOME`. Absolute paths and `..` are rejected. |
+| `worktree_path` | No | `{primary}.worktrees/{name}` | Path template for new worktrees. It starts with `{primary}`, `{parent}` or `~/` and contains `{name}`. Absolute paths and `..` are rejected. See [Worktree path](#worktree-path). |
 | `session` | No | None | The terminal host and the layout of new sessions. See [Session](#session). |
 
 `root` resolves from `HOME`, never from the working directory. A root that does not exist yet is an empty inventory: `status` and `tui` say so in a note and exit `0`. `init` converts an absolute root under `HOME` to a portable `~` path before writing it.
 
-Without `worktree_root`, `lager worktree add` places a worktree beside its primary checkout at `<primary>.worktrees/<NAME>`. With it, the worktree goes to `<worktree_root>/<primary relative to root>.worktrees/<NAME>`:
+### Worktree path
+
+`worktree_path` is the template `lager worktree add` expands into the destination of a new worktree. Without it, the destination is `{primary}.worktrees/{name}`, beside the primary checkout.
+
+| Placeholder | Expands to |
+| --- | --- |
+| `{primary}` | The absolute path of the primary checkout. |
+| `{parent}` | The parent directory of the primary checkout. |
+| `{repo}` | The folder name of the primary checkout. |
+| `{relative}` | The path of the primary checkout below `root`. |
+| `{name}` | The `NAME` argument. |
 
 ```toml
 root = "~/repos"
-worktree_root = "~/worktrees"
+worktree_path = "~/worktrees/{relative}.worktrees/{name}"
 ```
 
-`lager worktree add org/project hotfix` then creates `~/worktrees/org/project.worktrees/hotfix`. A primary checkout outside `root` has no such path and needs `--path`. An invalid `worktree_root` fails every command when the configuration is loaded. You set the key by editing the file; configuration mutations keep it as written.
+`lager worktree add org/project hotfix` then creates `~/worktrees/org/project.worktrees/hotfix`. `{parent}/{repo}-{name}` creates `~/repos/org/project-hotfix`.
+
+The template starts with `{primary}`, `{parent}` or `~/`, and `{primary}` and `{parent}` appear only there. It contains `{name}` at least once. Absolute paths and `..` segments are rejected, as is any unknown placeholder or stray `{` or `}`. An invalid template fails every command when the configuration is loaded. `{relative}` needs the primary checkout to lie below `root`; for one outside it, `lager worktree add` asks for `--path`. A template without `{relative}` places any primary checkout.
+
+You set the key by editing the file; configuration mutations keep it as written.
 
 ## Provider fields
 
