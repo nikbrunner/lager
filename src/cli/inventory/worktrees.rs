@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -27,7 +27,8 @@ use crate::application::worktrees::{
     RemovalInspection, RemoveError, Repository, WorktreeRecord, short_id,
 };
 use crate::cli::worktree::{
-    branch_label, created_line, kept_label, removal_losses, upstream_clause,
+    age, branch_label, created_line, distance, kept_label, removal_losses, seconds_now,
+    upstream_clause,
 };
 use crate::domain::config::WorktreeTemplate;
 use crate::infrastructure::config::load_worktrees;
@@ -166,14 +167,12 @@ impl Picker {
 
     /// The local branch a pick checks out, and the worktree that has it.
     fn checked_out<'a>(&'a self, branch: &'a Branch) -> Option<(&'a str, &'a Path)> {
-        match &branch.local {
-            None => Some((branch.name.as_str(), branch.checked_out.as_deref()?)),
-            Some(local) => {
-                let listing = self.branches.listing.as_ref().ok()?;
-                let row = listing.local.iter().find(|row| row.name == local.name)?;
-                Some((row.name.as_str(), row.checked_out.as_deref()?))
-            }
-        }
+        let path = self.branches.listing.as_ref().ok()?.checked_out(branch)?;
+        let name = branch
+            .local
+            .as_ref()
+            .map_or(branch.name.as_str(), |local| local.name.as_str());
+        Some((name, path))
     }
 }
 
@@ -1497,21 +1496,6 @@ fn tab_hint(bindings: &Bindings) -> String {
     }
 }
 
-/// How long ago `committed` was, in its largest whole unit.
-fn age(committed: i64, now: i64) -> String {
-    let seconds = (now - committed).max(0);
-    let (minute, hour, day) = (60, 3600, 86_400);
-    match seconds {
-        seconds if seconds < minute => "now".to_owned(),
-        seconds if seconds < hour => format!("{}m", seconds / minute),
-        seconds if seconds < day => format!("{}h", seconds / hour),
-        seconds if seconds < 7 * day => format!("{}d", seconds / day),
-        seconds if seconds < 56 * day => format!("{}w", seconds / (7 * day)),
-        seconds if seconds < 365 * day => format!("{}mo", seconds / (30 * day)),
-        seconds => format!("{}y", seconds / (365 * day)),
-    }
-}
-
 /// The tab row: every tab with the selected one in brackets, and what the tab knows on the right.
 fn tab_line(popup: &Popup, picker: &Picker, fetching: bool, width: usize) -> Line<'static> {
     let mut spans = Vec::new();
@@ -1558,9 +1542,7 @@ fn tab_line(popup: &Popup, picker: &Picker, fetching: bool, width: usize) -> Lin
 /// The column heading and one line per shown branch, cut to `width`, the cursor row reversed.
 fn branch_lines(popup: &Popup, picker: &Picker, width: usize) -> Vec<Line<'static>> {
     let rows = picker.rows();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs() as i64);
+    let now = seconds_now();
     let last_heading = if picker.tab == Tab::Local {
         "checked out"
     } else {
@@ -1571,14 +1553,8 @@ fn branch_lines(popup: &Popup, picker: &Picker, width: usize) -> Vec<Line<'stati
         .map(|branch| {
             let last = match (&branch.local, &branch.checked_out) {
                 (Some(local), _) => {
-                    let distance = match local.ahead_behind {
-                        None => "distance unknown".to_owned(),
-                        Some((0, 0)) => "same commit".to_owned(),
-                        Some((ahead, 0)) => format!("{ahead} ahead"),
-                        Some((0, behind)) => format!("{behind} behind"),
-                        Some((ahead, behind)) => format!("{ahead} ahead, {behind} behind"),
-                    };
-                    let mut text = format!("{} · {distance}", escape(&local.name));
+                    let mut text =
+                        format!("{} · {}", escape(&local.name), distance(local.ahead_behind));
                     match picker.checked_out(branch) {
                         Some((_, path)) if *path == popup.repository.primary => {
                             text.push_str(" · primary");

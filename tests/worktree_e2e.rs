@@ -47,6 +47,29 @@ fn git(directory: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
+/// Commits with author and committer date `seconds` since the Unix epoch.
+fn commit_at(directory: &Path, file: &str, message: &str, seconds: i64) -> String {
+    fs::write(directory.join(file), format!("{message}\n")).unwrap();
+    git(directory, &["add", file]);
+    let date = format!("@{seconds} +0000");
+    let output = support::external(directory, "git")
+        .arg("-C")
+        .arg(directory)
+        .args([
+            "-c",
+            "user.name=lager",
+            "-c",
+            "user.email=lager@example.invalid",
+        ])
+        .env("GIT_AUTHOR_DATE", &date)
+        .env("GIT_COMMITTER_DATE", &date)
+        .args(["commit", "-qm", message])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    git(directory, &["rev-parse", "HEAD"])
+}
+
 fn commit(directory: &Path, file: &str, message: &str) -> String {
     fs::write(directory.join(file), format!("{message}\n")).unwrap();
     git(directory, &["add", file]);
@@ -4462,4 +4485,556 @@ fn list_asks_the_host_once_and_warns_once_when_it_cannot_tell() {
         "{warning}"
     );
     unknown(&output, &warning);
+}
+
+// ---- branches ----------------------------------------------------------------------------
+
+/// A repository with an `origin` and branches whose commits sit `base` plus a fixed offset
+/// apart, newest last:
+///
+/// | Offset | Branch                                             |
+/// | ------ | -------------------------------------------------- |
+/// | -1000  | `scratch`, local only                              |
+/// | 0      | `feat/mid` locally, one commit behind its remote   |
+/// | +1000  | `origin/feat/mid`                                  |
+/// | +2000  | `origin/feat/remote-only`, no local branch         |
+/// | +3000  | `origin/feat/new`                                  |
+/// | +4000  | `feat/new` locally, one commit ahead of its remote |
+///
+/// `main` is at the time of the test and checked out in the primary checkout; `feat/mid` is
+/// checked out in a linked worktree.
+struct Branched {
+    fixture: Fixture,
+    main: String,
+    scratch: String,
+    mid_local: String,
+    mid_remote: String,
+    remote_only: String,
+    new_remote: String,
+    new_local: String,
+    mid_worktree: PathBuf,
+}
+
+fn branched(base: i64) -> Branched {
+    let fixture = Fixture::new();
+    fixture.remote();
+    let primary = fixture.primary.clone();
+    let main = fixture.head();
+
+    git(&primary, &["checkout", "-q", "-b", "scratch"]);
+    let scratch = commit_at(&primary, "scratch", "scratch", base - 1000);
+
+    git(&primary, &["checkout", "-q", "-b", "feat/mid", "main"]);
+    let mid_local = commit_at(&primary, "mid-1", "mid 1", base);
+    let mid_remote = commit_at(&primary, "mid-2", "mid 2", base + 1000);
+    git(&primary, &["push", "-q", "-u", "origin", "feat/mid"]);
+    git(&primary, &["checkout", "-q", "main"]);
+    git(&primary, &["branch", "-f", "feat/mid", &mid_local]);
+
+    git(
+        &primary,
+        &["checkout", "-q", "-b", "feat/remote-only", "main"],
+    );
+    let remote_only = commit_at(&primary, "remote-only", "remote only", base + 2000);
+    git(&primary, &["push", "-q", "origin", "feat/remote-only"]);
+    git(&primary, &["checkout", "-q", "main"]);
+    git(&primary, &["branch", "-D", "feat/remote-only"]);
+
+    git(&primary, &["checkout", "-q", "-b", "feat/new", "main"]);
+    let new_remote = commit_at(&primary, "new-1", "new 1", base + 3000);
+    git(&primary, &["push", "-q", "-u", "origin", "feat/new"]);
+    let new_local = commit_at(&primary, "new-2", "new 2", base + 4000);
+    git(&primary, &["checkout", "-q", "main"]);
+
+    let mid_worktree = fixture.linked("mid", &["feat/mid"]);
+    Branched {
+        fixture,
+        main,
+        scratch,
+        mid_local,
+        mid_remote,
+        remote_only,
+        new_remote,
+        new_local,
+        mid_worktree,
+    }
+}
+
+const THIRTY_DAYS: i64 = 30 * 86_400;
+
+/// Seconds since the Unix epoch, now.
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+#[test]
+fn branches_lists_the_local_branches_newest_commit_first_with_where_each_is_checked_out() {
+    let scene = branched(now() - THIRTY_DAYS);
+    let nested = scene.fixture.primary.join("src/deep");
+    fs::create_dir_all(&nested).unwrap();
+
+    let output = scene.fixture.run(&nested, &["worktree", "branches"]);
+
+    assert_exit(&output, 0);
+    assert_eq!(
+        stdout(&output),
+        table(&[
+            ["branch", "commit", "age", "checked out"],
+            ["main", short(&scene.main), "now", "primary"],
+            ["feat/new", short(&scene.new_local), "4w", ""],
+            [
+                "feat/mid",
+                short(&scene.mid_local),
+                "4w",
+                text(&scene.mid_worktree)
+            ],
+            ["scratch", short(&scene.scratch), "4w", ""],
+        ])
+    );
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn branches_remote_lists_the_remote_tracking_branches_with_the_local_branch_and_its_distance() {
+    let scene = branched(now() - THIRTY_DAYS);
+    let mid_place = format!("feat/mid · 1 behind · in {}", scene.mid_worktree.display());
+
+    let output = scene.fixture.worktree(&["branches", "--remote"]);
+
+    assert_exit(&output, 0);
+    assert_eq!(
+        stdout(&output),
+        table(&[
+            ["branch", "commit", "age", "local"],
+            [
+                "origin/main",
+                short(&scene.main),
+                "now",
+                "main · same commit · primary"
+            ],
+            [
+                "origin/feat/new",
+                short(&scene.new_remote),
+                "4w",
+                "feat/new · 1 ahead"
+            ],
+            [
+                "origin/feat/remote-only",
+                short(&scene.remote_only),
+                "4w",
+                ""
+            ],
+            [
+                "origin/feat/mid",
+                short(&scene.mid_remote),
+                "4w",
+                &mid_place
+            ],
+        ])
+    );
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn branches_say_when_the_distance_to_the_remote_branch_is_unknown() {
+    let scene = branched(now() - THIRTY_DAYS);
+    let shim = failing_git(&scene.fixture, "rev-list", 0);
+
+    let output = support::lager_with_path(&scene.fixture.home, &scene.fixture.config, Some(&shim))
+        .current_dir(&scene.fixture.primary)
+        .args(["worktree", "branches", "--remote"])
+        .output()
+        .unwrap();
+
+    assert_exit(&output, 0);
+    let rows = stdout(&output);
+    assert!(
+        rows.lines()
+            .any(|row| row.contains("feat/new · distance unknown")),
+        "{rows}"
+    );
+}
+
+#[test]
+fn branches_json_carries_every_key_of_every_local_branch_in_order() {
+    let scene = branched(1_700_000_000);
+    let fixture = &scene.fixture;
+
+    let output = fixture.worktree(&["branches", "--json"]);
+
+    assert_exit(&output, 0);
+    assert_eq!(stderr(&output), "");
+    let raw = stdout(&output);
+    let document: Value = serde_json::from_str(&raw).unwrap();
+    let main_time = document["branches"][0]["committed_at"].as_str().unwrap();
+    assert!(
+        main_time.len() == 20 && main_time.ends_with('Z'),
+        "{main_time}"
+    );
+    assert_eq!(
+        document,
+        json!({
+            "schema_version": 1,
+            "branches": [
+                {
+                    "name": "main",
+                    "remote": null,
+                    "commit": scene.main,
+                    "committed_at": main_time,
+                    "checked_out": text(&fixture.primary),
+                    "local": null,
+                    "ahead": null,
+                    "behind": null,
+                },
+                {
+                    "name": "feat/new",
+                    "remote": null,
+                    "commit": scene.new_local,
+                    "committed_at": "2023-11-14T23:20:00Z",
+                    "checked_out": null,
+                    "local": null,
+                    "ahead": null,
+                    "behind": null,
+                },
+                {
+                    "name": "feat/mid",
+                    "remote": null,
+                    "commit": scene.mid_local,
+                    "committed_at": "2023-11-14T22:13:20Z",
+                    "checked_out": text(&scene.mid_worktree),
+                    "local": null,
+                    "ahead": null,
+                    "behind": null,
+                },
+                {
+                    "name": "scratch",
+                    "remote": null,
+                    "commit": scene.scratch,
+                    "committed_at": "2023-11-14T21:56:40Z",
+                    "checked_out": null,
+                    "local": null,
+                    "ahead": null,
+                    "behind": null,
+                },
+            ],
+            "last_fetch": null,
+            "errors": [],
+        })
+    );
+    assert_keys_in_order(
+        &raw,
+        &[
+            "schema_version",
+            "branches",
+            "name",
+            "remote",
+            "commit",
+            "committed_at",
+            "checked_out",
+            "local",
+            "ahead",
+            "behind",
+            "last_fetch",
+            "errors",
+        ],
+    );
+}
+
+/// Asserts that the quoted `keys` first appear in `raw` in this order.
+fn assert_keys_in_order(raw: &str, keys: &[&str]) {
+    let mut from = 0;
+    for key in keys {
+        let found = raw[from..]
+            .find(&format!("\"{key}\":"))
+            .unwrap_or_else(|| panic!("{key} out of order in {raw}"));
+        from += found + key.len();
+    }
+}
+
+#[test]
+fn branches_json_remote_rows_name_the_local_branch_its_distance_and_where_it_is_checked_out() {
+    let scene = branched(1_700_000_000);
+    let fixture = &scene.fixture;
+    fixture.fetch();
+
+    let output = fixture.worktree(&["branches", "--remote", "--json"]);
+
+    assert_exit(&output, 0);
+    let mut document: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let main_time = document["branches"][0]["committed_at"].clone();
+    let fetched = document["last_fetch"].as_str().unwrap().to_owned();
+    assert!(
+        fetched.len() == 20 && fetched.ends_with('Z') && fetched.starts_with("20"),
+        "{fetched}"
+    );
+    document["last_fetch"] = Value::Null;
+    assert_eq!(
+        document,
+        json!({
+            "schema_version": 1,
+            "branches": [
+                {
+                    "name": "origin/main",
+                    "remote": "origin",
+                    "commit": scene.main,
+                    "committed_at": main_time,
+                    "checked_out": text(&fixture.primary),
+                    "local": "main",
+                    "ahead": 0,
+                    "behind": 0,
+                },
+                {
+                    "name": "origin/feat/new",
+                    "remote": "origin",
+                    "commit": scene.new_remote,
+                    "committed_at": "2023-11-14T23:03:20Z",
+                    "checked_out": null,
+                    "local": "feat/new",
+                    "ahead": 1,
+                    "behind": 0,
+                },
+                {
+                    "name": "origin/feat/remote-only",
+                    "remote": "origin",
+                    "commit": scene.remote_only,
+                    "committed_at": "2023-11-14T22:46:40Z",
+                    "checked_out": null,
+                    "local": null,
+                    "ahead": null,
+                    "behind": null,
+                },
+                {
+                    "name": "origin/feat/mid",
+                    "remote": "origin",
+                    "commit": scene.mid_remote,
+                    "committed_at": "2023-11-14T22:30:00Z",
+                    "checked_out": text(&scene.mid_worktree),
+                    "local": "feat/mid",
+                    "ahead": 0,
+                    "behind": 1,
+                },
+            ],
+            "last_fetch": null,
+            "errors": [],
+        })
+    );
+}
+
+#[test]
+fn branches_json_reports_no_fetch_until_one_has_run() {
+    let scene = branched(1_700_000_000);
+    let fixture = &scene.fixture;
+    let last_fetch = || {
+        let output = fixture.worktree(&["branches", "--remote", "--json"]);
+        assert_exit(&output, 0);
+        serde_json::from_str::<Value>(&stdout(&output)).unwrap()["last_fetch"].clone()
+    };
+
+    assert_eq!(last_fetch(), Value::Null);
+    fixture.fetch();
+    assert!(last_fetch().is_string());
+}
+
+#[test]
+fn branches_json_writes_dates_as_utc_rfc_3339_across_leap_days() {
+    let fixture = Fixture::new();
+    for (branch, seconds) in [
+        ("a-1971", 31_536_000_i64),
+        ("b-2000-leap", 951_782_400),
+        ("c-2024-leap-end", 1_709_251_199),
+        ("d-2024-march", 1_709_251_200),
+    ] {
+        git(&fixture.primary, &["checkout", "-q", "-b", branch, "main"]);
+        commit_at(&fixture.primary, branch, branch, seconds);
+    }
+    git(&fixture.primary, &["checkout", "-q", "main"]);
+
+    let output = fixture.worktree(&["branches", "--json"]);
+
+    assert_exit(&output, 0);
+    let document: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let dated = document["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|branch| branch["name"] != "main")
+        .map(|branch| {
+            (
+                branch["name"].as_str().unwrap().to_owned(),
+                branch["committed_at"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        dated,
+        [
+            ("d-2024-march", "2024-03-01T00:00:00Z"),
+            ("c-2024-leap-end", "2024-02-29T23:59:59Z"),
+            ("b-2000-leap", "2000-02-29T00:00:00Z"),
+            ("a-1971", "1971-01-01T00:00:00Z"),
+        ]
+        .map(|(name, date)| (name.to_owned(), date.to_owned()))
+    );
+}
+
+#[test]
+fn branches_without_a_remote_list_nothing_remote_and_exit_zero() {
+    let fixture = Fixture::new();
+
+    let human = fixture.worktree(&["branches", "--remote"]);
+    assert_exit(&human, 0);
+    assert_eq!((stdout(&human).as_str(), stderr(&human).as_str()), ("", ""));
+
+    let json = fixture.worktree(&["branches", "--remote", "--json"]);
+    assert_exit(&json, 0);
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout(&json)).unwrap(),
+        json!({"schema_version": 1, "branches": [], "last_fetch": null, "errors": []})
+    );
+}
+
+#[test]
+fn branches_resolve_paths_references_and_linked_worktrees_to_the_same_repository() {
+    let scene = branched(now() - THIRTY_DAYS);
+    let fixture = &scene.fixture;
+    let expected = stdout(&fixture.worktree(&["branches"]));
+    assert!(expected.contains("feat/mid"), "{expected}");
+    let runs = [
+        fixture.run(&scene.mid_worktree, &["worktree", "branches"]),
+        fixture.run(
+            &fixture.base,
+            &["worktree", "branches", text(&fixture.primary)],
+        ),
+        fixture.run(
+            &fixture.base,
+            &["worktree", "branches", text(&scene.mid_worktree)],
+        ),
+        fixture.run(
+            &fixture.home,
+            &["worktree", "branches", "./repos/acme/core"],
+        ),
+        fixture.run(&fixture.base, &["worktree", "branches", "acme/core"]),
+    ];
+    for output in runs {
+        assert_exit(&output, 0);
+        assert_eq!(stdout(&output), expected);
+        assert_eq!(stderr(&output), "");
+    }
+}
+
+#[test]
+fn branches_outside_a_repository_need_a_target_and_unresolved_targets_print_nothing() {
+    let fixture = Fixture::new();
+    let cases: &[(&[&str], i32, String)] = &[
+        (
+            &[],
+            2,
+            format!(
+                "error: not a Git checkout: {}; name a repository\n",
+                fixture.base.display()
+            ),
+        ),
+        (
+            &["acme/absent"],
+            1,
+            format!(
+                "error: not a Git checkout: {}\n",
+                fixture.home.join("repos/acme/absent").display()
+            ),
+        ),
+        (
+            &["acme/*"],
+            1,
+            "error: a wildcard does not name one repository\n".to_owned(),
+        ),
+    ];
+    for (args, code, message) in cases {
+        for flags in [&[][..], &["--remote"], &["--json"], &["--remote", "--json"]] {
+            let output = fixture.run(
+                &fixture.base,
+                &[&["worktree", "branches"], *args, flags].concat(),
+            );
+            assert_exit(&output, *code);
+            assert_eq!(stdout(&output), "", "{args:?} {flags:?}");
+            assert_eq!(stderr(&output), *message, "{args:?} {flags:?}");
+        }
+    }
+}
+
+#[test]
+fn branches_json_reports_a_failed_listing_in_errors_and_exits_one() {
+    let fixture = Fixture::new();
+    let shim = failing_git(&fixture, "for-each-ref", 0);
+    let run = |flags: &[&str]| {
+        support::lager_with_path(&fixture.home, &fixture.config, Some(&shim))
+            .current_dir(&fixture.primary)
+            .args([&["worktree", "branches"], flags].concat())
+            .output()
+            .unwrap()
+    };
+    let message = format!("error: {}: boom\n", fixture.primary.display());
+
+    let json = run(&["--json"]);
+    assert_exit(&json, 1);
+    assert_eq!(stderr(&json), message);
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout(&json)).unwrap(),
+        json!({
+            "schema_version": 1,
+            "branches": [],
+            "last_fetch": null,
+            "errors": [{"path": text(&fixture.primary), "code": "git_failed", "error": "boom"}],
+        })
+    );
+
+    let human = run(&[]);
+    assert_exit(&human, 1);
+    assert_eq!(stdout(&human), "");
+    assert_eq!(stderr(&human), message);
+}
+
+#[test]
+fn branches_escape_control_characters_in_human_output_and_keep_json_original() {
+    let fixture = Fixture::new();
+    let tricky = fixture.linked("a\u{1b}]2;INJECT\u{7}b", &["-b", "tricky"]);
+
+    let human = fixture.worktree(&["branches"]);
+    assert_exit(&human, 0);
+    let rows = stdout(&human);
+    assert!(
+        rows.contains(&format!(
+            "{}/a\\x1b]2;INJECT\\x07b",
+            fixture.container().display()
+        )),
+        "{rows}"
+    );
+    assert!(
+        !rows.contains('\u{1b}') && !rows.contains('\u{7}'),
+        "{rows:?}"
+    );
+
+    let json = fixture.worktree(&["branches", "--json"]);
+    let document: Value = serde_json::from_str(&stdout(&json)).unwrap();
+    let row = document["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|branch| branch["name"] == "tricky")
+        .unwrap();
+    assert_eq!(row["checked_out"], json!(text(&tricky)));
+}
+
+#[test]
+fn branches_leave_the_repository_as_it_was() {
+    let scene = branched(1_700_000_000);
+    let before = (scene.fixture.state(), tree(&scene.fixture.base));
+
+    for flags in [&[][..], &["--remote"], &["--json"], &["--remote", "--json"]] {
+        assert_exit(&scene.fixture.worktree(&[&["branches"], flags].concat()), 0);
+    }
+
+    assert_eq!((scene.fixture.state(), tree(&scene.fixture.base)), before);
 }

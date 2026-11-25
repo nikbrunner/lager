@@ -145,6 +145,11 @@ pub enum WorktreeCommand {
     #[command(about = "List the primary checkout and every linked worktree")]
     List(WorktreeListArgs),
     #[command(
+        about = "List the local or remote branches of a repository, newest commit first",
+        after_help = "Examples:\n  lager worktree branches\n  lager worktree branches org/project --remote\n  lager worktree branches . --json"
+    )]
+    Branches(WorktreeBranchesArgs),
+    #[command(
         about = "Create a linked worktree through git worktree add",
         after_help = "Examples:\n  lager worktree add org/project hotfix\n  lager worktree add . review --branch feature/login\n  lager worktree add . --branch origin/feat/session-tabs\n  lager worktree add . spike --new-branch dev/spike --start v2.3.0 --path ../spike"
     )]
@@ -163,6 +168,22 @@ pub struct WorktreeListArgs {
         help = "Checkout path (absolute, or starting with . or ..) or repository reference; omit for the current repository"
     )]
     pub repository: Option<String>,
+    #[arg(long, help = "Render one stable JSON document")]
+    pub json: bool,
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct WorktreeBranchesArgs {
+    #[arg(
+        value_name = "REPOSITORY",
+        help = "Checkout path (absolute, or starting with . or ..) or repository reference; omit for the current repository"
+    )]
+    pub repository: Option<String>,
+    #[arg(
+        long,
+        help = "List remote-tracking branches, with the local branch of the same name, instead of local branches"
+    )]
+    pub remote: bool,
     #[arg(long, help = "Render one stable JSON document")]
     pub json: bool,
 }

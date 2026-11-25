@@ -2,17 +2,20 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use super::args::{WorktreeAddArgs, WorktreeCommand, WorktreeListArgs, WorktreeRemoveArgs};
+use super::args::{
+    WorktreeAddArgs, WorktreeBranchesArgs, WorktreeCommand, WorktreeListArgs, WorktreeRemoveArgs,
+};
 use super::interaction::{Interaction, InteractionError};
 use super::session;
 use crate::application::ports::{Recorded, WorktreeGit, WorktreeLosses};
 use crate::application::sessions::{self, Ensured};
 use crate::application::worktrees::{
-    self, AddError, AddPlan, AddRequest, Blocker, BranchChoice, Placement, RemovalInspection,
-    RemoveError, Repository, WorktreeListing, short_id,
+    self, AddError, AddPlan, AddRequest, Blocker, Branch, BranchChoice, BranchListing, Placement,
+    RemovalInspection, RemoveError, Repository, WorktreeListing, short_id,
 };
 use crate::domain::config::{Config, WorktreeTemplate};
 use crate::domain::repository::{RepositoryRef, validate_reference_safety};
@@ -121,6 +124,7 @@ pub(super) fn run(
     };
     let layout = match &command {
         WorktreeCommand::List(_) => session::layout(config_path).ok(),
+        WorktreeCommand::Branches(_) => None,
         WorktreeCommand::Add(WorktreeAddArgs {
             open_session: false,
             create_session: false,
@@ -140,6 +144,7 @@ pub(super) fn run(
     };
     match command {
         WorktreeCommand::List(args) => list(&settings, args, layout.is_some()),
+        WorktreeCommand::Branches(args) => branches(&settings, args),
         WorktreeCommand::Add(args) => add(&settings, args, layout.as_ref()),
         WorktreeCommand::Remove(args) => remove(&settings, args, interaction),
     }
@@ -158,21 +163,28 @@ fn add_request(args: &WorktreeAddArgs) -> AddRequest<'_> {
     }
 }
 
-fn list(settings: &Settings, args: WorktreeListArgs, configured: bool) -> i32 {
-    let repository = match &args.repository {
+/// The named repository, or the one of the working directory. Fails with the exit code
+/// after printing why: `2` for a working directory outside a repository, `1` otherwise.
+fn target(settings: &Settings, argument: Option<&str>) -> Result<Repository, i32> {
+    let repository = match argument {
         Some(argument) => settings.repository(argument),
         None => worktrees::resolve_repository(&GIT, &FILES, &settings.cwd, false),
     };
-    let repository = match repository {
-        Ok(repository) => repository,
-        Err(message) if args.repository.is_none() => {
+    repository.map_err(|message| {
+        if argument.is_none() {
             error(format!("{message}; name a repository"));
-            return 2;
-        }
-        Err(message) => {
+            2
+        } else {
             error(message);
-            return 1;
+            1
         }
+    })
+}
+
+fn list(settings: &Settings, args: WorktreeListArgs, configured: bool) -> i32 {
+    let repository = match target(settings, args.repository.as_deref()) {
+        Ok(repository) => repository,
+        Err(code) => return code,
     };
     let listing = worktrees::list(&GIT, &FILES, &repository);
     let hosted = configured.then(|| {
@@ -338,6 +350,12 @@ fn table(listing: &WorktreeListing, sessions: Option<&[Hosted]>) -> String {
             row
         })
         .collect::<Vec<_>>();
+    columns(&rows)
+}
+
+/// One line per row, every cell but the last padded to its column's width and two spaces
+/// apart. The rows have equally many cells.
+fn columns(rows: &[Vec<String>]) -> String {
     let width = |column: usize| {
         rows.iter()
             .map(|row| row[column].chars().count())
@@ -361,6 +379,212 @@ fn table(listing: &WorktreeListing, sessions: Option<&[Hosted]>) -> String {
                 + "\n"
         })
         .collect()
+}
+
+/// How long ago `committed` was, in its largest whole unit.
+pub(super) fn age(committed: i64, now: i64) -> String {
+    let seconds = (now - committed).max(0);
+    let (minute, hour, day) = (60, 3600, 86_400);
+    match seconds {
+        seconds if seconds < minute => "now".to_owned(),
+        seconds if seconds < hour => format!("{}m", seconds / minute),
+        seconds if seconds < day => format!("{}h", seconds / hour),
+        seconds if seconds < 7 * day => format!("{}d", seconds / day),
+        seconds if seconds < 56 * day => format!("{}w", seconds / (7 * day)),
+        seconds if seconds < 365 * day => format!("{}mo", seconds / (30 * day)),
+        seconds => format!("{}y", seconds / (365 * day)),
+    }
+}
+
+/// How far a local branch is from its remote-tracking branch: commits only on the local
+/// branch, then commits only on the remote one; `None` when Git could not count them.
+pub(super) fn distance(ahead_behind: Option<(usize, usize)>) -> String {
+    match ahead_behind {
+        None => "distance unknown".to_owned(),
+        Some((0, 0)) => "same commit".to_owned(),
+        Some((ahead, 0)) => format!("{ahead} ahead"),
+        Some((0, behind)) => format!("{behind} behind"),
+        Some((ahead, behind)) => format!("{ahead} ahead, {behind} behind"),
+    }
+}
+
+pub(super) fn seconds_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
+}
+
+/// `seconds` since the Unix epoch as an RFC 3339 timestamp in UTC, such as
+/// `2023-11-14T22:13:20Z`.
+fn rfc3339(seconds: i64) -> String {
+    let (days, time) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+    // Civil date from days since 1970-01-01, counting years from March.
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        time / 3600,
+        time / 60 % 60,
+        time % 60
+    )
+}
+
+/// The local branches or, with `--remote`, the remote-tracking branches, newest commit first.
+fn branches(settings: &Settings, args: WorktreeBranchesArgs) -> i32 {
+    let repository = match target(settings, args.repository.as_deref()) {
+        Ok(repository) => repository,
+        Err(code) => return code,
+    };
+    let last_fetch = GIT
+        .last_fetch(&repository.common_dir)
+        .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
+        .map(|elapsed| rfc3339(elapsed.as_secs() as i64));
+    let listing = worktrees::branches(&GIT, &repository);
+    let empty = BranchListing::default();
+    let found = listing.as_ref().unwrap_or(&empty);
+    let rows = if args.remote {
+        &found.remote
+    } else {
+        &found.local
+    };
+    let stdout = if args.json {
+        let document = BranchesDocument {
+            schema_version: 1,
+            branches: rows
+                .iter()
+                .map(|branch| BranchRecord::new(branch, found))
+                .collect(),
+            last_fetch,
+            errors: listing
+                .as_ref()
+                .err()
+                .map(|message| Fault {
+                    path: Some(repository.primary.to_string_lossy().into_owned()),
+                    code: "git_failed",
+                    error: message.clone(),
+                })
+                .into_iter()
+                .collect(),
+        };
+        match serde_json::to_string_pretty(&document) {
+            Ok(document) => document + "\n",
+            Err(source) => {
+                error(format!("could not render the branches: {source}"));
+                return 1;
+            }
+        }
+    } else {
+        branch_table(rows, found, &repository, args.remote)
+    };
+    let written = std::io::stdout().lock().write_all(stdout.as_bytes());
+    if let Err(message) = &listing {
+        error(format!("{}: {message}", repository.primary.display()));
+    }
+    if let Err(source) = written {
+        error(format!("could not write the branches: {source}"));
+        return 1;
+    }
+    i32::from(listing.is_err())
+}
+
+#[derive(Serialize)]
+struct BranchesDocument<'a> {
+    schema_version: u8,
+    branches: Vec<BranchRecord<'a>>,
+    last_fetch: Option<String>,
+    errors: Vec<Fault>,
+}
+
+#[derive(Serialize)]
+struct BranchRecord<'a> {
+    name: &'a str,
+    remote: Option<&'a str>,
+    commit: &'a str,
+    committed_at: String,
+    checked_out: Option<String>,
+    local: Option<&'a str>,
+    ahead: Option<usize>,
+    behind: Option<usize>,
+}
+
+impl<'a> BranchRecord<'a> {
+    fn new(branch: &'a Branch, listing: &'a BranchListing) -> Self {
+        let counts = branch.local.as_ref().and_then(|local| local.ahead_behind);
+        Self {
+            name: &branch.name,
+            remote: branch.remote.as_deref(),
+            commit: &branch.commit,
+            committed_at: rfc3339(branch.committed),
+            checked_out: listing
+                .checked_out(branch)
+                .map(|path| path.to_string_lossy().into_owned()),
+            local: branch.local.as_ref().map(|local| local.name.as_str()),
+            ahead: counts.map(|(ahead, _)| ahead),
+            behind: counts.map(|(_, behind)| behind),
+        }
+    }
+}
+
+/// A heading and one line per branch: name, short commit, age, and for a local branch where
+/// it is checked out, for a remote one the local branch with its distance and checkout.
+fn branch_table(
+    rows: &[Branch],
+    listing: &BranchListing,
+    repository: &Repository,
+    remote: bool,
+) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let now = seconds_now();
+    let mut table = vec![
+        [
+            "branch",
+            "commit",
+            "age",
+            if remote { "local" } else { "checked out" },
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+    ];
+    table.extend(rows.iter().map(|branch| {
+        let checked_out = listing.checked_out(branch);
+        let primary = checked_out == Some(repository.primary.as_path());
+        let place = checked_out.map(|path| escape(path.display()));
+        let last = match &branch.local {
+            None if primary => "primary".to_owned(),
+            None => place.unwrap_or_default(),
+            Some(local) => {
+                let mut text =
+                    format!("{} · {}", escape(&local.name), distance(local.ahead_behind));
+                match place {
+                    Some(_) if primary => text.push_str(" · primary"),
+                    Some(place) => text.push_str(&format!(" · in {place}")),
+                    None => {}
+                }
+                text
+            }
+        };
+        vec![
+            escape(&branch.name),
+            short_id(&branch.commit).to_owned(),
+            age(branch.committed, now),
+            last,
+        ]
+    }));
+    columns(&table)
 }
 
 fn add(settings: &Settings, args: WorktreeAddArgs, layout: Option<&Layout>) -> i32 {
@@ -704,5 +928,17 @@ fn remove(settings: &Settings, args: WorktreeRemoveArgs, interaction: &mut dyn I
             error(format!("git worktree remove failed: {}", failure.message));
             if failure.cancelled { 130 } else { 1 }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rfc3339;
+
+    #[test]
+    fn rfc3339_writes_utc_around_the_epoch_and_a_non_leap_century() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(-1), "1969-12-31T23:59:59Z");
+        assert_eq!(rfc3339(4_107_542_400), "2100-03-01T00:00:00Z");
     }
 }

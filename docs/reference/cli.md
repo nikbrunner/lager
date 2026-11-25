@@ -26,6 +26,7 @@ Lager selects the configuration path in this order:
 | `status`, `list`, `ls` | `status [--remote] [--include-archived] [--registered] [--json]` | Prints the rows `tui` shows, once its scan has finished: a table, or one JSON document with `--json`. `--remote` expands wildcards through providers; `tui` with remote discovery on shows those rows and adds the providers' unregistered and excluded repositories as candidates. `--registered` keeps declared repositories and wildcard patterns. |
 | `tui` | `tui [--remote] [--include-archived]` | Opens the inventory with its repository actions; requires TTY stdin and stdout. `--remote` starts with remote discovery on. |
 | `worktree list` | `worktree list [REPOSITORY] [--json]` | Lists the primary checkout and every linked worktree of one repository. |
+| `worktree branches` | `worktree branches [REPOSITORY] [--remote] [--json]` | Lists the local branches of one repository, or with `--remote` its remote-tracking branches, newest commit first. |
 | `worktree add` | `worktree add <REPOSITORY> [NAME] [--branch EXISTING \| --new-branch NEW] [--start REF] [--path PATH] [--fetch] [--open-session \| --create-session] [--json]` | Creates a linked worktree through `git worktree add`. |
 | `worktree remove` | `worktree remove <PATH> [--yes] [--force] [--close-session]` | Removes one linked worktree through `git worktree remove` and keeps its branch. |
 | `session open` | `session open [REPOSITORY] [NAME]` | Shows the checkout's terminal session in Rex, creating it first when there is none. |
@@ -574,7 +575,7 @@ acceptance testing without your normal repositories or configuration.
 - Anything else is a repository reference, such as `org/project`, and resolves to the checkout the configuration assigns to it.
 - A linked worktree resolves to its primary checkout.
 
-`worktree list` without `REPOSITORY` uses the repository of the working directory, from any directory inside it. Outside a repository it exits `2`. `worktree add` and `worktree remove` always take their target as an argument.
+`worktree list` and `worktree branches` without `REPOSITORY` use the repository of the working directory, from any directory inside it. Outside a repository they exit `2`. `worktree add` and `worktree remove` always take their target as an argument.
 
 ### `worktree list`
 
@@ -591,6 +592,30 @@ $ lager worktree list org/project
 The stderr line reads `lager: warning: REASON`, where `REASON` is one of the session errors in [Outcomes](#outcomes) without its `error:`, such as `session host unavailable: …`.
 
 A failure after the repository is found is one line on stderr and exit `1`, with the readable rows still printed.
+
+### `worktree branches`
+
+The command prints what the Local and Remote tabs of the Worktrees popup show, newest commit first. It reads the branches Git already has and never touches the network; [`worktree add --fetch`](#worktree-add) and the popup's `f` bring remote branches up to date.
+
+Without `--remote` it lists the local branches in four columns under a heading, two spaces apart. They are the branch, the short commit ID, the age of the commit, and where the branch is checked out. The last column holds `primary` for the primary checkout, the path of a linked worktree, or nothing for a branch no worktree has.
+
+With `--remote` it lists the remote-tracking branches, such as `origin/feat/x`, in the same first three columns. The fourth column, headed `local`, names the local branch of the same name and its distance from the remote branch. The distance reads `same commit`, `N ahead`, `N behind` or `N ahead, M behind`, counting commits only on the local branch first. It reads `distance unknown` when Git could not count them. The column ends with `primary` or `in PATH` when a worktree has that local branch checked out. It stays empty for a remote branch without a local one. A remote's `HEAD` is not listed. Without remotes the list is empty and the exit status is `0`.
+
+```text
+$ lager worktree branches org/project
+branch    commit   age  checked out
+main      9f2c1ab  now  primary
+feat/new  4d0e7a1  3d
+feat/mid  b81c2f0  2w   /home/dev/repos/org/project.worktrees/mid
+
+$ lager worktree branches org/project --remote
+branch           commit   age  local
+origin/main      9f2c1ab  now  main · same commit · primary
+origin/feat/new  71aa0c3  3d   feat/new · 1 ahead
+origin/feat/mid  e5d9b02  2w   feat/mid · 1 behind · in /home/dev/repos/org/project.worktrees/mid
+```
+
+A list with no rows prints nothing. With `--json` the command prints one document; see [worktree JSON](worktree-json.md#worktree-branches---json). A failed Git call after the repository is found is one line on stderr and exit `1`; the document then holds the failure in `errors`.
 
 ### `worktree add`
 

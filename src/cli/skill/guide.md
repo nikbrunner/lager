@@ -35,6 +35,7 @@ Declare and clone a first repository with `lager add org/project --register`, th
 | Clone every declared repository that is missing | `lager ensure` |
 | Delete a checkout | `lager remove org/project --unregister --yes` (`--keep-registered` keeps the declaration) |
 | List the worktrees of a repository | `lager worktree list [REPOSITORY] --json` |
+| List the local or remote branches of a repository, newest commit first | `lager worktree branches [REPOSITORY] [--remote] --json` (each branch carries `checked_out`, and a remote branch its `local` branch with `ahead` and `behind`; `last_fetch` says when remotes were last fetched) |
 | Start a branch in a worktree | `lager worktree add org/project NAME [--branch EXISTING \| --new-branch NEW] --json` |
 | Check out an existing local or remote branch in a worktree | `lager worktree add org/project --branch origin/feat/x --json` (`NAME` defaults to the last segment of the branch; a remote branch becomes a local branch that tracks it; add `--fetch` to fetch every remote first) |
 | Remove a worktree, keeping its branch | `lager worktree remove PATH --yes` |

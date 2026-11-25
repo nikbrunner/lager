@@ -73,6 +73,15 @@ lager worktree list --json
 
 Without an argument the command lists the repository of the working directory. It shows the primary checkout and every linked worktree Git knows, also those created by other tools or placed elsewhere, with branch and `locked` or `prunable` state. With a `[session]` section, a last column names each worktree's session.
 
+## See which branches you can check out
+
+```sh
+lager worktree branches
+lager worktree branches org/project --remote
+```
+
+The command lists the local branches with the newest commit first, and where each is checked out. With `--remote` it lists the remote-tracking branches with the local branch of the same name and its distance. It reads what Git already has: `worktree add --fetch` brings remote branches up to date first. Add `--json` for a document that scripts and agents read; see [worktree JSON](../reference/worktree-json.md#worktree-branches---json).
+
 ## Remove a worktree
 
 ```sh

@@ -330,7 +330,8 @@ pub struct Branch {
     pub commit: String,
     /// Committer date of the commit, in seconds since the Unix epoch.
     pub committed: i64,
-    /// The working tree that has the local branch checked out.
+    /// The working tree that has the local branch checked out. A remote-tracking branch stays
+    /// `None`; callers use `BranchListing::checked_out`.
     pub checked_out: Option<PathBuf>,
     /// For a remote-tracking branch, the local branch of the same name.
     pub local: Option<LocalMatch>,
@@ -341,6 +342,22 @@ pub struct Branch {
 pub struct BranchListing {
     pub local: Vec<Branch>,
     pub remote: Vec<Branch>,
+}
+
+impl BranchListing {
+    /// The working tree that has the branch checked out. A remote-tracking branch resolves
+    /// through the local branch of the same name.
+    pub fn checked_out<'a>(&'a self, branch: &'a Branch) -> Option<&'a Path> {
+        match &branch.local {
+            None => branch.checked_out.as_deref(),
+            Some(local) => self
+                .local
+                .iter()
+                .find(|row| row.name == local.name)?
+                .checked_out
+                .as_deref(),
+        }
+    }
 }
 
 /// Lists the local and the remote-tracking branches with where each local branch is checked

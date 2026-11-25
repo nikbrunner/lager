@@ -1,6 +1,6 @@
 # Worktree JSON reference
 
-`lager worktree list [REPOSITORY] --json` and `lager worktree add … --json` each write exactly one JSON object and a newline to stdout. Diagnostics go to stderr, one line each. These schemas are separate from [`status --json`](status-json.md) and [session JSON](session-json.md).
+`lager worktree list [REPOSITORY] --json`, `lager worktree branches [REPOSITORY] [--remote] --json` and `lager worktree add … --json` each write exactly one JSON object and a newline to stdout. Diagnostics go to stderr, one line each. These schemas are separate from [`status --json`](status-json.md) and [session JSON](session-json.md).
 
 ## `worktree list --json`
 
@@ -99,6 +99,77 @@ Git leaves worktree entries it cannot read out of its own listing. Lager reads t
 | No `REPOSITORY` outside a repository, or invalid arguments    | Nothing                                            | `2`  |
 
 A record never states a fact Lager could not read. When the origin lookup fails, `repository_identity` is `null` and `errors` names the failure.
+
+## `worktree branches --json`
+
+The document lists the local branches, or with `--remote` the remote-tracking branches, newest commit first. It reads the branches Git already has and never fetches.
+
+```json
+{
+  "schema_version": 1,
+  "branches": [
+    {
+      "name": "origin/feat/mid",
+      "remote": "origin",
+      "commit": "e5d9b02a47c13f68b0d2a9c4417e8f35a6b1c7d0",
+      "committed_at": "2023-11-14T22:30:00Z",
+      "checked_out": "/home/dev/repos/acme/core.worktrees/mid",
+      "local": "feat/mid",
+      "ahead": 0,
+      "behind": 1
+    },
+    {
+      "name": "origin/feat/remote-only",
+      "remote": "origin",
+      "commit": "71aa0c3d92e84b5f06a1c8e7d3b4f5a69c0e2d18",
+      "committed_at": "2023-11-14T22:13:20Z",
+      "checked_out": null,
+      "local": null,
+      "ahead": null,
+      "behind": null
+    }
+  ],
+  "last_fetch": "2023-11-15T08:02:41Z",
+  "errors": []
+}
+```
+
+| Key              | Type           | Meaning                                                                                              |
+| ---------------- | -------------- | ---------------------------------------------------------------------------------------------------- |
+| `schema_version` | integer        | `1`.                                                                                                 |
+| `branches`       | array          | One record per branch, newest commit first. Empty when there is none, such as `--remote` without a remote. |
+| `last_fetch`     | string or null | When a fetch last wrote the repository's `FETCH_HEAD`, as an RFC 3339 timestamp in UTC with whole seconds. `null` when the repository was never fetched. |
+| `errors`         | array          | Every failure that makes the command exit `1`. Empty on success.                                     |
+
+Keys appear in the order listed here, and every key is always present.
+
+### Branch records
+
+| Key            | Type            | Meaning                                                                                                   |
+| -------------- | --------------- | --------------------------------------------------------------------------------------------------------- |
+| `name`         | string          | The short name: `feat/x` for a local branch, `origin/feat/x` for a remote-tracking branch.                 |
+| `remote`       | string or null  | The remote of a remote-tracking branch, such as `origin`. `null` for a local branch.                       |
+| `commit`       | string          | The full Git object ID the branch points at.                                                              |
+| `committed_at` | string          | The committer date of that commit, as an RFC 3339 timestamp in UTC with whole seconds, such as `2023-11-14T22:13:20Z`. |
+| `checked_out`  | string or null  | The absolute path of the working tree that has the branch checked out, the primary checkout included. For a remote-tracking branch, the working tree that has its `local` branch checked out. `null` when no working tree does. |
+| `local`        | string or null  | For a remote-tracking branch, the local branch of the same name, such as `feat/x`. `null` for a local branch and for a remote-tracking branch without one. |
+| `ahead`        | integer or null | Commits only on the `local` branch, compared with this remote-tracking branch. `null` when `local` is `null` or Git could not count them. |
+| `behind`       | integer or null | Commits only on this remote-tracking branch, compared with the `local` branch. `null` when `local` is `null` or Git could not count them. |
+
+Values are original: no escaping beyond JSON's own. Paths are converted to UTF-8; a byte that is not valid UTF-8 becomes U+FFFD. A remote's `HEAD` is not a branch and is not listed.
+
+### Branch errors
+
+Each error has the keys `path`, `code` and `error` of [`worktree list --json`](#errors). The listing is all or nothing, so a failure leaves `branches` empty and holds one error, with `path` the primary checkout and `code` `git_failed`. It is repeated on stderr as `error: PATH: MESSAGE`. `last_fetch` is still read.
+
+### Branch exit status
+
+| Situation                                                     | stdout                              | Exit |
+| ------------------------------------------------------------- | ----------------------------------- | ---- |
+| Listing succeeded, also with no branches                      | The object with empty `errors`      | `0`  |
+| The repository was found and a Git call failed                | The object with `branches` empty    | `1`  |
+| Invalid configuration, or a repository that cannot be found   | Nothing                             | `1`  |
+| No `REPOSITORY` outside a repository, or invalid arguments    | Nothing                             | `2`  |
 
 ## `worktree add --json`
 
