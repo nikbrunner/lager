@@ -447,11 +447,12 @@ fn branches(settings: &Settings, args: WorktreeBranchesArgs) -> i32 {
         Ok(repository) => repository,
         Err(code) => return code,
     };
-    let last_fetch = GIT
-        .last_fetch(&repository.common_dir)
+    let state = worktrees::branch_state(&GIT, &repository);
+    let last_fetch = state
+        .last_fetch
         .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
         .map(|elapsed| rfc3339(elapsed.as_secs() as i64));
-    let listing = worktrees::branches(&GIT, &repository);
+    let listing = state.listing;
     let empty = BranchListing::default();
     let found = listing.as_ref().unwrap_or(&empty);
     let rows = if args.remote {
@@ -643,6 +644,12 @@ fn add(settings: &Settings, args: WorktreeAddArgs, layout: Option<&Layout>) -> i
         }
         Err(AddError::Refused(message)) => {
             error(message);
+            return 1;
+        }
+        Err(AddError::BranchExists(branch)) => {
+            error(format!(
+                "branch already exists: {branch}; --branch checks it out"
+            ));
             return 1;
         }
     };

@@ -19,7 +19,7 @@ lager worktree add . review --branch feature/login
 lager worktree add . spike --new-branch dev/spike --start v2.3.0
 ```
 
-`--start` takes a local commit, tag or branch. `--start` never fetches, so fetch first when the branch or tag lives on the remote only.
+`--start` takes a local commit, tag or branch. When the branch or tag lives on the remote only, add `--fetch`, which runs before `--start` is resolved.
 
 With `--branch`, the name is optional. Lager takes the last segment of the branch name, and a remote branch becomes a new local branch that tracks it:
 

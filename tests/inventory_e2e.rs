@@ -11789,6 +11789,8 @@ fn inventory_worktree_popup_creates_a_tracking_worktree_from_a_remote_branch() {
     let temp = temp_dir();
     let (home, config, core) = worktree_fixture(temp.path(), "");
     let commit = remote_only_branch(&core, "origin/feat/session-tabs");
+    // A local branch with the remote branch's name never stands in for a pick on Remote.
+    run_git(&core, &["branch", "origin/feat/session-tabs"]);
     let created = core.parent().unwrap().join("core.worktrees/tabs");
 
     let transcript = run_inventory_pty_actions(
@@ -11847,8 +11849,8 @@ fn inventory_worktree_popup_creates_a_tracking_worktree_from_a_remote_branch() {
     );
     assert!(!transcript.contains("fatal:"), "{transcript}");
     assert_eq!(
-        git_stdout(&created, &["rev-parse", "--abbrev-ref", "@{u}"]),
-        "origin/feat/session-tabs"
+        git_stdout(&created, &["rev-parse", "--symbolic-full-name", "@{u}"]),
+        "refs/remotes/origin/feat/session-tabs"
     );
     assert_eq!(git_stdout(&created, &["rev-parse", "HEAD"]), commit);
 }

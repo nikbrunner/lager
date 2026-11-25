@@ -224,7 +224,7 @@ pub struct WorktreeAddArgs {
     pub path: Option<PathBuf>,
     #[arg(
         long,
-        help = "Fetch every remote first, so --branch finds branches pushed since the last fetch; a failing remote is a warning"
+        help = "Fetch every remote first, so --branch and --start find refs pushed since the last fetch; a failing remote is a warning"
     )]
     pub fetch: bool,
     #[arg(

@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
-use std::time::{Instant, SystemTime};
+use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -20,10 +20,10 @@ use super::{
     handoff_line, home_relative, model, popup_body_width, popup_regions, popup_scroll_limit,
     rows_hint, tint, wait_for_enter, warn,
 };
-use crate::application::ports::{Desktop, WorktreeGit};
+use crate::application::ports::Desktop;
 use crate::application::sessions;
 use crate::application::worktrees::{
-    self, AddPlan, AddRequest, Blocker, Branch, BranchChoice, BranchListing, Placement,
+    self, AddPlan, AddRequest, Blocker, Branch, BranchChoice, BranchState, Placement,
     RemovalInspection, RemoveError, Repository, WorktreeRecord, short_id,
 };
 use crate::cli::worktree::{
@@ -84,25 +84,7 @@ struct Picker {
     filtering: bool,
     /// The cursor among the shown rows of the Local or Remote tab.
     cursor: usize,
-    branches: Branches,
-}
-
-/// What the tabs read from Git.
-struct Branches {
-    listing: Result<BranchListing, String>,
-    remotes: Result<Vec<String>, String>,
-    /// When a fetch last wrote `FETCH_HEAD`.
-    last_fetch: Option<SystemTime>,
-}
-
-impl Branches {
-    fn read(repository: &Repository) -> Self {
-        Self {
-            listing: worktrees::branches(&GIT, repository),
-            remotes: GIT.remotes(&repository.primary),
-            last_fetch: GIT.last_fetch(&repository.common_dir),
-        }
-    }
+    branches: BranchState,
 }
 
 impl Picker {
@@ -123,7 +105,7 @@ impl Picker {
 
     /// Takes the branches read after a fetch. A part that could not be read keeps what the
     /// tabs showed and comes back as a problem. The cursor stays on the branch it was on.
-    fn take(&mut self, branches: Branches) -> Vec<String> {
+    fn take(&mut self, branches: BranchState) -> Vec<String> {
         let selected = self
             .rows()
             .get(self.cursor)
@@ -185,10 +167,18 @@ pub(super) struct Fetch {
     remotes: Vec<String>,
     started: Instant,
     /// The remotes that failed with Git's reasons, and the branches read after the fetch.
-    handle: JoinHandle<(Failures, Branches)>,
+    handle: JoinHandle<(Failures, BranchState)>,
 }
 
 type Failures = Result<Vec<(String, String)>, String>;
+
+/// A branch picked on Local or Remote.
+#[derive(Clone)]
+struct Picked {
+    branch: String,
+    /// Picked on Remote, so it names a remote-tracking branch.
+    remote: bool,
+}
 
 enum Stage {
     List,
@@ -196,15 +186,14 @@ enum Stage {
     Add,
     /// The name of a worktree on a picked branch.
     Rename {
-        branch: String,
+        picked: Picked,
         text: String,
         rejected: Option<String>,
     },
     Plan {
         plan: AddPlan,
-        name: String,
         /// The branch picked on Local or Remote; `None` for the New tab.
-        picked: Option<String>,
+        picked: Option<Picked>,
         /// The focused choice, an index into `plan_choices`.
         choice: usize,
         /// Whether the session opens after the add; `None` when sessions are off.
@@ -445,29 +434,31 @@ fn plan(
     )
     .map_err(|error| match error {
         worktrees::AddError::Usage(message) | worktrees::AddError::Refused(message) => message,
+        worktrees::AddError::BranchExists(branch) => {
+            format!("branch {branch} exists; pick it on Local")
+        }
     })
 }
 
 /// The plan of the New tab: always a new branch named after the worktree.
 fn plan_new(popup: &Popup, session: &InventorySession, name: &str) -> Result<AddPlan, String> {
-    let request = AddRequest {
-        name: Some(name),
-        branch: BranchChoice::Named,
-        start: None,
-        path: None,
-    };
-    worktrees::check_request(&GIT, &request)?;
-    if GIT.branch_exists(&popup.repository.primary, name)? {
-        return Err(format!("branch {name} exists; pick it on Local"));
-    }
-    plan(popup, session, &request)
+    plan(
+        popup,
+        session,
+        &AddRequest {
+            name: Some(name),
+            branch: BranchChoice::Named,
+            start: None,
+            path: None,
+        },
+    )
 }
 
-/// The plan of a picked branch, named `name` or after the branch's last segment.
+/// The plan of a picked branch, named `name` or after the branch.
 fn plan_picked(
     popup: &Popup,
     session: &InventorySession,
-    branch: &str,
+    picked: &Picked,
     name: Option<&str>,
 ) -> Result<AddPlan, String> {
     plan(
@@ -475,16 +466,15 @@ fn plan_picked(
         session,
         &AddRequest {
             name,
-            branch: BranchChoice::Existing(branch),
+            branch: if picked.remote {
+                BranchChoice::Remote(&picked.branch)
+            } else {
+                BranchChoice::Existing(&picked.branch)
+            },
             start: None,
             path: None,
         },
     )
-}
-
-/// The name a picked branch gives its worktree: its last `/` segment.
-fn derived_name(branch: &str) -> String {
-    branch.rsplit('/').next().unwrap_or(branch).to_owned()
 }
 
 /// `fresh` marks the plan as drawn for the first time, so keys typed before it never answer it.
@@ -492,13 +482,11 @@ fn plan_stage(
     session: &InventorySession,
     fresh: &mut bool,
     plan: AddPlan,
-    name: String,
-    picked: Option<String>,
+    picked: Option<Picked>,
 ) -> Stage {
     *fresh = true;
     Stage::Plan {
         plan,
-        name,
         picked,
         choice: 0,
         open: (session.session_layout.is_some() && !matches!(session.hosted, Some(Err(_))))
@@ -561,7 +549,7 @@ fn start_fetch(session: &mut InventorySession, popup: &Popup, running: &mut Opti
         started: Instant::now(),
         handle: std::thread::spawn(move || {
             let failures = worktrees::fetch_remotes(&GIT, &fetched, true);
-            (failures, Branches::read(&fetched))
+            (failures, worktrees::branch_state(&GIT, &fetched))
         }),
     });
 }
@@ -634,7 +622,7 @@ fn add_key(
             Some(Action::Accept) => {
                 let text = picker.text.clone();
                 match plan_new(popup, session, &text) {
-                    Ok(plan) => return plan_stage(session, fresh, plan, text, None),
+                    Ok(plan) => return plan_stage(session, fresh, plan, None),
                     Err(reason) => {
                         if let Some(picker) = popup.picker.as_mut() {
                             picker.rejected = Some(reason);
@@ -705,13 +693,16 @@ fn add_key(
                 ));
                 return Stage::Add;
             }
-            let branch = row.name.clone();
-            return match plan_picked(popup, session, &branch, None) {
-                Ok(plan) => plan_stage(session, fresh, plan, derived_name(&branch), Some(branch)),
-                // A derived name that cannot be used leads to the name field, not to a dead end.
+            let picked = Picked {
+                branch: row.name.clone(),
+                remote: picker.tab == Tab::Remote,
+            };
+            return match plan_picked(popup, session, &picked, None) {
+                Ok(plan) => plan_stage(session, fresh, plan, Some(picked)),
+                // A name the branch gives that cannot be used leads to the name field.
                 Err(reason) => Stage::Rename {
-                    text: derived_name(&branch),
-                    branch,
+                    text: worktrees::name_of_branch(&picked.branch).to_owned(),
+                    picked,
                     rejected: Some(reason),
                 },
             };
@@ -777,7 +768,7 @@ pub(super) fn key(
                         filter: String::new(),
                         filtering: false,
                         cursor: 0,
-                        branches: Branches::read(&popup.repository),
+                        branches: worktrees::branch_state(&GIT, &popup.repository),
                     });
                     popup.stage = Stage::Add;
                     return None;
@@ -855,17 +846,11 @@ pub(super) fn key(
             action,
             key,
         ),
-        (Stage::Rename { branch, text, .. }, Some(Action::Accept)) => {
-            match plan_picked(popup, session, &branch, Some(&text)) {
-                Ok(plan) => plan_stage(
-                    session,
-                    &mut selection.preview_fresh,
-                    plan,
-                    text,
-                    Some(branch),
-                ),
+        (Stage::Rename { picked, text, .. }, Some(Action::Accept)) => {
+            match plan_picked(popup, session, &picked, Some(&text)) {
+                Ok(plan) => plan_stage(session, &mut selection.preview_fresh, plan, Some(picked)),
                 Err(reason) => Stage::Rename {
-                    branch,
+                    picked,
                     text,
                     rejected: Some(reason),
                 },
@@ -874,13 +859,13 @@ pub(super) fn key(
         (Stage::Rename { .. }, Some(Action::Cancel)) => Stage::Add,
         (
             Stage::Rename {
-                branch, mut text, ..
+                picked, mut text, ..
             },
             None,
         ) => {
             edit_text(&mut text, key);
             Stage::Rename {
-                branch,
+                picked,
                 text,
                 rejected: None,
             }
@@ -888,7 +873,6 @@ pub(super) fn key(
         (
             Stage::Plan {
                 plan,
-                name,
                 picked,
                 choice,
                 open,
@@ -898,7 +882,6 @@ pub(super) fn key(
             let last = plan_choices(picked.is_some()).len() - 1;
             Stage::Plan {
                 plan,
-                name,
                 choice: if action == Action::Up {
                     choice.saturating_sub(1)
                 } else {
@@ -911,7 +894,6 @@ pub(super) fn key(
         (
             Stage::Plan {
                 plan,
-                name,
                 picked,
                 choice,
                 open: Some(open),
@@ -919,7 +901,6 @@ pub(super) fn key(
             Some(Action::Session),
         ) => Stage::Plan {
             plan,
-            name,
             picked,
             choice,
             open: Some(!open),
@@ -927,40 +908,37 @@ pub(super) fn key(
         (
             Stage::Plan {
                 plan,
-                name,
                 picked,
                 choice,
                 open,
             },
             Some(Action::Accept),
-        ) => match plan_choices(picked.is_some())[choice] {
-            PlanChoice::Create if !readable => {
+        ) => match (plan_choices(picked.is_some())[choice], picked) {
+            (PlanChoice::Create, picked) if !readable => {
                 session.message =
                     Some("Add unavailable: enlarge the terminal to show the whole plan".to_owned());
                 Stage::Plan {
                     plan,
-                    name,
                     picked,
                     choice,
                     open,
                 }
             }
-            PlanChoice::Create => {
+            (PlanChoice::Create, picked) => {
                 popup.stage = Stage::Plan {
                     plan: plan.clone(),
-                    name,
                     picked,
                     choice,
                     open,
                 };
                 return Some(Native::Add(plan, open == Some(true)));
             }
-            PlanChoice::Rename => Stage::Rename {
-                branch: picked.unwrap_or_default(),
-                text: name,
+            (PlanChoice::Rename, Some(picked)) => Stage::Rename {
+                picked,
+                text: plan.name,
                 rejected: None,
             },
-            PlanChoice::Back => Stage::Add,
+            (PlanChoice::Rename | PlanChoice::Back, _) => Stage::Add,
         },
         (Stage::Plan { .. }, Some(Action::Cancel)) => Stage::Add,
         (Stage::Blocked { .. }, Some(Action::Accept | Action::Cancel)) => Stage::List,
@@ -1832,7 +1810,6 @@ fn sheet(popup: &Popup, bindings: &Bindings, area: Rect) -> Option<Sheet> {
     match &popup.stage {
         Stage::Plan {
             plan,
-            name,
             picked,
             choice,
             open,
@@ -1848,7 +1825,7 @@ fn sheet(popup: &Popup, bindings: &Bindings, area: Rect) -> Option<Sheet> {
             if picked.is_some() {
                 required.extend(exact_field_lines(
                     "name",
-                    &escape(name),
+                    &escape(&plan.name),
                     Style::default(),
                     width,
                 ));

@@ -203,6 +203,9 @@ pub enum BranchChoice<'a> {
     /// A local branch, or a remote-tracking branch such as `origin/feat/x`, which gets a new
     /// local branch that tracks it. A local branch of that name wins.
     Existing(&'a str),
+    /// A remote-tracking branch such as `origin/feat/x`, never a local branch of that name.
+    /// An existing local branch of the same name is checked out as `Existing` does.
+    Remote(&'a str),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -231,6 +234,8 @@ pub enum AddError {
     Usage(String),
     /// The repository or the destination does not allow it.
     Refused(String),
+    /// The new branch would take the name of this existing local branch.
+    BranchExists(String),
 }
 
 /// The remote-tracking branch a local branch follows, and how far apart the two are.
@@ -248,6 +253,8 @@ pub struct Upstream {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddPlan {
     pub repository: Repository,
+    /// The worktree's name: the requested one, or the one the branch gives.
+    pub name: String,
     pub destination: PathBuf,
     pub branch: String,
     /// The commit a new branch starts at; `None` checks out the existing `branch`.
@@ -261,6 +268,27 @@ impl AddPlan {
     pub fn tracks(&self) -> bool {
         self.start.is_some() && self.upstream.is_some()
     }
+}
+
+/// The worktree name a branch gives: its last `/` segment, which is no valid NAME for some
+/// branches.
+pub fn name_of_branch(branch: &str) -> &str {
+    branch.rsplit('/').next().unwrap_or(branch)
+}
+
+/// Splits a remote-tracking branch such as `origin/feat/x` into its remote and the branch on
+/// it. The longest remote name that fits wins, so `origin/fork/x` belongs to `origin/fork`
+/// beside `origin`. A remote's `HEAD` is no branch.
+fn split_remote<'a>(remotes: &'a [String], name: &'a str) -> Option<(&'a str, &'a str)> {
+    remotes
+        .iter()
+        .filter_map(|remote| {
+            name.strip_prefix(remote.as_str())?
+                .strip_prefix('/')
+                .filter(|branch| !branch.is_empty() && *branch != "HEAD")
+                .map(|branch| (remote.as_str(), branch))
+        })
+        .max_by_key(|(remote, _)| remote.len())
 }
 
 fn valid_name(name: &str) -> bool {
@@ -278,10 +306,10 @@ pub fn check_request<G: WorktreeGit>(git: &G, request: &AddRequest<'_>) -> Resul
         );
     }
     let branch = match (request.branch, request.name) {
-        (BranchChoice::Existing(_), _) if request.start.is_some() => {
+        (BranchChoice::Existing(_) | BranchChoice::Remote(_), _) if request.start.is_some() => {
             return Err("--start applies only to a new branch".to_owned());
         }
-        (BranchChoice::Existing(_), _) => return Ok(()),
+        (BranchChoice::Existing(_) | BranchChoice::Remote(_), _) => return Ok(()),
         (_, None) => return Err("NAME is required unless --branch is given".to_owned()),
         (BranchChoice::Named, Some(name)) => name,
         (BranchChoice::New(branch), Some(_)) => branch,
@@ -372,9 +400,7 @@ pub fn branches<G: WorktreeGit>(git: &G, repository: &Repository) -> Result<Bran
             .find(|entry| entry.branch.as_deref() == Some(ref_name.as_str()))
             .map(|entry| entry.path.clone())
     };
-    let mut remotes = git.remotes(primary)?;
-    // A remote whose name extends another's, such as `origin/fork` beside `origin`, wins.
-    remotes.sort_by_key(|remote| std::cmp::Reverse(remote.len()));
+    let remotes = git.remotes(primary)?;
     let refs = git.branch_refs(primary)?;
     let mut listing = BranchListing::default();
     for reference in &refs {
@@ -393,11 +419,7 @@ pub fn branches<G: WorktreeGit>(git: &G, repository: &Repository) -> Result<Bran
         let Some(name) = reference.name.strip_prefix("refs/remotes/") else {
             continue;
         };
-        let Some((remote, branch)) = remotes.iter().find_map(|remote| {
-            name.strip_prefix(&format!("{remote}/"))
-                .filter(|branch| !branch.is_empty() && *branch != "HEAD")
-                .map(|branch| (remote, branch))
-        }) else {
+        let Some((remote, branch)) = split_remote(&remotes, name) else {
             continue;
         };
         let local = listing
@@ -410,7 +432,7 @@ pub fn branches<G: WorktreeGit>(git: &G, repository: &Repository) -> Result<Bran
             });
         listing.remote.push(Branch {
             name: name.to_owned(),
-            remote: Some(remote.clone()),
+            remote: Some(remote.to_owned()),
             commit: reference.commit.clone(),
             committed: reference.committed,
             checked_out: None,
@@ -418,6 +440,24 @@ pub fn branches<G: WorktreeGit>(git: &G, repository: &Repository) -> Result<Bran
         });
     }
     Ok(listing)
+}
+
+/// What a view of a repository's branches shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchState {
+    pub listing: Result<BranchListing, String>,
+    pub remotes: Result<Vec<String>, String>,
+    /// When a fetch in any working tree of the repository last finished.
+    pub last_fetch: Option<std::time::SystemTime>,
+}
+
+/// Reads the branches, the remotes and the time of the last fetch.
+pub fn branch_state<G: WorktreeGit>(git: &G, repository: &Repository) -> BranchState {
+    BranchState {
+        listing: branches(git, repository),
+        remotes: git.remotes(&repository.primary),
+        last_fetch: git.last_fetch(&repository.common_dir),
+    }
 }
 
 /// The branch an existing-branch request names.
@@ -439,28 +479,24 @@ impl Existing {
     }
 }
 
-/// Looks for the local branch `given` first, then for the remote-tracking branch of that name.
+/// Looks for the local branch `given` first unless `remote_only`, then for the
+/// remote-tracking branch of that name.
 fn resolve_existing<G: WorktreeGit>(
     git: &G,
     primary: &Path,
     given: &str,
+    remote_only: bool,
 ) -> Result<Existing, String> {
-    if git.branch_exists(primary, given)? {
+    if !remote_only && git.branch_exists(primary, given)? {
         return Ok(Existing::Local {
             branch: given.to_owned(),
             remote: None,
         });
     }
-    for remote in git.remotes(primary)? {
-        let Some(branch) = given
-            .strip_prefix(&format!("{remote}/"))
-            .filter(|branch| !branch.is_empty() && *branch != "HEAD")
-        else {
-            continue;
-        };
-        if !git.remote_branch_exists(primary, given)? {
-            continue;
-        }
+    let remotes = git.remotes(primary)?;
+    if let Some((_, branch)) = split_remote(&remotes, given)
+        && git.remote_branch_exists(primary, given)?
+    {
         let remote = given.to_owned();
         let branch = branch.to_owned();
         return Ok(if git.branch_exists(primary, &branch)? {
@@ -472,7 +508,11 @@ fn resolve_existing<G: WorktreeGit>(
             Existing::Remote { branch, remote }
         });
     }
-    Err(format!("no local or remote branch named {given}"))
+    Err(if remote_only {
+        format!("no remote branch named {given}")
+    } else {
+        format!("no local or remote branch named {given}")
+    })
 }
 
 /// The remote-tracking branch a local branch follows, else the one of the same name on the
@@ -505,16 +545,21 @@ pub fn plan_add<G: WorktreeGit, F: WorktreeFilesystem>(
     let refused = AddError::Refused;
     check_request(git, request).map_err(AddError::Usage)?;
     let primary = &repository.primary;
-    let existing = match request.branch {
-        BranchChoice::Existing(given) => {
-            Some(resolve_existing(git, primary, given).map_err(refused)?)
-        }
-        BranchChoice::Named | BranchChoice::New(_) => None,
+    let (existing, given) = match request.branch {
+        BranchChoice::Existing(given) => (
+            Some(resolve_existing(git, primary, given, false).map_err(refused)?),
+            given,
+        ),
+        BranchChoice::Remote(given) => (
+            Some(resolve_existing(git, primary, given, true).map_err(refused)?),
+            given,
+        ),
+        BranchChoice::Named | BranchChoice::New(_) => (None, ""),
     };
-    let name = match (request.name, &existing, request.branch) {
-        (Some(name), _, _) => name.to_owned(),
-        (None, Some(existing), BranchChoice::Existing(given)) => {
-            let segment = existing.branch().rsplit('/').next().unwrap_or_default();
+    let name = match (request.name, &existing) {
+        (Some(name), _) => name.to_owned(),
+        (None, Some(existing)) => {
+            let segment = name_of_branch(existing.branch());
             if !valid_name(segment) {
                 return Err(AddError::Usage(format!(
                     "branch {given} gives no valid NAME; pass NAME"
@@ -522,7 +567,7 @@ pub fn plan_add<G: WorktreeGit, F: WorktreeFilesystem>(
             }
             segment.to_owned()
         }
-        (None, _, _) => {
+        (None, None) => {
             return Err(AddError::Usage(
                 "NAME is required unless --branch is given".to_owned(),
             ));
@@ -560,7 +605,7 @@ pub fn plan_add<G: WorktreeGit, F: WorktreeFilesystem>(
         }
     };
     let (branch, start, upstream) = match (request.branch, existing) {
-        (BranchChoice::Existing(_), Some(existing)) => {
+        (_, Some(existing)) => {
             let branch = existing.branch().to_owned();
             match existing {
                 Existing::Local { remote, .. } => {
@@ -611,9 +656,7 @@ pub fn plan_add<G: WorktreeGit, F: WorktreeFilesystem>(
                 _ => &name,
             };
             if git.branch_exists(primary, branch).map_err(refused)? {
-                return Err(refused(format!(
-                    "branch already exists: {branch}; --branch checks it out"
-                )));
+                return Err(AddError::BranchExists(branch.to_owned()));
             }
             let start = match request.start {
                 Some(revision) => git.commit(primary, revision).ok_or_else(|| {
@@ -629,6 +672,7 @@ pub fn plan_add<G: WorktreeGit, F: WorktreeFilesystem>(
     validate_destination(git, filesystem, primary, &destination).map_err(refused)?;
     Ok(AddPlan {
         repository: repository.clone(),
+        name,
         destination,
         branch,
         start,

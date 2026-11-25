@@ -138,7 +138,7 @@ The document lists the local branches, or with `--remote` the remote-tracking br
 | ---------------- | -------------- | ---------------------------------------------------------------------------------------------------- |
 | `schema_version` | integer        | `1`.                                                                                                 |
 | `branches`       | array          | One record per branch, newest commit first. Empty when there is none, such as `--remote` without a remote. |
-| `last_fetch`     | string or null | When a fetch last wrote the repository's `FETCH_HEAD`, as an RFC 3339 timestamp in UTC with whole seconds. `null` when the repository was never fetched. |
+| `last_fetch`     | string or null | When a fetch in the primary checkout or any linked worktree last wrote its `FETCH_HEAD`, as an RFC 3339 timestamp in UTC with whole seconds. `null` when the repository was never fetched. |
 | `errors`         | array          | Every failure that makes the command exit `1`. Empty on success.                                     |
 
 Keys appear in the order listed here, and every key is always present.

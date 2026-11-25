@@ -1105,9 +1105,20 @@ impl WorktreeGit for NativeGit {
     }
 
     fn last_fetch(&self, common_dir: &Path) -> Option<std::time::SystemTime> {
-        std::fs::metadata(common_dir.join("FETCH_HEAD"))
-            .and_then(|metadata| metadata.modified())
-            .ok()
+        // A fetch inside a linked worktree writes the FETCH_HEAD of that worktree.
+        let linked = std::fs::read_dir(common_dir.join("worktrees"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path().join("FETCH_HEAD"));
+        std::iter::once(common_dir.join("FETCH_HEAD"))
+            .chain(linked)
+            .filter_map(|path| {
+                std::fs::metadata(path)
+                    .and_then(|data| data.modified())
+                    .ok()
+            })
+            .max()
     }
 
     fn origin_url(&self, repository: &Path) -> Result<Option<String>, String> {

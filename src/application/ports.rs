@@ -493,7 +493,8 @@ pub trait WorktreeGit {
     fn fetch(&self, repository: &Path, remote: &str, quiet: bool) -> Result<(), String>;
     /// Every local and remote-tracking branch, the newest commit first.
     fn branch_refs(&self, repository: &Path) -> Result<Vec<BranchRef>, String>;
-    /// When a fetch last wrote `FETCH_HEAD` in `common_dir`; `None` when it never did.
+    /// When a fetch last wrote `FETCH_HEAD` in `common_dir` or in the Git directory of any
+    /// linked worktree under it; `None` when none did.
     fn last_fetch(&self, common_dir: &Path) -> Option<std::time::SystemTime>;
     /// The origin URL as written, before `url.<base>.insteadOf` rewrites; `None` without an
     /// origin.

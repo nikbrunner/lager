@@ -738,6 +738,99 @@ fn add_fetch_updates_each_remote_on_its_own_and_warns_about_the_one_that_fails()
 }
 
 #[test]
+fn add_refuses_an_invalid_request_before_it_fetches_any_remote() {
+    let fixture = Fixture::new();
+    fixture.remote();
+    let warning = broken_remote(&fixture);
+    let before = fixture.state();
+    let cases: &[&[&str]] = &[
+        &["add", ".", "a/b", "--fetch"],
+        &["add", ".", "--fetch"],
+        &["add", ".", "--branch", "main", "--start", "main", "--fetch"],
+    ];
+    for args in cases {
+        let output = fixture.worktree(args);
+        assert_exit(&output, 2);
+        assert!(!stderr(&output).contains(&warning), "{args:?}: {output:?}");
+    }
+    assert!(!fixture.primary.join(".git/FETCH_HEAD").exists());
+    fixture.assert_unchanged(&before);
+}
+
+#[test]
+fn add_and_branches_give_a_nested_remote_name_to_the_longer_remote() {
+    let fixture = Fixture::new();
+    let remote = fixture.remote();
+    // `origin` keeps out of `refs/remotes/origin/fork/`, so Git can tell whose branch it is.
+    git(
+        &fixture.primary,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/main:refs/remotes/origin/main",
+        ],
+    );
+    // `git remote add` refuses a name nested in another remote's; the configuration holds it.
+    for (key, value) in [
+        ("remote.origin/fork.url", text(&remote)),
+        (
+            "remote.origin/fork.fetch",
+            "+refs/heads/*:refs/remotes/origin/fork/*",
+        ),
+    ] {
+        git(&fixture.primary, &["config", key, value]);
+    }
+    let tip = fixture.head();
+    git(
+        &fixture.primary,
+        &["update-ref", "refs/remotes/origin/fork/x", &tip],
+    );
+
+    let output = fixture.worktree(&["branches", "--remote", "--json"]);
+    assert_exit(&output, 0);
+    let document = serde_json::from_str::<Value>(&stdout(&output)).unwrap();
+    let row = document["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "origin/fork/x")
+        .unwrap_or_else(|| panic!("{document}"));
+    assert_eq!(row["remote"], "origin/fork");
+
+    let output = fixture.worktree(&["add", ".", "--branch", "origin/fork/x"]);
+    let destination = fixture.container().join("x");
+    assert_eq!(
+        created_line(&output),
+        format!(
+            "Created worktree {} on new branch x, tracking origin/fork/x",
+            destination.display()
+        )
+    );
+    assert_eq!(
+        git(&destination, &["rev-parse", "--abbrev-ref", "@{u}"]),
+        "origin/fork/x"
+    );
+}
+
+#[test]
+fn branches_json_counts_a_fetch_run_inside_a_linked_worktree() {
+    let fixture = Fixture::new();
+    fixture.remote();
+    let linked = fixture.linked("review", &["-b", "review"]);
+    let last_fetch = || {
+        let output = fixture.worktree(&["branches", "--json"]);
+        assert_exit(&output, 0);
+        serde_json::from_str::<Value>(&stdout(&output)).unwrap()["last_fetch"].clone()
+    };
+    assert_eq!(last_fetch(), Value::Null);
+
+    git(&linked, &["fetch", "-q", "origin"]);
+
+    assert!(!fixture.primary.join(".git/FETCH_HEAD").exists());
+    assert!(last_fetch().is_string());
+}
+
+#[test]
 fn add_fetch_exits_one_when_the_branch_is_still_missing_after_a_failed_fetch() {
     let fixture = Fixture::new();
     fixture.remote();

@@ -217,7 +217,8 @@ or `main · same commit · primary`. A remote's `HEAD` is left out. `/` types in
 a filter by branch name; while typing, Enter keeps the filter and Esc clears it.
 Outside the filter, Esc closes Add. Enter on a branch picks it as `--branch` does:
 a local branch is checked out as it is, and a remote-tracking branch gets a new
-local branch that tracks it. The worktree is named after the branch's last `/`
+local branch that tracks it. On Remote the pick names the remote-tracking branch,
+never a local branch of the same name. The worktree is named after the branch's last `/`
 segment. A branch that is checked out in another worktree is refused on the
 status line with `! BRANCH is checked out in PATH`. On Remote, `f` fetches each
 remote on its own while the list stays usable; the status line reads
@@ -627,11 +628,11 @@ A list with no rows prints nothing. With `--json` the command prints one documen
 | `--branch REMOTE/EXISTING`, a remote-tracking branch without a local branch of that name | A new local branch `EXISTING` that tracks `REMOTE/EXISTING` | `REMOTE/EXISTING` |
 | `--start REF` with a new branch | The new branch | The commit `REF` names in the local repository |
 
-`--branch` looks for the local branch of that name first, then for the remote-tracking branch, such as `origin/feat/x`, the way `git worktree add` guesses. With `--branch`, `NAME` is optional and defaults to the last `/` segment of the local branch name: `--branch origin/feat/session-tabs` creates the worktree `session-tabs`. A `NAME` that is given always wins. When the last segment is not a valid `NAME`, the command exits `2` with `branch BRANCH gives no valid NAME; pass NAME`.
+`--branch` looks for the local branch of that name first, then for the remote-tracking branch, such as `origin/feat/x`. A remote branch needs its `REMOTE/` prefix: with only `origin/feat/x` known, `--branch feat/x` exits `1`. When one remote's name extends another's, such as `origin/fork` beside `origin`, `origin/fork/x` belongs to the longer one, as in [`worktree branches`](#worktree-branches). With `--branch`, `NAME` is optional and defaults to the last `/` segment of the local branch name: `--branch origin/feat/session-tabs` creates the worktree `session-tabs`. A `NAME` that is given always wins. When the last segment is not a valid `NAME`, the command exits `2` with `branch BRANCH gives no valid NAME; pass NAME`.
 
 `--start` applies only to a new branch, and `--branch` conflicts with `--new-branch`; both mistakes exit `2`. `NAME` is required without `--branch`. A new branch whose name exists, a `--branch` that names no local or remote-tracking branch, a branch that is checked out in another worktree, and a `--start` that names no local commit exit `1`. The checked-out refusal reads `BRANCH is checked out in PATH`, names the primary checkout or the linked worktree that has the branch, and comes before anything is created. Lager never moves an existing branch.
 
-`worktree add` never touches the network unless `--fetch` is given, so without it a remote branch has to be known to the repository already. With `--fetch`, Lager runs `git fetch REMOTE` once for each remote, in the order `git remote` lists them, before it looks for the branch. It passes no `--prune`, so Git's `fetch.prune` decides. A remote that fails prints one line on stderr and the others still run:
+`worktree add` never touches the network unless `--fetch` is given, so without it a remote branch has to be known to the repository already. With `--fetch`, Lager runs `git fetch REMOTE` once for each remote, in the order `git remote` lists them, before it looks for the branch or resolves `--start`. It passes no `--prune`, so Git's `fetch.prune` decides. A remote that fails prints one line on stderr and the others still run:
 
 ```text
 lager: warning: fetch REMOTE failed: REASON
@@ -669,7 +670,7 @@ The line says how the branch relates to its remote-tracking branch, when there i
 | An existing branch at the same commit | `on branch feat/x, up to date with origin/feat/x` |
 | A new branch, or an existing branch without a remote-tracking branch | `on new branch hotfix`, `on branch feat/x` |
 
-The remote-tracking branch of an existing local branch is the upstream it is configured with, or else the branch of the same name on the first remote that has one. Lager reads the remote-tracking refs as they are.
+The remote-tracking branch of an existing local branch is the upstream it is configured with, or else the branch of the same name on the first remote that has one. A `--branch origin/feat/x` that reaches an existing local `feat/x` compares it with `origin/feat/x`, the branch it names, whatever upstream `feat/x` is configured with. Lager reads the remote-tracking refs as they are.
 
 A new worktree holds what Git checks out. Lager copies no environment files, dependencies or ignored files into it and runs none of its own hooks for it. Git runs the repository's `post-checkout` hook as it does for any `git worktree add`.
 
