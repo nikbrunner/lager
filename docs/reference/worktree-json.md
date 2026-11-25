@@ -104,10 +104,13 @@ A record never states a fact Lager could not read. When the origin lookup fails,
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "path": "/home/dev/repos/acme/core.worktrees/hotfix",
   "branch": "hotfix",
   "new_branch": true,
+  "upstream": null,
+  "ahead": null,
+  "behind": null,
   "session": {
     "created": true,
     "id": "session:01a1f8ab-8ffc-76ae-836e-30d02892582e",
@@ -127,10 +130,13 @@ A record never states a fact Lager could not read. When the origin lookup fails,
 
 | Key              | Type           | Meaning                                                                                  |
 | ---------------- | -------------- | ---------------------------------------------------------------------------------------- |
-| `schema_version` | integer        | `1`.                                                                                     |
+| `schema_version` | integer        | `2`.                                                                                     |
 | `path`           | string         | The absolute path of the new worktree, as the `Created worktree` line names it.          |
 | `branch`         | string         | The checked-out branch's short name, such as `hotfix` or `dev/spike`.                    |
-| `new_branch`     | boolean        | `true` when the command created the branch, `false` for `--branch EXISTING`.             |
+| `new_branch`     | boolean        | `true` when the command created the branch, including a local branch created from a remote branch; `false` for an existing local branch. |
+| `upstream`       | string or null | The remote-tracking branch, such as `origin/feat/x`: the one a new branch tracks, or the one an existing branch is compared with. `null` for a new branch without one and for an existing branch that has none. |
+| `ahead`          | integer or null | Commits only on `branch`, compared with `upstream`. `0` for a branch created from `upstream`. `null` when `upstream` is `null`. |
+| `behind`         | integer or null | Commits only on `upstream`, compared with `branch`. `0` for a branch created from `upstream`. `null` when `upstream` is `null`. |
 | `session`        | object or null | The worktree's session with `--open-session` or `--create-session`; `null` without them. |
 
 The session object has the keys of [`session create --json`](session-json.md#create---json) except `schema_version` and `path`: `created`, `id`, `label` and `tabs`. `created` is `false` when a session for the same path was still running, and its pane ids then come from lager's record and can be stale.

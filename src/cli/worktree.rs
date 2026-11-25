@@ -147,7 +147,7 @@ pub(super) fn run(
 
 fn add_request(args: &WorktreeAddArgs) -> AddRequest<'_> {
     AddRequest {
-        name: &args.name,
+        name: args.name.as_deref(),
         branch: match (&args.branch, &args.new_branch) {
             (Some(branch), _) => BranchChoice::Existing(branch),
             (None, Some(branch)) => BranchChoice::New(branch),
@@ -422,10 +422,8 @@ fn add(settings: &Settings, args: WorktreeAddArgs, layout: Option<&Layout>) -> i
     }
     if !args.json {
         println!(
-            "Created worktree {} on {}branch {}",
-            escape(plan.destination.display()),
-            if plan.start.is_some() { "new " } else { "" },
-            escape(&plan.branch)
+            "{}",
+            created_line(&escape(plan.destination.display()), &plan)
         );
     }
     let ensured = match layout.map(|layout| add_session(&plan, layout, args.open_session)) {
@@ -438,10 +436,16 @@ fn add(settings: &Settings, args: WorktreeAddArgs, layout: Option<&Layout>) -> i
     };
     if args.json {
         let document = Added {
-            schema_version: 1,
+            schema_version: 2,
             path: plan.destination.to_string_lossy().into_owned(),
             branch: &plan.branch,
             new_branch: plan.start.is_some(),
+            upstream: plan
+                .upstream
+                .as_ref()
+                .map(|upstream| upstream.name.as_str()),
+            ahead: plan.upstream.as_ref().map(|upstream| upstream.ahead),
+            behind: plan.upstream.as_ref().map(|upstream| upstream.behind),
             session: ensured.as_ref().map(|ensured| AddedSession {
                 created: matches!(ensured, Ensured::Created(_)),
                 recorded: ensured.recorded(),
@@ -492,7 +496,38 @@ struct Added<'a> {
     path: String,
     branch: &'a str,
     new_branch: bool,
+    upstream: Option<&'a str>,
+    ahead: Option<usize>,
+    behind: Option<usize>,
     session: Option<AddedSession<'a>>,
+}
+
+/// `Created worktree DESTINATION on branch B`, then what the branch follows: a new branch
+/// tracks its remote branch, an existing one says how far it is from its remote branch.
+pub(super) fn created_line(destination: &str, plan: &AddPlan) -> String {
+    let mut line = format!(
+        "Created worktree {destination} on {}branch {}",
+        if plan.start.is_some() { "new " } else { "" },
+        escape(&plan.branch)
+    );
+    if let Some(clause) = upstream_clause(plan) {
+        line += &format!(", {clause}");
+    }
+    line
+}
+
+/// `tracking origin/x` for a new branch, `2 behind origin/x` for an existing one; `None`
+/// without an upstream.
+pub(super) fn upstream_clause(plan: &AddPlan) -> Option<String> {
+    let upstream = plan.upstream.as_ref()?;
+    let name = escape(&upstream.name);
+    Some(match (plan.tracks(), upstream.ahead, upstream.behind) {
+        (true, _, _) => format!("tracking {name}"),
+        (false, 0, 0) => format!("up to date with {name}"),
+        (false, ahead, 0) => format!("{ahead} ahead of {name}"),
+        (false, 0, behind) => format!("{behind} behind {name}"),
+        (false, ahead, behind) => format!("{ahead} ahead, {behind} behind {name}"),
+    })
 }
 
 #[derive(Serialize)]

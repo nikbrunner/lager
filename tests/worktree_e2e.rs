@@ -236,6 +236,43 @@ impl Fixture {
         git(&self.primary, &["rev-parse", "HEAD"])
     }
 
+    /// A bare repository that is the primary's `origin`, holding `main`.
+    fn remote(&self) -> PathBuf {
+        let remote = self.base.join("remote.git");
+        git(
+            &self.base,
+            &["init", "-q", "--bare", "-b", "main", text(&remote)],
+        );
+        git(&self.primary, &["remote", "add", "origin", text(&remote)]);
+        git(&self.primary, &["push", "-q", "-u", "origin", "main"]);
+        remote
+    }
+
+    /// Pushes one more commit to `branch` of `remote` through a second clone, which creates
+    /// the branch at `main` first. The primary's remote-tracking refs stay as they are.
+    fn push_commit(&self, remote: &Path, branch: &str, file: &str) -> String {
+        let clone = self
+            .base
+            .join(format!("clone-{}", branch.replace('/', "-")));
+        if !clone.exists() {
+            git(&self.base, &["clone", "-q", text(remote), text(&clone)]);
+        }
+        let tracked = format!("origin/{branch}");
+        let known = git_output(&clone, &["rev-parse", "--verify", "--quiet", &tracked]);
+        if known.status.success() {
+            git(&clone, &["checkout", "-q", "-B", branch, &tracked]);
+        } else {
+            git(&clone, &["checkout", "-q", "-b", branch, "origin/main"]);
+        }
+        let id = commit(&clone, file, file);
+        git(&clone, &["push", "-q", "origin", branch]);
+        id
+    }
+
+    fn fetch(&self) {
+        git(&self.primary, &["fetch", "-q", "origin"]);
+    }
+
     /// Paths Git lists as worktrees, the primary first.
     fn listed(&self) -> Vec<PathBuf> {
         git(&self.primary, &["worktree", "list", "--porcelain"])
@@ -498,7 +535,7 @@ fn add_rejects_invalid_requests_before_anything_is_created() {
         (
             &["x", "--branch", "nope"],
             1,
-            "error: no local branch named nope\n",
+            "error: no local or remote branch named nope\n",
         ),
     ];
     for (args, code, message) in cases {
@@ -530,24 +567,362 @@ fn add_rejects_invalid_requests_before_anything_is_created() {
 }
 
 #[test]
-fn add_leaves_a_branch_checked_out_elsewhere_to_git_and_reports_what_remains() {
+fn add_refuses_a_branch_checked_out_elsewhere_and_names_the_worktree_before_creating_anything() {
     let fixture = Fixture::new();
+    fixture.remote();
+    git(&fixture.primary, &["branch", "feat/linked"]);
+    git(&fixture.primary, &["push", "-q", "origin", "feat/linked"]);
+    let linked = fixture.linked("elsewhere", &["feat/linked"]);
     let before = fixture.state();
 
-    let output = fixture.worktree(&["add", ".", "second", "--branch", "main"]);
+    for (args, branch, path) in [
+        (
+            ["add", ".", "second", "--branch", "main"],
+            "main",
+            &fixture.primary,
+        ),
+        (
+            ["add", ".", "second", "--branch", "feat/linked"],
+            "feat/linked",
+            &linked,
+        ),
+        (
+            ["add", ".", "second", "--branch", "origin/feat/linked"],
+            "feat/linked",
+            &linked,
+        ),
+    ] {
+        let output = fixture.worktree(&args);
+
+        assert_exit(&output, 1);
+        assert_eq!(stdout(&output), "", "{args:?}");
+        assert_eq!(
+            stderr(&output),
+            format!("error: {branch} is checked out in {}\n", path.display()),
+            "{args:?}"
+        );
+        fixture.assert_unchanged(&before);
+        assert!(!fixture.container().join("second").exists(), "{args:?}");
+    }
+}
+
+/// The `Created worktree` line of a successful `add`.
+fn created_line(output: &Output) -> String {
+    assert_exit(output, 0);
+    stdout(output)
+        .lines()
+        .find(|line| line.starts_with("Created worktree "))
+        .unwrap_or_else(|| panic!("no Created line: {output:?}"))
+        .to_owned()
+}
+
+#[test]
+fn add_takes_a_remote_branch_as_a_new_branch_that_tracks_it() {
+    let fixture = Fixture::new();
+    let remote = fixture.remote();
+    let tip = fixture.push_commit(&remote, "feat/session-tabs", "tabs");
+    fixture.fetch();
+    let main = fixture.head();
+
+    let output = fixture.worktree(&["add", ".", "--branch", "origin/feat/session-tabs"]);
+
+    assert_exit(&output, 0);
+    let destination = fixture.container().join("session-tabs");
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "branch 'feat/session-tabs' set up to track 'origin/feat/session-tabs'.\nHEAD is now at {} tabs\nCreated worktree {} on new branch feat/session-tabs, tracking origin/feat/session-tabs\n",
+            short(&tip),
+            destination.display()
+        )
+    );
+    assert_eq!(
+        git(&destination, &["rev-parse", "--abbrev-ref", "@{u}"]),
+        "origin/feat/session-tabs"
+    );
+    assert_eq!(git(&destination, &["rev-parse", "HEAD"]), tip);
+    assert_eq!(
+        git(&destination, &["symbolic-ref", "HEAD"]),
+        "refs/heads/feat/session-tabs"
+    );
+    assert_eq!(
+        fixture.branches(),
+        [format!("feat/session-tabs {tip}"), format!("main {main}")]
+    );
+}
+
+#[test]
+fn add_never_fetches_to_find_a_remote_branch() {
+    let fixture = Fixture::new();
+    let remote = fixture.remote();
+    fixture.push_commit(&remote, "feat/unfetched", "unfetched");
+    let before = fixture.state();
+
+    let output = fixture.worktree(&["add", ".", "--branch", "origin/feat/unfetched"]);
 
     assert_exit(&output, 1);
     assert_eq!(stdout(&output), "");
     assert_eq!(
         stderr(&output),
-        format!(
-            "Preparing worktree (checking out 'main')\nfatal: 'main' is already used by worktree at '{}'\nerror: worktree was not created: git exited with status 128\nremaining: directory {}\n",
-            fixture.primary.display(),
-            fixture.container().display()
-        )
+        "error: no local or remote branch named origin/feat/unfetched\n"
     );
     fixture.assert_unchanged(&before);
-    assert_eq!(tree(&fixture.container()), Vec::<String>::new());
+    assert!(!fixture.container().exists());
+}
+
+#[test]
+fn add_uses_a_local_branch_that_a_remote_branch_name_leads_to() {
+    let fixture = Fixture::new();
+    let remote = fixture.remote();
+    git(&fixture.primary, &["branch", "feat/both"]);
+    git(
+        &fixture.primary,
+        &["push", "-q", "-u", "origin", "feat/both"],
+    );
+    fixture.push_commit(&remote, "feat/both", "ahead-on-remote");
+    fixture.fetch();
+    let local = git(&fixture.primary, &["rev-parse", "feat/both"]);
+
+    let output = fixture.worktree(&["add", ".", "--branch", "origin/feat/both"]);
+
+    assert_eq!(
+        created_line(&output),
+        format!(
+            "Created worktree {} on branch feat/both, 1 behind origin/feat/both",
+            fixture.container().join("both").display()
+        )
+    );
+    assert_eq!(git(&fixture.primary, &["rev-parse", "feat/both"]), local);
+}
+
+#[test]
+fn add_says_how_far_an_existing_branch_is_from_its_remote_branch() {
+    let fixture = Fixture::new();
+    let remote = fixture.remote();
+    for branch in ["feat/behind", "feat/ahead", "feat/diverged", "feat/level"] {
+        git(&fixture.primary, &["branch", branch]);
+        git(&fixture.primary, &["push", "-q", "-u", "origin", branch]);
+    }
+    // Same name on the remote, but no upstream configured.
+    git(&fixture.primary, &["branch", "feat/loose"]);
+    git(&fixture.primary, &["push", "-q", "origin", "feat/loose"]);
+    for branch in ["feat/behind", "feat/diverged", "feat/loose"] {
+        fixture.push_commit(&remote, branch, &format!("remote-{}", &branch[5..]));
+    }
+    fixture.push_commit(&remote, "feat/diverged", "remote-more");
+    for branch in ["feat/ahead", "feat/diverged"] {
+        git(&fixture.primary, &["checkout", "-q", branch]);
+        commit(
+            &fixture.primary,
+            &format!("local-{}", &branch[5..]),
+            "local",
+        );
+    }
+    git(&fixture.primary, &["checkout", "-q", "main"]);
+    fixture.fetch();
+    let before = fixture.branches();
+    git(&fixture.primary, &["branch", "no-remote"]);
+
+    for (branch, clause) in [
+        ("feat/behind", "1 behind origin/feat/behind"),
+        ("feat/ahead", "1 ahead of origin/feat/ahead"),
+        ("feat/diverged", "1 ahead, 2 behind origin/feat/diverged"),
+        ("feat/level", "up to date with origin/feat/level"),
+        ("feat/loose", "1 behind origin/feat/loose"),
+    ] {
+        let output = fixture.worktree(&["add", ".", "--branch", branch]);
+        assert_eq!(
+            created_line(&output),
+            format!(
+                "Created worktree {} on branch {branch}, {clause}",
+                fixture.container().join(&branch[5..]).display()
+            )
+        );
+    }
+    let plain = fixture.worktree(&["add", ".", "--branch", "no-remote"]);
+    assert_eq!(
+        created_line(&plain),
+        format!(
+            "Created worktree {} on branch no-remote",
+            fixture.container().join("no-remote").display()
+        )
+    );
+    let mut after = fixture.branches();
+    after.retain(|branch| !branch.starts_with("no-remote "));
+    assert_eq!(after, before, "no branch moved");
+}
+
+#[test]
+fn add_json_states_the_upstream_and_the_distance_of_the_branch() {
+    let fixture = Fixture::new();
+    let remote = fixture.remote();
+    let tip = fixture.push_commit(&remote, "feat/remote-only", "remote-only");
+    git(&fixture.primary, &["branch", "feat/behind"]);
+    git(
+        &fixture.primary,
+        &["push", "-q", "-u", "origin", "feat/behind"],
+    );
+    fixture.push_commit(&remote, "feat/behind", "remote-behind");
+    fixture.fetch();
+
+    let tracked = fixture.worktree(&["add", ".", "--branch", "origin/feat/remote-only", "--json"]);
+    assert_exit(&tracked, 0);
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout(&tracked)).unwrap(),
+        json!({
+            "schema_version": 2,
+            "path": text(&fixture.container().join("remote-only")),
+            "branch": "feat/remote-only",
+            "new_branch": true,
+            "upstream": "origin/feat/remote-only",
+            "ahead": 0,
+            "behind": 0,
+            "session": null,
+        })
+    );
+    assert_eq!(
+        git(
+            &fixture.container().join("remote-only"),
+            &["rev-parse", "HEAD"]
+        ),
+        tip
+    );
+
+    let existing = fixture.worktree(&["add", ".", "--branch", "feat/behind", "--json"]);
+    assert_exit(&existing, 0);
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout(&existing)).unwrap(),
+        json!({
+            "schema_version": 2,
+            "path": text(&fixture.container().join("behind")),
+            "branch": "feat/behind",
+            "new_branch": false,
+            "upstream": "origin/feat/behind",
+            "ahead": 0,
+            "behind": 1,
+            "session": null,
+        })
+    );
+}
+
+#[test]
+fn add_derives_the_name_from_the_last_segment_of_the_branch() {
+    let fixture = Fixture::new();
+    git(&fixture.primary, &["branch", "feature/login"]);
+    git(&fixture.primary, &["branch", "CP-244-sign-in-page"]);
+    git(&fixture.primary, &["branch", "plain"]);
+    git(&fixture.primary, &["branch", "chore/deps/bump"]);
+
+    for (branch, name) in [
+        ("feature/login", "login"),
+        ("CP-244-sign-in-page", "CP-244-sign-in-page"),
+        ("plain", "plain"),
+        ("chore/deps/bump", "bump"),
+    ] {
+        let output = fixture.worktree(&["add", ".", "--branch", branch]);
+        assert_eq!(
+            created_line(&output),
+            format!(
+                "Created worktree {} on branch {branch}",
+                fixture.container().join(name).display()
+            )
+        );
+    }
+
+    git(&fixture.primary, &["branch", "feature/named"]);
+    let named = fixture.worktree(&["add", ".", "mine", "--branch", "feature/named"]);
+    assert_eq!(
+        created_line(&named),
+        format!(
+            "Created worktree {} on branch feature/named",
+            fixture.container().join("mine").display()
+        )
+    );
+}
+
+#[test]
+fn add_refuses_a_branch_whose_last_segment_is_no_name_and_exits_two() {
+    let fixture = Fixture::new();
+    git(&fixture.primary, &["branch", "feat/caf\u{e9}"]);
+    git(&fixture.primary, &["branch", "feat/-dash"]);
+    let before = fixture.state();
+
+    for branch in ["feat/caf\u{e9}", "feat/-dash"] {
+        let output = fixture.worktree(&["add", ".", "--branch", branch]);
+
+        assert_exit(&output, 2);
+        assert_eq!(stdout(&output), "");
+        assert_eq!(
+            stderr(&output),
+            format!("error: branch {branch} gives no valid NAME; pass NAME\n")
+        );
+        fixture.assert_unchanged(&before);
+        assert!(!fixture.container().exists());
+    }
+
+    let passed = fixture.worktree(&["add", ".", "cafe", "--branch", "feat/caf\u{e9}"]);
+    assert_exit(&passed, 0);
+}
+
+#[test]
+fn add_needs_a_name_unless_it_is_given_an_existing_branch() {
+    let fixture = Fixture::new();
+    let before = fixture.state();
+
+    for args in [
+        &["add", "."][..],
+        &["add", ".", "--new-branch", "dev/x"],
+        &["add", ".", "--start", "main"],
+    ] {
+        let output = fixture.worktree(args);
+        assert_exit(&output, 2);
+        assert_eq!(stdout(&output), "", "{args:?}");
+        assert!(stderr(&output).contains("NAME"), "{args:?}: {output:?}");
+    }
+    let start = fixture.worktree(&["add", ".", "--branch", "main", "--start", "main"]);
+    assert_exit(&start, 2);
+    assert_eq!(
+        stderr(&start),
+        "error: --start applies only to a new branch\n"
+    );
+    fixture.assert_unchanged(&before);
+    assert!(!fixture.container().exists());
+}
+
+#[test]
+fn add_labels_a_session_with_a_leading_ticket_key_at_the_end() {
+    let fixture = Fixture::with_rex(true);
+    git(&fixture.primary, &["branch", "CP-244-sign-in-page"]);
+    git(&fixture.primary, &["branch", "feat/CP-7"]);
+
+    let output = fixture.worktree(&[
+        "add",
+        ".",
+        "--branch",
+        "CP-244-sign-in-page",
+        "--create-session",
+    ]);
+    assert_exit(&output, 0);
+    assert!(
+        stdout(&output).ends_with("Created session core · Sign in page · CP-244\n"),
+        "{output:?}"
+    );
+    let output = fixture.worktree(&["add", ".", "--branch", "feat/CP-7", "--create-session"]);
+    assert_exit(&output, 0);
+    assert!(
+        stdout(&output).ends_with("Created session core · CP-7\n"),
+        "{output:?}"
+    );
+    assert_eq!(
+        fixture.creates(),
+        [
+            expected_create(
+                "core · Sign in page · CP-244",
+                &fixture.container().join("CP-244-sign-in-page")
+            ),
+            expected_create("core · CP-7", &fixture.container().join("CP-7")),
+        ]
+    );
 }
 
 #[test]
@@ -3471,10 +3846,13 @@ fn add_json_prints_one_document_and_sends_git_output_to_stderr() {
     assert_eq!(
         serde_json::from_str::<Value>(&raw).unwrap(),
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "path": text(&fixture.container().join("hotfix")),
             "branch": "hotfix",
             "new_branch": true,
+            "upstream": null,
+            "ahead": null,
+            "behind": null,
             "session": null,
         })
     );
@@ -3501,10 +3879,13 @@ fn add_json_prints_one_document_and_sends_git_output_to_stderr() {
         assert_eq!(
             serde_json::from_str::<Value>(&stdout(&output)).unwrap(),
             json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "path": text(&fixture.container().join(name)),
                 "branch": name,
                 "new_branch": name != "review",
+                "upstream": null,
+                "ahead": null,
+                "behind": null,
                 "session": {
                     "created": created,
                     "id": format!("session:{id}"),

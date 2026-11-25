@@ -35,18 +35,24 @@ impl Ensured {
 }
 
 /// The repository's name for a primary checkout; for a linked worktree also its name in
-/// words, with `-` and `_` as spaces and the first letter upper-cased.
+/// words, with `-` and `_` as spaces and the first letter upper-cased. A ticket key at the
+/// start of the name, such as `CP-244`, moves behind the words: `repo · Sign in page · CP-244`.
 pub fn label(repository: &str, worktree: Option<&str>) -> String {
     let label = match worktree {
         None => repository.to_owned(),
         Some(worktree) => {
-            let words = worktree.replace(['-', '_'], " ");
+            let (key, rest) = split_ticket_key(worktree);
+            let words = rest.replace(['-', '_'], " ");
             let mut letters = words.chars();
             let words: String = letters
                 .next()
                 .map(|first| first.to_uppercase().chain(letters).collect())
                 .unwrap_or_default();
-            format!("{repository} · {words}")
+            match (words.is_empty(), key) {
+                (_, None) => format!("{repository} · {words}"),
+                (true, Some(key)) => format!("{repository} · {key}"),
+                (false, Some(key)) => format!("{repository} · {words} · {key}"),
+            }
         }
     };
     let mut label: String = label.chars().filter(|c| !c.is_control()).collect();
@@ -56,6 +62,28 @@ pub fn label(repository: &str, worktree: Option<&str>) -> String {
     }
     label.truncate(end);
     label.trim().to_owned()
+}
+
+/// A leading ticket key `[A-Z][A-Z0-9]*-[0-9]+` that ends the name or is followed by `-` or
+/// `_`, and the rest of the name after that separator.
+fn split_ticket_key(name: &str) -> (Option<&str>, &str) {
+    let bytes = name.as_bytes();
+    let prefix = bytes
+        .iter()
+        .take_while(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        .count();
+    if prefix == 0 || !bytes[0].is_ascii_uppercase() || bytes.get(prefix) != Some(&b'-') {
+        return (None, name);
+    }
+    let digits = bytes[prefix + 1..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    let end = prefix + 1 + digits;
+    if digits == 0 || !matches!(bytes.get(end), None | Some(b'-' | b'_')) {
+        return (None, name);
+    }
+    (Some(&name[..end]), name.get(end + 1..).unwrap_or_default())
 }
 
 /// The host's label limit, stated in characters; bytes stay within it either way.
@@ -165,6 +193,31 @@ mod tests {
             "labels-web · Sign in page"
         );
         assert_eq!(label("a\tb", Some(" x\n")), "ab ·  x");
+    }
+
+    #[test]
+    fn a_leading_ticket_key_moves_behind_the_words() {
+        assert_eq!(
+            label("core", Some("CP-244-sign-in-page")),
+            "core · Sign in page · CP-244"
+        );
+        assert_eq!(
+            label("core", Some("WEBSDK2-228_color_mode")),
+            "core · Color mode · WEBSDK2-228"
+        );
+        assert_eq!(label("core", Some("CP-7")), "core · CP-7");
+        assert_eq!(label("core", Some("CP-7-")), "core · CP-7");
+    }
+
+    #[test]
+    fn a_name_without_a_ticket_key_keeps_its_words() {
+        for name in [
+            "cp-244-x", "CP-x", "CP244-x", "1P-2-x", "CP-244x", "CP--244",
+        ] {
+            let words = name.replace(['-', '_'], " ");
+            let expected = format!("core · {}{}", words[..1].to_uppercase(), &words[1..]);
+            assert_eq!(label("core", Some(name)), expected, "{name}");
+        }
     }
 
     #[test]

@@ -26,7 +26,7 @@ Lager selects the configuration path in this order:
 | `status`, `list`, `ls` | `status [--remote] [--include-archived] [--registered] [--json]` | Prints the rows `tui` shows, once its scan has finished: a table, or one JSON document with `--json`. `--remote` expands wildcards through providers; `tui` with remote discovery on shows those rows and adds the providers' unregistered and excluded repositories as candidates. `--registered` keeps declared repositories and wildcard patterns. |
 | `tui` | `tui [--remote] [--include-archived]` | Opens the inventory with its repository actions; requires TTY stdin and stdout. `--remote` starts with remote discovery on. |
 | `worktree list` | `worktree list [REPOSITORY] [--json]` | Lists the primary checkout and every linked worktree of one repository. |
-| `worktree add` | `worktree add <REPOSITORY> <NAME> [--branch EXISTING \| --new-branch NEW] [--start REF] [--path PATH] [--open-session \| --create-session] [--json]` | Creates a linked worktree through `git worktree add`. |
+| `worktree add` | `worktree add <REPOSITORY> [NAME] [--branch EXISTING \| --new-branch NEW] [--start REF] [--path PATH] [--open-session \| --create-session] [--json]` | Creates a linked worktree through `git worktree add`. |
 | `worktree remove` | `worktree remove <PATH> [--yes] [--force] [--close-session]` | Removes one linked worktree through `git worktree remove` and keeps its branch. |
 | `session open` | `session open [REPOSITORY] [NAME]` | Shows the checkout's terminal session in Rex, creating it first when there is none. |
 | `session create` | `session create <REPOSITORY> [NAME] [--json]` | Creates the checkout's session without showing it. |
@@ -205,10 +205,12 @@ untracked files. `a` asks for one name with the form of `NAME` in
 [`worktree add`](#worktree-add). The popup and the command treat a name whose
 local branch exists differently. The popup checks that branch out, which is
 `worktree add REPOSITORY NAME --branch NAME`, and its plan marks the branch
-`existing`. The command without `--branch` refuses with
+`existing`, and says how far the branch is from its remote-tracking branch. The
+command without `--branch` refuses with
 `branch already exists`. For any other name both create a new branch of that
-name at the primary checkout's HEAD. `--new-branch`, `--start` and `--path`
-belong to the command only. Enter shows the planned path and branch; nothing is
+name at the primary checkout's HEAD. A branch that is checked out in another
+worktree is refused as in the command. `--new-branch`, `--start`, `--path` and
+remote branches belong to the command only. Enter shows the planned path and branch; nothing is
 created before "Create worktree" is chosen there. `r` runs the guards of [`worktree remove`](#worktree-remove) on
 the selected worktree. A blocker is shown with its hint and no confirmation.
 Otherwise a summary of losses, path and kept branch asks with Cancel as the
@@ -576,10 +578,13 @@ A failure after the repository is found is one line on stderr and exit `1`, with
 | --- | --- | --- |
 | none | A new branch named `NAME` | The primary checkout's HEAD, also when the command runs in a linked worktree |
 | `--new-branch NEW` | A new branch named `NEW` | The primary checkout's HEAD |
-| `--branch EXISTING` | The existing local branch | Where the branch is |
+| `--branch EXISTING`, a local branch | The existing local branch | Where the branch is |
+| `--branch REMOTE/EXISTING`, a remote-tracking branch without a local branch of that name | A new local branch `EXISTING` that tracks `REMOTE/EXISTING` | `REMOTE/EXISTING` |
 | `--start REF` with a new branch | The new branch | The commit `REF` names in the local repository |
 
-`--start` applies only to a new branch, and `--branch` conflicts with `--new-branch`; both mistakes exit `2`. A new branch whose name exists, an `--branch` that names no local branch, and a `--start` that names no local commit exit `1`. Lager never fetches, never moves an existing branch, and leaves a branch that is checked out elsewhere to Git, which refuses it.
+`--branch` looks for the local branch of that name first, then for the remote-tracking branch, such as `origin/feat/x`, the way `git worktree add` guesses. With `--branch`, `NAME` is optional and defaults to the last `/` segment of the local branch name: `--branch origin/feat/session-tabs` creates the worktree `session-tabs`. A `NAME` that is given always wins. When the last segment is not a valid `NAME`, the command exits `2` with `branch BRANCH gives no valid NAME; pass NAME`.
+
+`--start` applies only to a new branch, and `--branch` conflicts with `--new-branch`; both mistakes exit `2`. `NAME` is required without `--branch`. A new branch whose name exists, a `--branch` that names no local or remote-tracking branch, a branch that is checked out in another worktree, and a `--start` that names no local commit exit `1`. The checked-out refusal reads `BRANCH is checked out in PATH`, names the primary checkout or the linked worktree that has the branch, and comes before anything is created. Lager never fetches, so a remote branch has to be known to the repository already, and never moves an existing branch.
 
 `NAME` is one path component: ASCII letters, digits, `.`, `_` and `-`, starting with a letter or digit. Git checks the branch name separately.
 
@@ -600,6 +605,19 @@ HEAD is now at 4be1d02 Release 2.3.1
 Created worktree /home/dev/repos/org/project.worktrees/hotfix on new branch hotfix
 ```
 
+The line says how the branch relates to its remote-tracking branch, when there is one:
+
+| Branch | Line ends with |
+| --- | --- |
+| A new local branch that tracks a remote branch | `on new branch feat/x, tracking origin/feat/x` |
+| An existing branch that is behind | `on branch feat/x, 2 behind origin/feat/x` |
+| An existing branch that is ahead | `on branch feat/x, 1 ahead of origin/feat/x` |
+| An existing branch with both | `on branch feat/x, 1 ahead, 2 behind origin/feat/x` |
+| An existing branch at the same commit | `on branch feat/x, up to date with origin/feat/x` |
+| A new branch, or an existing branch without a remote-tracking branch | `on new branch hotfix`, `on branch feat/x` |
+
+The remote-tracking branch of an existing local branch is the upstream it is configured with, or else the branch of the same name on the first remote that has one. Lager reads the remote-tracking refs as they are.
+
 A new worktree holds what Git checks out. Lager copies no environment files, dependencies or ignored files into it and runs none of its own hooks for it. Git runs the repository's `post-checkout` hook as it does for any `git worktree add`.
 
 When Git fails, Lager rolls nothing back. It exits `1` and names what is left, one `remaining:` line each for a directory, a new branch and worktree metadata, or `remaining: nothing`.
@@ -610,7 +628,7 @@ When Git fails, Lager rolls nothing back. It exits `1` and names what is left, o
 
 `--open-session` opens the new worktree's [session](#sessions) and shows it in Rex. `--create-session` creates the session and leaves Rex where it is, which suits agents and scripts. The two flags conflict. Without either one, `add` calls no Rex.
 
-The session belongs to the worktree's canonical path and carries its label, such as `project · Hotfix`. After the `Created worktree` line comes one more:
+The session belongs to the worktree's canonical path and carries its label, such as `project · Hotfix`. A ticket key at the start of the worktree's name moves to the end: `CP-244-sign-in-page` gives `project · Sign in page · CP-244`. A key is capital letters or digits that start with a letter, a `-` and digits, followed by `-`, `_` or the end of the name. After the `Created worktree` line comes one more:
 
 | Flag and outcome | Line |
 | --- | --- |

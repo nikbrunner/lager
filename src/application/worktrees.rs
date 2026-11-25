@@ -200,12 +200,16 @@ pub enum BranchChoice<'a> {
     /// A new branch named after the worktree.
     Named,
     New(&'a str),
+    /// A local branch, or a remote-tracking branch such as `origin/feat/x`, which gets a new
+    /// local branch that tracks it. A local branch of that name wins.
     Existing(&'a str),
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct AddRequest<'a> {
-    pub name: &'a str,
+    /// The worktree's directory name. With an existing branch, `None` takes the last `/`
+    /// segment of the local branch name.
+    pub name: Option<&'a str>,
     pub branch: BranchChoice<'a>,
     /// The revision a new branch starts at; the primary's HEAD when absent.
     pub start: Option<&'a str>,
@@ -229,6 +233,17 @@ pub enum AddError {
     Refused(String),
 }
 
+/// The remote-tracking branch a local branch follows, and how far apart the two are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Upstream {
+    /// Such as `origin/feat/x`.
+    pub name: String,
+    /// Commits only on the local branch.
+    pub ahead: usize,
+    /// Commits only on the remote-tracking branch.
+    pub behind: usize,
+}
+
 /// A validated creation: where it goes and which branch it checks out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddPlan {
@@ -237,6 +252,15 @@ pub struct AddPlan {
     pub branch: String,
     /// The commit a new branch starts at; `None` checks out the existing `branch`.
     pub start: Option<String>,
+    /// The remote-tracking branch of `branch`. A new branch with an upstream is created from
+    /// it and tracks it.
+    pub upstream: Option<Upstream>,
+}
+
+impl AddPlan {
+    pub fn tracks(&self) -> bool {
+        self.start.is_some() && self.upstream.is_some()
+    }
 }
 
 fn valid_name(name: &str) -> bool {
@@ -248,18 +272,19 @@ fn valid_name(name: &str) -> bool {
 
 /// Checks what a creation request states on its own, before any repository is read.
 pub fn check_request<G: WorktreeGit>(git: &G, request: &AddRequest<'_>) -> Result<(), String> {
-    if !valid_name(request.name) {
+    if request.name.is_some_and(|name| !valid_name(name)) {
         return Err(
             "NAME is one path component of letters, digits, `.`, `_` or `-`, starting with a letter or digit".to_owned(),
         );
     }
-    let branch = match request.branch {
-        BranchChoice::Existing(_) if request.start.is_some() => {
+    let branch = match (request.branch, request.name) {
+        (BranchChoice::Existing(_), _) if request.start.is_some() => {
             return Err("--start applies only to a new branch".to_owned());
         }
-        BranchChoice::Existing(_) => return Ok(()),
-        BranchChoice::Named => request.name,
-        BranchChoice::New(branch) => branch,
+        (BranchChoice::Existing(_), _) => return Ok(()),
+        (_, None) => return Err("NAME is required unless --branch is given".to_owned()),
+        (BranchChoice::Named, Some(name)) => name,
+        (BranchChoice::New(branch), Some(_)) => branch,
     };
     if !git.valid_branch_name(branch) {
         return Err(format!("invalid branch name: {branch}"));
@@ -275,7 +300,7 @@ pub fn request_named<'a, G: WorktreeGit>(
     name: &'a str,
 ) -> Result<AddRequest<'a>, String> {
     let named = AddRequest {
-        name,
+        name: Some(name),
         branch: BranchChoice::Named,
         start: None,
         path: None,
@@ -291,6 +316,80 @@ pub fn request_named<'a, G: WorktreeGit>(
     })
 }
 
+/// The branch an existing-branch request names.
+enum Existing {
+    /// A local branch, with the remote-tracking branch the request named.
+    Local {
+        branch: String,
+        remote: Option<String>,
+    },
+    /// A remote-tracking branch without a local branch of the same name.
+    Remote { branch: String, remote: String },
+}
+
+impl Existing {
+    fn branch(&self) -> &str {
+        match self {
+            Self::Local { branch, .. } | Self::Remote { branch, .. } => branch,
+        }
+    }
+}
+
+/// Looks for the local branch `given` first, then for the remote-tracking branch of that name.
+fn resolve_existing<G: WorktreeGit>(
+    git: &G,
+    primary: &Path,
+    given: &str,
+) -> Result<Existing, String> {
+    if git.branch_exists(primary, given)? {
+        return Ok(Existing::Local {
+            branch: given.to_owned(),
+            remote: None,
+        });
+    }
+    for remote in git.remotes(primary)? {
+        let Some(branch) = given
+            .strip_prefix(&format!("{remote}/"))
+            .filter(|branch| !branch.is_empty() && *branch != "HEAD")
+        else {
+            continue;
+        };
+        if !git.remote_branch_exists(primary, given)? {
+            continue;
+        }
+        let remote = given.to_owned();
+        let branch = branch.to_owned();
+        return Ok(if git.branch_exists(primary, &branch)? {
+            Existing::Local {
+                branch,
+                remote: Some(remote),
+            }
+        } else {
+            Existing::Remote { branch, remote }
+        });
+    }
+    Err(format!("no local or remote branch named {given}"))
+}
+
+/// The remote-tracking branch a local branch follows, else the one of the same name on the
+/// first remote that has it.
+fn upstream_of<G: WorktreeGit>(
+    git: &G,
+    primary: &Path,
+    branch: &str,
+) -> Result<Option<String>, String> {
+    if let Some(upstream) = git.upstream(primary, branch)? {
+        return Ok(Some(upstream));
+    }
+    for remote in git.remotes(primary)? {
+        let candidate = format!("{remote}/{branch}");
+        if git.remote_branch_exists(primary, &candidate)? {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
 /// Validates a creation without creating anything.
 pub fn plan_add<G: WorktreeGit, F: WorktreeFilesystem>(
     git: &G,
@@ -302,14 +401,32 @@ pub fn plan_add<G: WorktreeGit, F: WorktreeFilesystem>(
     let refused = AddError::Refused;
     check_request(git, request).map_err(AddError::Usage)?;
     let primary = &repository.primary;
-    let (branch, new) = match request.branch {
-        BranchChoice::Named => (request.name, true),
-        BranchChoice::New(branch) => (branch, true),
-        BranchChoice::Existing(branch) => (branch, false),
+    let existing = match request.branch {
+        BranchChoice::Existing(given) => {
+            Some(resolve_existing(git, primary, given).map_err(refused)?)
+        }
+        BranchChoice::Named | BranchChoice::New(_) => None,
+    };
+    let name = match (request.name, &existing, request.branch) {
+        (Some(name), _, _) => name.to_owned(),
+        (None, Some(existing), BranchChoice::Existing(given)) => {
+            let segment = existing.branch().rsplit('/').next().unwrap_or_default();
+            if !valid_name(segment) {
+                return Err(AddError::Usage(format!(
+                    "branch {given} gives no valid NAME; pass NAME"
+                )));
+            }
+            segment.to_owned()
+        }
+        (None, _, _) => {
+            return Err(AddError::Usage(
+                "NAME is required unless --branch is given".to_owned(),
+            ));
+        }
     };
     let destination = match (request.path, placement.template) {
         (Some(path), _) => path.to_path_buf(),
-        (None, None) => derived(primary, request.name),
+        (None, None) => derived(primary, &name),
         (None, Some(template)) => {
             let relative = if template.uses_relative() {
                 let canonical = |path: &Path| filesystem.canonicalize(path).ok();
@@ -329,7 +446,7 @@ pub fn plan_add<G: WorktreeGit, F: WorktreeFilesystem>(
                 None
             };
             template
-                .expand(placement.home, primary, relative.as_deref(), request.name)
+                .expand(placement.home, primary, relative.as_deref(), &name)
                 .ok_or_else(|| {
                     AddError::Usage(format!(
                         "{} has no parent directory or folder name for worktree_path; pass --path",
@@ -338,32 +455,80 @@ pub fn plan_add<G: WorktreeGit, F: WorktreeFilesystem>(
                 })?
         }
     };
-    let exists = git.branch_exists(primary, branch).map_err(refused)?;
-    let start = if new {
-        if exists {
-            return Err(refused(format!(
-                "branch already exists: {branch}; --branch checks it out"
-            )));
+    let (branch, start, upstream) = match (request.branch, existing) {
+        (BranchChoice::Existing(_), Some(existing)) => {
+            let branch = existing.branch().to_owned();
+            match existing {
+                Existing::Local { remote, .. } => {
+                    let ref_name = format!("refs/heads/{branch}");
+                    let entries = git.entries(primary).map_err(|fault| refused(fault.error))?;
+                    if let Some(entry) = entries
+                        .iter()
+                        .find(|entry| entry.branch.as_deref() == Some(ref_name.as_str()))
+                    {
+                        return Err(refused(format!(
+                            "{branch} is checked out in {}",
+                            entry.path.display()
+                        )));
+                    }
+                    let remote = match remote {
+                        Some(remote) => Some(remote),
+                        None => upstream_of(git, primary, &branch).map_err(refused)?,
+                    };
+                    let upstream = remote
+                        .map(|name| {
+                            let (ahead, behind) = git.ahead_behind(primary, &branch, &name)?;
+                            Ok(Upstream {
+                                name,
+                                ahead,
+                                behind,
+                            })
+                        })
+                        .transpose()
+                        .map_err(refused)?;
+                    (branch, None, upstream)
+                }
+                Existing::Remote { remote, .. } => {
+                    let commit = git
+                        .commit(primary, &format!("refs/remotes/{remote}"))
+                        .ok_or_else(|| refused(format!("{remote} names no commit")))?;
+                    let upstream = Upstream {
+                        name: remote,
+                        ahead: 0,
+                        behind: 0,
+                    };
+                    (branch, Some(commit), Some(upstream))
+                }
+            }
         }
-        Some(match request.start {
-            Some(revision) => git.commit(primary, revision).ok_or_else(|| {
-                refused(format!("--start does not name a local commit: {revision}"))
-            })?,
-            None => git.commit(primary, "HEAD").ok_or_else(|| {
-                refused("the primary checkout has no commit to branch from".to_owned())
-            })?,
-        })
-    } else if exists {
-        None
-    } else {
-        return Err(refused(format!("no local branch named {branch}")));
+        (choice, _) => {
+            let branch = match choice {
+                BranchChoice::New(branch) => branch,
+                _ => &name,
+            };
+            if git.branch_exists(primary, branch).map_err(refused)? {
+                return Err(refused(format!(
+                    "branch already exists: {branch}; --branch checks it out"
+                )));
+            }
+            let start = match request.start {
+                Some(revision) => git.commit(primary, revision).ok_or_else(|| {
+                    refused(format!("--start does not name a local commit: {revision}"))
+                })?,
+                None => git.commit(primary, "HEAD").ok_or_else(|| {
+                    refused("the primary checkout has no commit to branch from".to_owned())
+                })?,
+            };
+            (branch.to_owned(), Some(start), None)
+        }
     };
     validate_destination(git, filesystem, primary, &destination).map_err(refused)?;
     Ok(AddPlan {
         repository: repository.clone(),
         destination,
-        branch: branch.to_owned(),
+        branch,
         start,
+        upstream,
     })
 }
 
@@ -489,12 +654,17 @@ pub fn add<G: WorktreeGit, F: WorktreeFilesystem>(
             )
         })?;
     }
-    git.add(
-        primary,
-        &plan.destination,
-        &plan.branch,
-        plan.start.as_deref(),
-    )
+    match &plan.upstream {
+        Some(upstream) if plan.tracks() => {
+            git.add_tracking(primary, &plan.destination, &plan.branch, &upstream.name)
+        }
+        _ => git.add(
+            primary,
+            &plan.destination,
+            &plan.branch,
+            plan.start.as_deref(),
+        ),
+    }
     .map_err(|error| failure(error.message, error.cancelled, remaining()))
 }
 

@@ -830,6 +830,20 @@ fn captured(command: &mut Command) -> Result<Vec<u8>, String> {
     })
 }
 
+fn ref_exists(repository: &Path, name: &str) -> Result<bool, String> {
+    let output = git_at(repository)
+        .args(["show-ref", "--verify", "--quiet"])
+        .arg(name)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("could not start git: {error}"))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
+    }
+}
+
 fn captured_text(command: &mut Command) -> Result<String, String> {
     captured(command).map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
 }
@@ -1038,17 +1052,41 @@ impl WorktreeGit for NativeGit {
     }
 
     fn branch_exists(&self, repository: &Path, name: &str) -> Result<bool, String> {
-        let output = git_at(repository)
-            .args(["show-ref", "--verify", "--quiet"])
-            .arg(format!("refs/heads/{name}"))
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|error| format!("could not start git: {error}"))?;
-        match output.status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            _ => Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
+        ref_exists(repository, &format!("refs/heads/{name}"))
+    }
+
+    fn remote_branch_exists(&self, repository: &Path, name: &str) -> Result<bool, String> {
+        ref_exists(repository, &format!("refs/remotes/{name}"))
+    }
+
+    fn upstream(&self, repository: &Path, branch: &str) -> Result<Option<String>, String> {
+        let upstream = captured_text(git_at(repository).args([
+            "for-each-ref",
+            "--format=%(upstream:short)",
+            &format!("refs/heads/{branch}"),
+        ]))?;
+        if upstream.is_empty() || !self.remote_branch_exists(repository, &upstream)? {
+            return Ok(None);
         }
+        Ok(Some(upstream))
+    }
+
+    fn ahead_behind(
+        &self,
+        repository: &Path,
+        branch: &str,
+        remote_branch: &str,
+    ) -> Result<(usize, usize), String> {
+        let counts = captured_text(git_at(repository).args([
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("refs/heads/{branch}...refs/remotes/{remote_branch}"),
+        ]))?;
+        counts
+            .split_once('\t')
+            .and_then(|(ahead, behind)| Some((ahead.parse().ok()?, behind.parse().ok()?)))
+            .ok_or_else(|| format!("unexpected rev-list output: {counts}"))
     }
 
     fn valid_branch_name(&self, name: &str) -> bool {
@@ -1075,6 +1113,21 @@ impl WorktreeGit for NativeGit {
             .arg("--")
             .arg(destination)
             .arg(start.unwrap_or(branch));
+        native(&mut command)
+    }
+
+    fn add_tracking(
+        &self,
+        repository: &Path,
+        destination: &Path,
+        branch: &str,
+        remote_branch: &str,
+    ) -> Result<(), WorktreeCommandError> {
+        let mut command = git_at(repository);
+        command
+            .args(["worktree", "add", "--track", "-b", branch, "--"])
+            .arg(destination)
+            .arg(format!("refs/remotes/{remote_branch}"));
         native(&mut command)
     }
 

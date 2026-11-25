@@ -146,7 +146,7 @@ pub enum WorktreeCommand {
     List(WorktreeListArgs),
     #[command(
         about = "Create a linked worktree through git worktree add",
-        after_help = "Examples:\n  lager worktree add org/project hotfix\n  lager worktree add . review --branch feature/login\n  lager worktree add . spike --new-branch dev/spike --start v2.3.0 --path ../spike"
+        after_help = "Examples:\n  lager worktree add org/project hotfix\n  lager worktree add . review --branch feature/login\n  lager worktree add . --branch origin/feat/session-tabs\n  lager worktree add . spike --new-branch dev/spike --start v2.3.0 --path ../spike"
     )]
     Add(WorktreeAddArgs),
     #[command(
@@ -176,14 +176,15 @@ pub struct WorktreeAddArgs {
     pub repository: String,
     #[arg(
         value_name = "NAME",
-        help = "Directory name, and the new branch name unless a branch option is given"
+        required_unless_present = "branch",
+        help = "Directory name, and the new branch name unless a branch option is given; with --branch it defaults to the last segment of the local branch name"
     )]
-    pub name: String,
+    pub name: Option<String>,
     #[arg(
         long,
         value_name = "EXISTING",
         conflicts_with = "new_branch",
-        help = "Check out an existing local branch"
+        help = "Check out a local branch, or a remote branch such as origin/feat/x as a new local branch that tracks it"
     )]
     pub branch: Option<String>,
     #[arg(long = "new-branch", value_name = "NEW", help = "Name the new branch")]

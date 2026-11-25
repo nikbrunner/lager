@@ -481,6 +481,19 @@ pub trait WorktreeGit {
     fn origin_url(&self, repository: &Path) -> Result<Option<String>, String>;
     fn set_origin_url(&self, repository: &Path, url: &str) -> Result<(), String>;
     fn branch_exists(&self, repository: &Path, name: &str) -> Result<bool, String>;
+    /// Whether the remote-tracking ref `refs/remotes/<name>` exists, `name` being such as
+    /// `origin/feat/x`.
+    fn remote_branch_exists(&self, repository: &Path, name: &str) -> Result<bool, String>;
+    /// The remote-tracking branch, such as `origin/feat/x`, that the local `branch` is
+    /// configured to follow; `None` when it follows none or the remote ref is absent.
+    fn upstream(&self, repository: &Path, branch: &str) -> Result<Option<String>, String>;
+    /// Commits only on the local `branch`, then commits only on the remote-tracking branch.
+    fn ahead_behind(
+        &self,
+        repository: &Path,
+        branch: &str,
+        remote_branch: &str,
+    ) -> Result<(usize, usize), String>;
     fn valid_branch_name(&self, name: &str) -> bool;
     /// `git worktree add`, with `-b branch start` when `start` is given. Native streams.
     fn add(
@@ -489,6 +502,15 @@ pub trait WorktreeGit {
         destination: &Path,
         branch: &str,
         start: Option<&str>,
+    ) -> Result<(), WorktreeCommandError>;
+    /// `git worktree add --track -b branch` at the remote-tracking branch `remote_branch`.
+    /// Native streams.
+    fn add_tracking(
+        &self,
+        repository: &Path,
+        destination: &Path,
+        branch: &str,
+        remote_branch: &str,
     ) -> Result<(), WorktreeCommandError>;
     /// The working tree path the linked Git directory `git_dir` points back to.
     fn linked_path(&self, git_dir: &Path) -> Result<PathBuf, String>;

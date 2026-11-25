@@ -34,12 +34,12 @@ checkouts and registrations. SIGTERM or SIGHUP during that time takes effect whe
 the child returns; the inventory then exits `143` or `129`.
 
 For `worktree`, `1` covers a repository that cannot be found, a refused
-destination or branch, a blocked removal, local losses without `--force`, a
+destination or branch, a branch that is checked out in another worktree, a blocked removal, local losses without `--force`, a
 worktree that changed after its summary was shown, a failed Git command, any
 entry in the `errors` of `worktree list --json`, a session flag without a
 `[session]` section, and a session that fails after its worktree was created or
 removed. `2` covers invalid `NAME` or
-branch names, `--start` without a new branch, `worktree list` outside a
+branch names, a `--branch` whose last segment gives no valid `NAME` when none is passed, a missing `NAME` without `--branch`, `--start` without a new branch, `worktree list` outside a
 repository without a target, `worktree_path` placement with `{relative}` of a
 primary checkout outside `root` without `--path`, and `worktree remove` without `--yes` outside a
 terminal. Declining the removal question exits `0`; Ctrl-C at it exits `130`.

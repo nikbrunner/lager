@@ -23,7 +23,9 @@ use crate::application::worktrees::{
     self, AddPlan, Blocker, Placement, RemovalInspection, RemoveError, Repository, WorktreeRecord,
     short_id,
 };
-use crate::cli::worktree::{branch_label, kept_label, removal_losses};
+use crate::cli::worktree::{
+    branch_label, created_line, kept_label, removal_losses, upstream_clause,
+};
 use crate::domain::config::WorktreeTemplate;
 use crate::infrastructure::config::load_worktrees;
 use crate::infrastructure::desktop::NativeDesktop;
@@ -579,11 +581,7 @@ pub(super) fn run(
             eprintln!();
             match worktrees::add(&GIT, &FILES, &plan) {
                 Ok(()) => {
-                    let created = format!(
-                        "Created worktree {destination} on {}branch {}",
-                        if plan.start.is_some() { "new " } else { "" },
-                        escape(&plan.branch)
-                    );
+                    let created = created_line(&destination, &plan);
                     if !open {
                         session.message = Some(created);
                     } else if session.opening.is_some() {
@@ -1074,10 +1072,13 @@ fn sheet(popup: &Popup, bindings: &Bindings, area: Rect) -> Option<Sheet> {
         Stage::Plan {
             plan, back, open, ..
         } => {
-            let branch = match &plan.start {
+            let mut branch = match &plan.start {
                 Some(start) => format!("{} · new, at {}", escape(&plan.branch), short_id(start)),
                 None => format!("{} · existing", escape(&plan.branch)),
             };
+            if let Some(clause) = upstream_clause(plan) {
+                branch.push_str(&format!(" · {clause}"));
+            }
             let mut required = exact_field_lines(
                 "path",
                 &popup.shown(&plan.destination),

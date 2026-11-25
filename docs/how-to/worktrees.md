@@ -21,6 +21,14 @@ lager worktree add . spike --new-branch dev/spike --start v2.3.0
 
 `--start` takes a local commit, tag or branch. Lager never fetches, so fetch first when the branch or tag lives on the remote only.
 
+With `--branch`, the name is optional. Lager takes the last segment of the branch name, and a remote branch becomes a new local branch that tracks it:
+
+```sh
+lager worktree add . --branch origin/feat/session-tabs
+```
+
+This creates `~/repos/org/project.worktrees/session-tabs` on a new branch `feat/session-tabs`. For an existing local branch the output says how far it is from its remote branch, such as `2 behind origin/feat/session-tabs`; Lager never moves the branch. A branch that is checked out in another worktree is refused with the path of that worktree.
+
 ## Start a topic in its own session
 
 With a [`[session]` section](sessions.md#set-up-the-section) in the configuration, one command creates the worktree and opens it as a session in Rex:
@@ -79,7 +87,7 @@ Lager closes the session only once Git has removed the worktree, and prints `Clo
 
 In `lager tui`, select a repository and press `w`. The popup lists the same working trees as `worktree list`:
 
-- `a` asks for a name and shows the planned path and branch before anything is created. A name whose local branch exists checks that branch out; any other name creates a new branch.
+- `a` asks for a name and shows the planned path and branch before anything is created. A name whose local branch exists checks that branch out, unless another worktree has it; any other name creates a new branch.
 - `r` inspects the selected worktree and shows blockers, or the losses with Cancel as the default.
 - `c` copies the selected path.
 
