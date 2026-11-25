@@ -141,7 +141,7 @@ A record never states a fact Lager could not read. When the origin lookup fails,
 
 The session object has the keys of [`session create --json`](session-json.md#create---json) except `schema_version` and `path`: `created`, `id`, `label` and `tabs`. `created` is `false` when a session for the same path was still running, and its pane ids then come from lager's record and can be stale.
 
-Keys appear in the order listed here, and every key is always present. Git's own output, `HEAD is now at …` included, goes to stderr for this run, so stdout holds the document alone.
+Keys appear in the order listed here, and every key is always present. Git's own output, `HEAD is now at …` and the output of `--fetch` included, goes to stderr for this run, so stdout holds the document alone.
 
 | Situation                                                          | stdout       | Exit |
 | ------------------------------------------------------------------ | ------------ | ---- |

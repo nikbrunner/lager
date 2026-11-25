@@ -670,6 +670,165 @@ fn add_never_fetches_to_find_a_remote_branch() {
     assert!(!fixture.container().exists());
 }
 
+/// Adds a remote whose URL is a path that does not exist, and returns the warning it earns.
+fn broken_remote(fixture: &Fixture) -> String {
+    let missing = fixture.base.join("missing.git");
+    git(
+        &fixture.primary,
+        &["remote", "add", "broken", text(&missing)],
+    );
+    "lager: warning: fetch broken failed: ".to_owned()
+}
+
+#[test]
+fn add_fetch_updates_each_remote_on_its_own_and_warns_about_the_one_that_fails() {
+    let fixture = Fixture::new();
+    let remote = fixture.remote();
+    let tip = fixture.push_commit(&remote, "feat/fresh", "fresh");
+    let warning = broken_remote(&fixture);
+
+    let output = fixture.worktree(&["add", ".", "--branch", "origin/feat/fresh", "--fetch"]);
+
+    let destination = fixture.container().join("fresh");
+    assert_eq!(
+        created_line(&output),
+        format!(
+            "Created worktree {} on new branch feat/fresh, tracking origin/feat/fresh",
+            destination.display()
+        )
+    );
+    let warnings = stderr(&output)
+        .lines()
+        .filter(|line| line.starts_with("lager: warning:"))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(warnings.len(), 1, "{}", stderr(&output));
+    assert!(
+        warnings[0].starts_with(&warning) && warnings[0].len() > warning.len(),
+        "{warnings:?}"
+    );
+    assert_eq!(
+        git(&destination, &["rev-parse", "--abbrev-ref", "@{u}"]),
+        "origin/feat/fresh"
+    );
+    assert_eq!(git(&destination, &["rev-parse", "HEAD"]), tip);
+}
+
+#[test]
+fn add_fetch_exits_one_when_the_branch_is_still_missing_after_a_failed_fetch() {
+    let fixture = Fixture::new();
+    fixture.remote();
+    let warning = broken_remote(&fixture);
+    let before = fixture.state();
+
+    let output = fixture.worktree(&["add", ".", "--branch", "origin/feat/nope", "--fetch"]);
+
+    assert_exit(&output, 1);
+    assert_eq!(stdout(&output), "");
+    let text = stderr(&output);
+    let lines = text.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines[0].starts_with(&warning), "{text}");
+    assert_eq!(
+        lines[1],
+        "error: no local or remote branch named origin/feat/nope"
+    );
+    fixture.assert_unchanged(&before);
+}
+
+#[test]
+fn add_fetch_with_json_keeps_stdout_one_document() {
+    let fixture = Fixture::new();
+    let remote = fixture.remote();
+    fixture.push_commit(&remote, "feat/fresh", "fresh");
+    broken_remote(&fixture);
+
+    let output = fixture.worktree(&[
+        "add",
+        ".",
+        "--branch",
+        "origin/feat/fresh",
+        "--fetch",
+        "--json",
+    ]);
+
+    assert_exit(&output, 0);
+    let document: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(document["branch"], "feat/fresh");
+    assert_eq!(document["upstream"], "origin/feat/fresh");
+    assert!(stderr(&output).contains("lager: warning: fetch broken failed: "));
+    assert!(
+        stderr(&output).contains("[new branch]")
+            && stderr(&output).contains("-> origin/feat/fresh"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn add_fetch_without_branch_fetches_and_then_creates_the_new_branch() {
+    let fixture = Fixture::new();
+    let remote = fixture.remote();
+    let tip = fixture.push_commit(&remote, "feat/fresh", "fresh");
+    let head = fixture.head();
+
+    let output = fixture.worktree(&["add", ".", "topic", "--fetch"]);
+
+    assert_exit(&output, 0);
+    assert_eq!(
+        git(
+            &fixture.primary,
+            &["rev-parse", "refs/remotes/origin/feat/fresh"]
+        ),
+        tip
+    );
+    assert_eq!(
+        git(&fixture.container().join("topic"), &["rev-parse", "HEAD"]),
+        head
+    );
+}
+
+#[test]
+fn add_fetch_runs_one_plain_fetch_per_remote() {
+    let fixture = Fixture::new();
+    fixture.remote();
+    broken_remote(&fixture);
+    let shim = fixture.base.join("logging");
+    fs::create_dir_all(&shim).unwrap();
+    let log = shim.join("log");
+    fs::write(
+        shim.join("git"),
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            support::real_tool("git").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(shim.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = support::lager_with_path(&fixture.home, &fixture.config, Some(&shim))
+        .current_dir(&fixture.primary)
+        .args(["worktree", "add", ".", "topic", "--fetch"])
+        .output()
+        .unwrap();
+
+    assert_exit(&output, 0);
+    let primary = fixture.primary.display();
+    let calls = fs::read_to_string(&log).unwrap();
+    let fetches = calls
+        .lines()
+        .filter(|call| call.contains(" fetch "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fetches,
+        [
+            format!("-C {primary} fetch -- broken"),
+            format!("-C {primary} fetch -- origin"),
+        ]
+    );
+}
+
 #[test]
 fn add_uses_a_local_branch_that_a_remote_branch_name_leads_to() {
     let fixture = Fixture::new();

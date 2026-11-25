@@ -1,5 +1,6 @@
 use std::ffi::{CString, OsStr};
 use std::fs::File;
+use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path};
@@ -1034,6 +1035,39 @@ impl WorktreeGit for NativeGit {
             .lines()
             .map(str::to_owned)
             .collect())
+    }
+
+    fn fetch(&self, repository: &Path, remote: &str) -> Result<(), String> {
+        let output = git_at(repository)
+            .args(["fetch", "--", remote])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| format!("could not start git: {error}"))?;
+        if output.status.success() {
+            let mut stderr = std::io::stderr().lock();
+            let _ = stderr.write_all(&output.stdout);
+            let _ = stderr.write_all(&output.stderr);
+            return Ok(());
+        }
+        Err(String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map_or_else(
+                || {
+                    format!(
+                        "git exited with {}",
+                        super::exit_status::describe(&output.status)
+                    )
+                },
+                str::to_owned,
+            ))
+    }
+
+    fn last_fetch(&self, common_dir: &Path) -> Option<std::time::SystemTime> {
+        std::fs::metadata(common_dir.join("FETCH_HEAD"))
+            .and_then(|metadata| metadata.modified())
+            .ok()
     }
 
     fn origin_url(&self, repository: &Path) -> Result<Option<String>, String> {

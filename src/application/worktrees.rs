@@ -316,6 +316,24 @@ pub fn request_named<'a, G: WorktreeGit>(
     })
 }
 
+/// Fetches each remote on its own, so one that fails does not stop the others. Returns the
+/// remotes that failed, each with Git's reason.
+pub fn fetch_remotes<G: WorktreeGit>(
+    git: &G,
+    repository: &Repository,
+) -> Result<Vec<(String, String)>, String> {
+    let primary = &repository.primary;
+    Ok(git
+        .remotes(primary)?
+        .into_iter()
+        .filter_map(|remote| {
+            git.fetch(primary, &remote)
+                .err()
+                .map(|reason| (remote, reason))
+        })
+        .collect())
+}
+
 /// The branch an existing-branch request names.
 enum Existing {
     /// A local branch, with the remote-tracking branch the request named.

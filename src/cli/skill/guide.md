@@ -36,7 +36,7 @@ Declare and clone a first repository with `lager add org/project --register`, th
 | Delete a checkout | `lager remove org/project --unregister --yes` (`--keep-registered` keeps the declaration) |
 | List the worktrees of a repository | `lager worktree list [REPOSITORY] --json` |
 | Start a branch in a worktree | `lager worktree add org/project NAME [--branch EXISTING \| --new-branch NEW] --json` |
-| Check out an existing local or remote branch in a worktree | `lager worktree add org/project --branch origin/feat/x --json` (`NAME` defaults to the last segment of the branch; a remote branch becomes a local branch that tracks it) |
+| Check out an existing local or remote branch in a worktree | `lager worktree add org/project --branch origin/feat/x --json` (`NAME` defaults to the last segment of the branch; a remote branch becomes a local branch that tracks it; add `--fetch` to fetch every remote first) |
 | Remove a worktree, keeping its branch | `lager worktree remove PATH --yes` |
 | List the checkouts that have a session | `lager session list --json` |
 | Create a session without switching to it | `lager session create org/project [NAME] --json` |

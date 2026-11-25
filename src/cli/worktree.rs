@@ -372,6 +372,23 @@ fn add(settings: &Settings, args: WorktreeAddArgs, layout: Option<&Layout>) -> i
             return 1;
         }
     };
+    if args.fetch {
+        match worktrees::fetch_remotes(&GIT, &repository) {
+            Ok(failures) => {
+                for (remote, reason) in failures {
+                    eprintln!(
+                        "lager: warning: fetch {} failed: {}",
+                        escape(remote),
+                        escape(reason)
+                    );
+                }
+            }
+            Err(message) => {
+                error(message);
+                return 1;
+            }
+        }
+    }
     let path = args
         .path
         .as_deref()

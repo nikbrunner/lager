@@ -476,6 +476,11 @@ pub trait WorktreeGit {
     fn commit(&self, repository: &Path, revision: &str) -> Option<String>;
     /// The names of the repository's remotes.
     fn remotes(&self, repository: &Path) -> Result<Vec<String>, String>;
+    /// `git fetch <remote>`, leaving pruning to Git's configuration. Git's output goes to
+    /// stderr; the error is the first line of Git's complaint.
+    fn fetch(&self, repository: &Path, remote: &str) -> Result<(), String>;
+    /// When a fetch last wrote `FETCH_HEAD` in `common_dir`; `None` when it never did.
+    fn last_fetch(&self, common_dir: &Path) -> Option<std::time::SystemTime>;
     /// The origin URL as written, before `url.<base>.insteadOf` rewrites; `None` without an
     /// origin.
     fn origin_url(&self, repository: &Path) -> Result<Option<String>, String>;

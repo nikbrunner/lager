@@ -19,7 +19,7 @@ lager worktree add . review --branch feature/login
 lager worktree add . spike --new-branch dev/spike --start v2.3.0
 ```
 
-`--start` takes a local commit, tag or branch. Lager never fetches, so fetch first when the branch or tag lives on the remote only.
+`--start` takes a local commit, tag or branch. `--start` never fetches, so fetch first when the branch or tag lives on the remote only.
 
 With `--branch`, the name is optional. Lager takes the last segment of the branch name, and a remote branch becomes a new local branch that tracks it:
 
@@ -28,6 +28,14 @@ lager worktree add . --branch origin/feat/session-tabs
 ```
 
 This creates `~/repos/org/project.worktrees/session-tabs` on a new branch `feat/session-tabs`. For an existing local branch the output says how far it is from its remote branch, such as `2 behind origin/feat/session-tabs`; Lager never moves the branch. A branch that is checked out in another worktree is refused with the path of that worktree.
+
+A branch pushed since the last fetch is unknown to the repository. Add `--fetch` to fetch every remote first:
+
+```sh
+lager worktree add . --branch origin/feat/session-tabs --fetch
+```
+
+A remote that fails to fetch prints a warning, and the command goes on as long as the branch is found.
 
 ## Start a topic in its own session
 
@@ -93,4 +101,4 @@ In `lager tui`, select a repository and press `w`. The popup lists the same work
 
 With a [`[session]` section](sessions.md#set-up-the-section), a `●` marks each worktree that has a session, and `s` opens the selected one. The plan opens the new worktree's session after Git created it, and the removal summary closes the worktree's session after Git removed it. Each shows as a ticked line, and `s` clears the tick for that worktree.
 
-The primary checkout is removed from the table with `r`, not from the popup. `--new-branch`, `--start` and `--path` are available on the command only.
+The primary checkout is removed from the table with `r`, not from the popup. `--new-branch`, `--start`, `--path` and `--fetch` are available on the command only.
